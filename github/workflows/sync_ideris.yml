@@ -1,0 +1,26 @@
+name: Sincronizar custos Ideris
+
+on:
+  schedule:
+    - cron: '0 9 * * *'        # 06:00 (horário de Brasília) = 09:00 UTC
+  workflow_dispatch: {}          # permite rodar manualmente (botao)
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Instalar dependencias
+        run: pip install requests supabase
+
+      - name: Rodar sincronizacao de custos
+        env:
+          IDERIS_TOKEN: ${{ secrets.IDERIS_TOKEN }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: python sync_ideris.py
