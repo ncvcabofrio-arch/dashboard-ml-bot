@@ -42,6 +42,20 @@ def tg_send(text):
         print("Aviso: falha ao enviar Telegram:", e)
 
 
+def estoque_atual_de(sku):
+    """Consulta o estoque atual de um SKU na view estoque_atual."""
+    if not sku:
+        return None
+    try:
+        r = (sb.table("estoque_atual").select("estoque_atual")
+             .eq("sku", sku).limit(1).execute().data)
+        if r and r[0].get("estoque_atual") is not None:
+            return r[0]["estoque_atual"]
+    except Exception:
+        return None
+    return None
+
+
 def notificar_vendas_novas():
     if not TG_TOKEN or not TG_CHAT:
         return
@@ -64,8 +78,33 @@ def notificar_vendas_novas():
             total = it0.get("total") or 0
             titulo = it0.get("titulo") or "(produto)"
             extra = f" (+{len(itens)-1} item)" if len(itens) > 1 else ""
-            tg_send(f"🛒 <b>Nova venda!</b>\nConta: {conta}\n"
-                    f"Valor: R$ {total:,.2f}\nProduto: {titulo}{extra}")
+
+            # margem do pedido = receita - custo - comissao - frete
+            receita = sum((x.get("valor_unitario") or 0) * (x.get("quantidade") or 1) for x in itens)
+            comissao = sum((x.get("comissao") or 0) for x in itens)
+            frete = sum((x.get("frete") or 0) for x in itens)
+            tem_custo = all(x.get("custo_unitario") is not None for x in itens)
+            alerta = False
+            if tem_custo and receita > 0:
+                custo = sum((x.get("custo_unitario") or 0) * (x.get("quantidade") or 1) for x in itens)
+                margem = receita - custo - comissao - frete
+                pct = margem / receita * 100
+                alerta = pct < 17                      # margem abaixo de 17%
+                linha_margem = f"💰 Margem: R$ {margem:,.2f} ({pct:.1f}%)"
+                if alerta:
+                    linha_margem += " 🚨"
+            else:
+                linha_margem = "💰 Margem: aguardando custo do produto"
+
+            # estoque atual do produto principal
+            est = estoque_atual_de(it0.get("sku"))
+            linha_estoque = f"\n📦 Estoque atual: {float(est):g}" if est is not None else ""
+
+            cabecalho = ("🚨 <b>Nova venda — MARGEM BAIXA!</b>" if alerta
+                         else "🛒 <b>Nova venda!</b>")
+            tg_send(f"{cabecalho}\nConta: {conta}\n"
+                    f"Valor: R$ {total:,.2f}\nProduto: {titulo}{extra}\n"
+                    f"{linha_margem}{linha_estoque}")
     for oid in pedidos:
         sb.table("vendas").update({"notificado": True}).eq("order_id", oid).execute()
 
