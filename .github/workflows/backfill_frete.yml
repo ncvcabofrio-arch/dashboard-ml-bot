@@ -1,0 +1,32 @@
+name: Mutirao de frete (rodar 1x)
+
+on:
+  workflow_dispatch: {}          # só roda no botao (nao tem agendamento)
+
+# mesmo grupo dos outros robos: nao roda junto (compartilham o token)
+concurrency:
+  group: ml-puxador
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Instalar dependencias
+        run: pip install requests supabase
+
+      - name: Rodar mutirao de frete
+        env:
+          ML_CLIENT_ID:     ${{ secrets.ML_CLIENT_ID }}
+          ML_CLIENT_SECRET: ${{ secrets.ML_CLIENT_SECRET }}
+          ML_REFRESH_TOKEN: ${{ secrets.ML_REFRESH_TOKEN }}
+          SUPABASE_URL:     ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY:     ${{ secrets.SUPABASE_KEY }}
+          DIAS: '120'              # janela ampla para pegar o historico
+        run: python backfill_frete.py
