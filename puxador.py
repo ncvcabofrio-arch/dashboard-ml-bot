@@ -1,15 +1,17 @@
 """
 Puxador Mercado Livre -> Supabase (versao automatica / GitHub Actions)
++ Notificacoes no Telegram para vendas novas.
 
 - Le o refresh_token (do banco; na 1a vez, do secret ML_REFRESH_TOKEN)
 - Renova o acesso no Mercado Livre (e guarda o novo refresh_token no banco)
 - Baixa vendas e reputacao e grava no Supabase
-- Roda sozinho pelo GitHub Actions; nenhuma senha fica no codigo (vem por secrets)
+- Avisa no Telegram cada venda nova (se os secrets do Telegram existirem)
 """
 
 import os
 import time
 import urllib.parse
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
 import requests
@@ -21,12 +23,71 @@ CLIENT_SECRET = os.environ["ML_CLIENT_SECRET"]
 SEED_REFRESH = os.environ.get("ML_REFRESH_TOKEN", "")
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]
-DIAS = int(os.environ.get("DIAS", "7"))  # janela de vendas por execucao
+DIAS = int(os.environ.get("DIAS", "7"))
+
+# Telegram (opcional: se vazio, nao notifica)
+TG_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TG_CHAT = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 API = "https://api.mercadolibre.com"
 sb = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 
+# ---------------- Telegram ----------------
+def tg_send(text):
+    if not TG_TOKEN or not TG_CHAT:
+        return
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
+            data={"chat_id": TG_CHAT, "text": text, "parse_mode": "HTML"},
+            timeout=30)
+    except Exception as e:
+        print("Aviso: falha ao enviar Telegram:", e)
+
+
+def notificar_vendas_novas():
+    if not TG_TOKEN or not TG_CHAT:
+        return
+    novas = (sb.table("vendas").select("*")
+             .eq("notificado", False).eq("status", "paid").execute().data) or []
+    if not novas:
+        return
+
+    # apelidos das contas
+    contas = {c["seller_id"]: (c.get("apelido") or c["seller_id"])
+              for c in (sb.table("contas").select("seller_id, apelido")
+                        .execute().data or [])}
+
+    # agrupa por pedido
+    pedidos = defaultdict(list)
+    for r in novas:
+        pedidos[r["order_id"]].append(r)
+
+    # se vier muita coisa de uma vez, manda um resumo em vez de spam
+    if len(pedidos) > 20:
+        total = sum((its[0].get("total") or 0) for its in pedidos.values())
+        tg_send(f"🛒 <b>{len(pedidos)} vendas novas!</b>\n"
+                f"Total: R$ {total:,.2f}")
+    else:
+        for oid, itens in pedidos.items():
+            it0 = itens[0]
+            conta = contas.get(it0["seller_id"], it0["seller_id"])
+            total = it0.get("total") or 0
+            titulo = it0.get("titulo") or "(produto)"
+            extra = f" (+{len(itens)-1} item)" if len(itens) > 1 else ""
+            tg_send(f"🛒 <b>Nova venda!</b>\n"
+                    f"Conta: {conta}\n"
+                    f"Valor: R$ {total:,.2f}\n"
+                    f"Produto: {titulo}{extra}")
+
+    # marca como avisado
+    for oid in pedidos:
+        sb.table("vendas").update({"notificado": True}) \
+            .eq("order_id", oid).execute()
+
+
+# ---------------- Mercado Livre ----------------
 def renovar_token(refresh_token):
     r = requests.post(API + "/oauth/token", data={
         "grant_type": "refresh_token",
@@ -47,23 +108,20 @@ def ml_get(path, access):
 
 
 def lista_refresh_tokens():
-    """Pega os refresh tokens guardados no banco; se nao houver, usa o seed."""
     res = sb.table("contas").select("seller_id, refresh_token").execute()
     tokens = [(c["seller_id"], c["refresh_token"])
               for c in (res.data or []) if c.get("refresh_token")]
     if not tokens and SEED_REFRESH:
-        tokens = [(None, SEED_REFRESH)]  # bootstrap da 1a vez
+        tokens = [(None, SEED_REFRESH)]
     return tokens
 
 
 def puxar_conta(access, seller_id):
-    # dados da conta
     u = ml_get("/users/" + seller_id, access)
     sb.table("contas").upsert(
         {"seller_id": seller_id, "apelido": u.get("nickname")},
         on_conflict="seller_id").execute()
 
-    # reputacao (1 registro por dia)
     rep = u.get("seller_reputation") or {}
     tr = rep.get("transactions") or {}
     rt = tr.get("ratings") or {}
@@ -84,7 +142,6 @@ def puxar_conta(access, seller_id):
         "taxa_atrasos": taxa("delayed_handling_time"),
     }, on_conflict="seller_id,data").execute()
 
-    # vendas
     desde = (datetime.now(timezone.utc) - timedelta(days=DIAS)) \
         .strftime("%Y-%m-%dT%H:%M:%S.000-03:00")
     linhas, offset, total = [], 0, 1
@@ -133,13 +190,15 @@ def main():
         novo_refresh = d.get("refresh_token", refresh)
         sid = str(d.get("user_id") or seller_id)
 
-        # guarda o novo refresh token JA (antes de puxar), pra nunca perder
         sb.table("contas").upsert(
             {"seller_id": sid, "refresh_token": novo_refresh},
             on_conflict="seller_id").execute()
 
         n = puxar_conta(access, sid)
         print(f"[{sid}] {n} vendas atualizadas em {datetime.now()}")
+
+    # depois de atualizar todas as contas, avisa as vendas novas
+    notificar_vendas_novas()
 
 
 if __name__ == "__main__":
