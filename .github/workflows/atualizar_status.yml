@@ -1,0 +1,37 @@
+name: Revisar status (30 dias)
+
+on:
+  schedule:
+    - cron: '15 */6 * * *'      # a cada 6 horas (revisa os ultimos 35 dias)
+  workflow_dispatch: {}
+
+# mesmo grupo do robo rapido: nunca rodam ao mesmo tempo
+concurrency:
+  group: ml-puxador
+  cancel-in-progress: false
+
+jobs:
+  revisar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Instalar dependencias
+        run: pip install requests supabase
+
+      - name: Revisar status dos ultimos 35 dias
+        env:
+          ML_CLIENT_ID:       ${{ secrets.ML_CLIENT_ID }}
+          ML_CLIENT_SECRET:   ${{ secrets.ML_CLIENT_SECRET }}
+          ML_REFRESH_TOKEN:   ${{ secrets.ML_REFRESH_TOKEN }}
+          SUPABASE_URL:       ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY:       ${{ secrets.SUPABASE_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+          DIAS: '35'                # olha 35 dias pra tras (janela de cancelamento/devolucao)
+          DEBUG_PEDIDO: '0'         # sem o "espiao" de debug aqui
+        run: python puxador.py
