@@ -1,15 +1,10 @@
 """
-Puxador Mercado Livre -> Supabase (versao automatica / GitHub Actions)
-+ Notificacoes no Telegram para vendas novas.
-
-- Le o refresh_token (do banco; na 1a vez, do secret ML_REFRESH_TOKEN)
-- Renova o acesso no Mercado Livre (e guarda o novo refresh_token no banco)
-- Baixa vendas e reputacao e grava no Supabase
-- Avisa no Telegram cada venda nova (se os secrets do Telegram existirem)
+Puxador Mercado Livre -> Supabase (automatico / GitHub Actions)
++ Notificacoes Telegram
++ Comissao (sale_fee), Frete (envio) e calculo de repasse/margem.
 """
 
 import os
-import json
 import time
 import urllib.parse
 from collections import defaultdict
@@ -17,10 +12,6 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 from supabase import create_client
-
-# imprime 1 pedido completo no log (pra inspecionar comissao/frete/repasse)
-_DEBUG_PEDIDO = os.environ.get("DEBUG_PEDIDO", "1") == "1"
-_debug_feito = False
 
 # ---- Configuracao (vem dos secrets do GitHub) ----
 CLIENT_ID = os.environ["ML_CLIENT_ID"]
@@ -30,9 +21,10 @@ SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 DIAS = int(os.environ.get("DIAS", "7"))
 
-# Telegram (opcional: se vazio, nao notifica)
+# Telegram (opcional)
 TG_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TG_CHAT = os.environ.get("TELEGRAM_CHAT_ID", "")
+NOTIFICAR = os.environ.get("NOTIFICAR", "1") == "1"
 
 API = "https://api.mercadolibre.com"
 sb = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -43,10 +35,9 @@ def tg_send(text):
     if not TG_TOKEN or not TG_CHAT:
         return
     try:
-        requests.post(
-            f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
-            data={"chat_id": TG_CHAT, "text": text, "parse_mode": "HTML"},
-            timeout=30)
+        requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
+                      data={"chat_id": TG_CHAT, "text": text, "parse_mode": "HTML"},
+                      timeout=30)
     except Exception as e:
         print("Aviso: falha ao enviar Telegram:", e)
 
@@ -58,22 +49,14 @@ def notificar_vendas_novas():
              .eq("notificado", False).eq("status", "paid").execute().data) or []
     if not novas:
         return
-
-    # apelidos das contas
     contas = {c["seller_id"]: (c.get("apelido") or c["seller_id"])
-              for c in (sb.table("contas").select("seller_id, apelido")
-                        .execute().data or [])}
-
-    # agrupa por pedido
+              for c in (sb.table("contas").select("seller_id, apelido").execute().data or [])}
     pedidos = defaultdict(list)
     for r in novas:
         pedidos[r["order_id"]].append(r)
-
-    # se vier muita coisa de uma vez, manda um resumo em vez de spam
     if len(pedidos) > 20:
         total = sum((its[0].get("total") or 0) for its in pedidos.values())
-        tg_send(f"🛒 <b>{len(pedidos)} vendas novas!</b>\n"
-                f"Total: R$ {total:,.2f}")
+        tg_send(f"🛒 <b>{len(pedidos)} vendas novas!</b>\nTotal: R$ {total:,.2f}")
     else:
         for oid, itens in pedidos.items():
             it0 = itens[0]
@@ -81,15 +64,10 @@ def notificar_vendas_novas():
             total = it0.get("total") or 0
             titulo = it0.get("titulo") or "(produto)"
             extra = f" (+{len(itens)-1} item)" if len(itens) > 1 else ""
-            tg_send(f"🛒 <b>Nova venda!</b>\n"
-                    f"Conta: {conta}\n"
-                    f"Valor: R$ {total:,.2f}\n"
-                    f"Produto: {titulo}{extra}")
-
-    # marca como avisado
+            tg_send(f"🛒 <b>Nova venda!</b>\nConta: {conta}\n"
+                    f"Valor: R$ {total:,.2f}\nProduto: {titulo}{extra}")
     for oid in pedidos:
-        sb.table("vendas").update({"notificado": True}) \
-            .eq("order_id", oid).execute()
+        sb.table("vendas").update({"notificado": True}).eq("order_id", oid).execute()
 
 
 # ---------------- Mercado Livre ----------------
@@ -157,21 +135,7 @@ def puxar_conta(access, seller_id):
         data = ml_get(path, access)
         total = (data.get("paging") or {}).get("total", 0)
         for o in data.get("results", []):
-            global _debug_feito
-            if _DEBUG_PEDIDO and not _debug_feito:
-                print("===== ENVIO/FRETE (DEBUG) =====")
-                ship_id = (o.get("shipping") or {}).get("id")
-                print("shipping_id:", ship_id, " | total:", o.get("total_amount"))
-                if ship_id:
-                    for ep in [f"/shipments/{ship_id}/costs", f"/shipments/{ship_id}"]:
-                        try:
-                            d2 = ml_get(ep, access)
-                            print(f"----- GET {ep} -----")
-                            print(json.dumps(d2, ensure_ascii=False, indent=2)[:3000])
-                        except Exception as e:
-                            print(ep, "erro:", e)
-                print("===== FIM DEBUG =====")
-                _debug_feito = True
+            ship = (o.get("shipping") or {}).get("id")
             pay = (o.get("payments") or [{}])[0]
             for it in o.get("order_items", []):
                 item = it.get("item") or {}
@@ -183,6 +147,7 @@ def puxar_conta(access, seller_id):
                     "total": o.get("total_amount"),
                     "forma_pagamento": pay.get("payment_method_id"),
                     "comissao": it.get("sale_fee"),
+                    "shipping_id": str(ship) if ship else None,
                     "item_id": item.get("id"),
                     "sku": item.get("seller_sku"),
                     "titulo": item.get("title"),
@@ -198,8 +163,6 @@ def puxar_conta(access, seller_id):
             linhas[i:i + 200],
             on_conflict="order_id,item_id,seller_id").execute()
 
-    # cadastra automaticamente SKUs novos na tabela de produtos
-    # (custo fica em branco pra voce preencher; nao mexe nos custos ja existentes)
     skus = sorted({l["sku"] for l in linhas if l.get("sku")})
     if skus:
         try:
@@ -210,6 +173,47 @@ def puxar_conta(access, seller_id):
             print("Aviso: falha ao cadastrar SKUs novos:", e)
 
     return len(linhas)
+
+
+def enriquecer_frete(access, seller_id):
+    """Para pedidos sem frete, busca o custo do envio (senders.cost) e
+    distribui entre os itens do pedido. Só preenche o que está vazio."""
+    pend = (sb.table("vendas")
+            .select("id, order_id, shipping_id, valor_unitario, quantidade")
+            .eq("seller_id", seller_id).eq("status", "paid")
+            .is_("frete", "null").limit(400).execute().data) or []
+    pend = [r for r in pend if r.get("shipping_id")]
+    if not pend:
+        return
+
+    pedidos = defaultdict(list)
+    for r in pend:
+        pedidos[r["order_id"]].append(r)
+
+    feitos = 0
+    for oid, itens in pedidos.items():
+        if feitos >= 80:        # limita por execucao (respeita rate limit)
+            break
+        ship_id = itens[0]["shipping_id"]
+        try:
+            c = ml_get(f"/shipments/{ship_id}/costs", access)
+        except Exception:
+            continue
+        senders = c.get("senders") or []
+        frete_ped = 0
+        if senders:
+            match = [s for s in senders if str(s.get("user_id")) == str(seller_id)]
+            frete_ped = (match[0] if match else senders[0]).get("cost") or 0
+
+        total_val = sum((it["valor_unitario"] or 0) * (it["quantidade"] or 1)
+                        for it in itens) or 1
+        for it in itens:
+            val = (it["valor_unitario"] or 0) * (it["quantidade"] or 1)
+            frete_item = round(frete_ped * (val / total_val), 2)
+            sb.table("vendas").update({"frete": frete_item}).eq("id", it["id"]).execute()
+        feitos += 1
+        time.sleep(0.4)
+    print(f"Frete enriquecido em {feitos} pedidos.")
 
 
 def main():
@@ -228,10 +232,11 @@ def main():
             on_conflict="seller_id").execute()
 
         n = puxar_conta(access, sid)
+        enriquecer_frete(access, sid)
         print(f"[{sid}] {n} vendas atualizadas em {datetime.now()}")
 
-    # depois de atualizar todas as contas, avisa as vendas novas
-    notificar_vendas_novas()
+    if NOTIFICAR:
+        notificar_vendas_novas()
 
 
 if __name__ == "__main__":
