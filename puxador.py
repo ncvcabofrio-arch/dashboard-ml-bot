@@ -185,6 +185,7 @@ def puxar_conta(access, seller_id):
                     "data_aprovacao": o.get("date_created"),
                     "total": o.get("total_amount"),
                     "forma_pagamento": pay.get("payment_method_id"),
+                    "payment_id": str(pay.get("id")) if pay.get("id") else None,
                     "comissao": it.get("sale_fee"),
                     "shipping_id": str(ship) if ship else None,
                     "item_id": item.get("id"),
@@ -255,6 +256,48 @@ def enriquecer_frete(access, seller_id):
     print(f"Frete enriquecido em {feitos} pedidos.")
 
 
+def enriquecer_repasse(access, seller_id):
+    """Para pedidos sem repasse registrado, busca o valor líquido em
+    /collections/{payment_id} e grava na tabela 'repasses'."""
+    vds = (sb.table("vendas").select("order_id, payment_id")
+           .eq("seller_id", seller_id).eq("status", "paid")
+           .limit(1500).execute().data) or []
+    ja = set(r["order_id"] for r in
+             (sb.table("repasses").select("order_id")
+              .eq("seller_id", seller_id).limit(5000).execute().data or []))
+    pares = {}
+    for v in vds:
+        oid, pid = v.get("order_id"), v.get("payment_id")
+        if oid and pid and oid not in ja:
+            pares[oid] = pid
+
+    feitos = 0
+    for oid, pid in pares.items():
+        if feitos >= 80:
+            break
+        try:
+            c = ml_get(f"/collections/{pid}", access)
+        except Exception:
+            continue
+        if not isinstance(c, dict) or c.get("net_received_amount") is None:
+            continue
+        mrd = c.get("money_release_date")
+        sb.table("repasses").upsert({
+            "order_id": str(oid),
+            "payment_id": str(pid),
+            "seller_id": seller_id,
+            "transaction_amount": c.get("transaction_amount"),
+            "net_received_amount": c.get("net_received_amount"),
+            "money_release_date": mrd[:10] if mrd else None,
+            "released": c.get("released"),
+            "amount_refunded": c.get("amount_refunded"),
+            "status": c.get("status"),
+        }, on_conflict="order_id").execute()
+        feitos += 1
+        time.sleep(0.3)
+    print(f"Repasse: {feitos} pedidos registrados.")
+
+
 def main():
     tokens = lista_refresh_tokens()
     if not tokens:
@@ -272,6 +315,7 @@ def main():
 
         n = puxar_conta(access, sid)
         enriquecer_frete(access, sid)
+        enriquecer_repasse(access, sid)
         print(f"[{sid}] {n} vendas atualizadas em {datetime.now()}")
 
     if NOTIFICAR:
