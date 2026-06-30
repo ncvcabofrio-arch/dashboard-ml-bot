@@ -9,6 +9,7 @@ Puxador Mercado Livre -> Supabase (versao automatica / GitHub Actions)
 """
 
 import os
+import json
 import time
 import urllib.parse
 from collections import defaultdict
@@ -16,6 +17,10 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 from supabase import create_client
+
+# imprime 1 pedido completo no log (pra inspecionar comissao/frete/repasse)
+_DEBUG_PEDIDO = os.environ.get("DEBUG_PEDIDO", "1") == "1"
+_debug_feito = False
 
 # ---- Configuracao (vem dos secrets do GitHub) ----
 CLIENT_ID = os.environ["ML_CLIENT_ID"]
@@ -152,6 +157,12 @@ def puxar_conta(access, seller_id):
         data = ml_get(path, access)
         total = (data.get("paging") or {}).get("total", 0)
         for o in data.get("results", []):
+            global _debug_feito
+            if _DEBUG_PEDIDO and not _debug_feito:
+                print("===== PEDIDO COMPLETO (DEBUG) =====")
+                print(json.dumps(o, ensure_ascii=False, indent=2)[:6000])
+                print("===== FIM DEBUG =====")
+                _debug_feito = True
             pay = (o.get("payments") or [{}])[0]
             for it in o.get("order_items", []):
                 item = it.get("item") or {}
@@ -162,6 +173,7 @@ def puxar_conta(access, seller_id):
                     "data_aprovacao": o.get("date_created"),
                     "total": o.get("total_amount"),
                     "forma_pagamento": pay.get("payment_method_id"),
+                    "comissao": it.get("sale_fee"),
                     "item_id": item.get("id"),
                     "sku": item.get("seller_sku"),
                     "titulo": item.get("title"),
@@ -176,6 +188,18 @@ def puxar_conta(access, seller_id):
         sb.table("vendas").upsert(
             linhas[i:i + 200],
             on_conflict="order_id,item_id,seller_id").execute()
+
+    # cadastra automaticamente SKUs novos na tabela de produtos
+    # (custo fica em branco pra voce preencher; nao mexe nos custos ja existentes)
+    skus = sorted({l["sku"] for l in linhas if l.get("sku")})
+    if skus:
+        try:
+            sb.table("produtos").upsert(
+                [{"sku": s} for s in skus],
+                on_conflict="sku", ignore_duplicates=True).execute()
+        except Exception as e:
+            print("Aviso: falha ao cadastrar SKUs novos:", e)
+
     return len(linhas)
 
 
