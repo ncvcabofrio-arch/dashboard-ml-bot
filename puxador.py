@@ -282,6 +282,20 @@ def enriquecer_repasse(access, seller_id):
         if not isinstance(c, dict) or c.get("net_received_amount") is None:
             continue
         mrd = c.get("money_release_date")
+        dap = c.get("date_approved") or c.get("date_created")
+
+        # rebate = parte do desconto de campanha financiada pelo ML (total - seller)
+        rebate = 0
+        try:
+            disc = ml_get(f"/orders/{oid}/discounts", access)
+            for det in (disc.get("details") or []):
+                if det.get("supplier"):
+                    for itx in (det.get("items") or []):
+                        amts = itx.get("amounts") or {}
+                        rebate += max((amts.get("total") or 0) - (amts.get("seller") or 0), 0)
+        except Exception:
+            pass
+
         sb.table("repasses").upsert({
             "order_id": str(oid),
             "payment_id": str(pid),
@@ -289,9 +303,11 @@ def enriquecer_repasse(access, seller_id):
             "transaction_amount": c.get("transaction_amount"),
             "net_received_amount": c.get("net_received_amount"),
             "money_release_date": mrd[:10] if mrd else None,
+            "data_pagamento": dap[:10] if dap else None,
             "released": c.get("released"),
             "amount_refunded": c.get("amount_refunded"),
             "status": c.get("status"),
+            "rebate": round(rebate, 2),
         }, on_conflict="order_id").execute()
         feitos += 1
         time.sleep(0.3)
