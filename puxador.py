@@ -159,8 +159,17 @@ def puxar_conta(access, seller_id):
         for o in data.get("results", []):
             global _debug_feito
             if _DEBUG_PEDIDO and not _debug_feito:
-                print("===== PEDIDO COMPLETO (DEBUG) =====")
-                print(json.dumps(o, ensure_ascii=False, indent=2)[:6000])
+                print("===== ENVIO/FRETE (DEBUG) =====")
+                ship_id = (o.get("shipping") or {}).get("id")
+                print("shipping_id:", ship_id, " | total:", o.get("total_amount"))
+                if ship_id:
+                    for ep in [f"/shipments/{ship_id}/costs", f"/shipments/{ship_id}"]:
+                        try:
+                            d2 = ml_get(ep, access)
+                            print(f"----- GET {ep} -----")
+                            print(json.dumps(d2, ensure_ascii=False, indent=2)[:3000])
+                        except Exception as e:
+                            print(ep, "erro:", e)
                 print("===== FIM DEBUG =====")
                 _debug_feito = True
             pay = (o.get("payments") or [{}])[0]
