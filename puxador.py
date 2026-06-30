@@ -149,7 +149,7 @@ def puxar_conta(access, seller_id):
                     "comissao": it.get("sale_fee"),
                     "shipping_id": str(ship) if ship else None,
                     "item_id": item.get("id"),
-                    "sku": item.get("seller_sku"),
+                    "sku": item.get("seller_sku") or item.get("seller_custom_field"),
                     "titulo": item.get("title"),
                     "categoria_id": item.get("category_id"),
                     "quantidade": it.get("quantity"),
