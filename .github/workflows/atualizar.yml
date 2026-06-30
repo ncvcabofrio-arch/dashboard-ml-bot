@@ -5,6 +5,12 @@ on:
     - cron: '*/5 * * * *'       # a cada 5 minutos
   workflow_dispatch: {}          # permite rodar manualmente (botao)
 
+# evita que este robo e o de revisao rodem ao mesmo tempo
+# (eles compartilham o mesmo token, que e renovado a cada execucao)
+concurrency:
+  group: ml-puxador
+  cancel-in-progress: false
+
 jobs:
   atualizar:
     runs-on: ubuntu-latest
