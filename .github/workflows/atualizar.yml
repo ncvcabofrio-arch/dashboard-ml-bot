@@ -20,9 +20,11 @@ jobs:
 
       - name: Rodar puxador
         env:
-          ML_CLIENT_ID:     ${{ secrets.ML_CLIENT_ID }}
-          ML_CLIENT_SECRET: ${{ secrets.ML_CLIENT_SECRET }}
-          ML_REFRESH_TOKEN: ${{ secrets.ML_REFRESH_TOKEN }}
-          SUPABASE_URL:     ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY:     ${{ secrets.SUPABASE_KEY }}
+          ML_CLIENT_ID:       ${{ secrets.ML_CLIENT_ID }}
+          ML_CLIENT_SECRET:   ${{ secrets.ML_CLIENT_SECRET }}
+          ML_REFRESH_TOKEN:   ${{ secrets.ML_REFRESH_TOKEN }}
+          SUPABASE_URL:       ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY:       ${{ secrets.SUPABASE_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python puxador.py
