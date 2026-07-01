@@ -8,10 +8,14 @@ import os
 import time
 import urllib.parse
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
 import requests
 from supabase import create_client
+
+# quantas chamadas ao ML em paralelo no enriquecimento (frete/repasse/estado)
+WORKERS = int(os.environ.get("ENRIQ_WORKERS", "8"))
 
 # ---- Configuracao (vem dos secrets do GitHub) ----
 CLIENT_ID = os.environ["ML_CLIENT_ID"]
@@ -123,10 +127,17 @@ def renovar_token(refresh_token):
     return d
 
 
-def ml_get(path, access):
-    return requests.get(API + path,
-                        headers={"Authorization": "Bearer " + access},
-                        timeout=30).json()
+def ml_get(path, access, tentativas=3):
+    r = None
+    for i in range(tentativas):
+        r = requests.get(API + path,
+                         headers={"Authorization": "Bearer " + access}, timeout=30)
+        # 429 = limite de taxa, 5xx = instabilidade: espera e tenta de novo
+        if r.status_code == 429 or r.status_code >= 500:
+            time.sleep(0.6 * (i + 1))
+            continue
+        break
+    return r.json()
 
 
 def tipo_anuncio(lt):
@@ -241,160 +252,164 @@ def _select_all(tabela, cols, filtros=None, is_null=None):
     return out
 
 
-def enriquecer_frete(access, seller_id):
-    """Busca o custo do envio e RATEIA entre todos os itens que dividem o mesmo
-    envio (inclusive quando são pedidos diferentes de um 'carrinho'/pack).
-    Assim o frete nunca é duplicado. Só preenche o que está vazio."""
-    pend = (sb.table("vendas").select("shipping_id")
-            .eq("seller_id", seller_id).eq("status", "paid")
-            .is_("frete", "null").limit(1000).execute().data) or []
-
-    # envios distintos que ainda têm item sem frete
+def _distintos_envios(pend):
     envios, visto = [], set()
     for r in pend:
         s = r.get("shipping_id")
         if s and s not in visto:
             visto.add(s)
             envios.append(s)
+    return envios
+
+
+def _frete_de_envio(ship_id, access, seller_id):
+    """Calcula e grava o frete rateado de um envio. Retorna True se preencheu."""
+    itens = (sb.table("vendas").select("id, valor_unitario, quantidade")
+             .eq("seller_id", seller_id).eq("shipping_id", ship_id)
+             .eq("status", "paid").execute().data) or []
+    if not itens:
+        return False
+    try:
+        c = ml_get(f"/shipments/{ship_id}/costs", access)
+    except Exception:
+        return False
+    senders = (c or {}).get("senders") or []
+    frete_env = 0
+    if senders:
+        match = [s for s in senders if str(s.get("user_id")) == str(seller_id)]
+        frete_env = (match[0] if match else senders[0]).get("cost") or 0
+    total_val = sum((it["valor_unitario"] or 0) * (it["quantidade"] or 1) for it in itens) or 1
+    ok = False
+    for it in itens:
+        val = (it["valor_unitario"] or 0) * (it["quantidade"] or 1)
+        frete_item = round(frete_env * (val / total_val), 2)
+        try:
+            sb.table("vendas").update({"frete": frete_item}).eq("id", it["id"]).execute()
+            ok = True
+        except Exception:
+            pass
+    return ok
+
+
+def enriquecer_frete(access, seller_id, limite=80):
+    """Frete rateado por envio (paralelo). Só preenche o que está vazio."""
+    pend = _select_all("vendas", "shipping_id",
+                       {"seller_id": seller_id, "status": "paid"}, is_null="frete")
+    envios = _distintos_envios(pend)[:limite]
     if not envios:
         return 0
-
+    print(f"Frete: {len(envios)} envios pendentes (paralelo x{WORKERS})...", flush=True)
     feitos = 0
-    for ship_id in envios:
-        if feitos >= 80:        # limita por execucao (respeita rate limit)
-            break
-        # TODOS os itens desse envio (pode ser de vários pedidos = carrinho)
-        itens = (sb.table("vendas")
-                 .select("id, valor_unitario, quantidade")
-                 .eq("seller_id", seller_id).eq("shipping_id", ship_id)
-                 .eq("status", "paid").execute().data) or []
-        if not itens:
-            continue
-        try:
-            c = ml_get(f"/shipments/{ship_id}/costs", access)
-        except Exception:
-            continue
-        senders = c.get("senders") or []
-        frete_env = 0
-        if senders:
-            match = [s for s in senders if str(s.get("user_id")) == str(seller_id)]
-            frete_env = (match[0] if match else senders[0]).get("cost") or 0
-
-        total_val = sum((it["valor_unitario"] or 0) * (it["quantidade"] or 1)
-                        for it in itens) or 1
-        for it in itens:
-            val = (it["valor_unitario"] or 0) * (it["quantidade"] or 1)
-            frete_item = round(frete_env * (val / total_val), 2)
-            sb.table("vendas").update({"frete": frete_item}).eq("id", it["id"]).execute()
-        feitos += 1
-        time.sleep(0.4)
-    print(f"Frete: {feitos} envios rateados.")
+    with ThreadPoolExecutor(max_workers=WORKERS) as ex:
+        for i, ok in enumerate(ex.map(lambda s: _frete_de_envio(s, access, seller_id), envios)):
+            if ok:
+                feitos += 1
+            if (i + 1) % 200 == 0:
+                print(f"  ...frete {i+1}/{len(envios)}", flush=True)
+    print(f"Frete: {feitos} envios rateados.", flush=True)
     return feitos
+
+
+def _local_de_envio(ship_id, access, seller_id):
+    """Busca UF/estado/cidade do envio e grava nos itens. Retorna True se ok."""
+    try:
+        sj = ml_get(f"/shipments/{ship_id}", access)
+    except Exception:
+        return False
+    ra = (sj or {}).get("receiver_address") or {}
+    st = ra.get("state") or {}
+    ci = ra.get("city") or {}
+    uf = (st.get("id") or "").replace("BR-", "").strip() or "ND"  # 'ND' evita reprocessar sem fim
+    dados = {"uf": uf, "estado": st.get("name"), "cidade": ci.get("name")}
+    try:
+        sb.table("vendas").update(dados).eq("seller_id", seller_id) \
+            .eq("shipping_id", ship_id).eq("status", "paid").execute()
+        return True
+    except Exception:
+        return False
 
 
 def enriquecer_local(access, seller_id, limite=80):
-    """Preenche UF/estado/cidade do comprador a partir do envio
-    (/shipments/{id} -> receiver_address). Só mexe no que está sem UF.
-    Resumível: cada envio preenchido sai da fila."""
+    """Preenche UF/estado/cidade do comprador (/shipments/{id}) — paralelo."""
     pend = _select_all("vendas", "shipping_id",
                        {"seller_id": seller_id, "status": "paid"}, is_null="uf")
-    envios, visto = [], set()
-    for r in pend:
-        s = r.get("shipping_id")
-        if s and s not in visto:
-            visto.add(s)
-            envios.append(s)
+    envios = _distintos_envios(pend)[:limite]
     if not envios:
         return 0
-
-    print(f"Local: {len(envios)} envios pendentes nesta conta...", flush=True)
+    print(f"Local: {len(envios)} envios pendentes (paralelo x{WORKERS})...", flush=True)
     feitos = 0
-    for ship_id in envios:
-        if feitos >= limite:
-            break
-        if feitos and feitos % 50 == 0:
-            print(f"  ...estado/cidade {feitos}/{len(envios)}", flush=True)
-        try:
-            sj = ml_get(f"/shipments/{ship_id}", access)
-        except Exception:
-            continue
-        ra = (sj or {}).get("receiver_address") or {}
-        st = ra.get("state") or {}
-        ci = ra.get("city") or {}
-        uf = (st.get("id") or "").replace("BR-", "").strip() or "ND"  # 'ND' evita reprocessar sem fim
-        dados = {"uf": uf, "estado": st.get("name"), "cidade": ci.get("name")}
-        sb.table("vendas").update(dados).eq("seller_id", seller_id) \
-            .eq("shipping_id", ship_id).eq("status", "paid").execute()
-        feitos += 1
-        time.sleep(0.3)
-    print(f"Local: {feitos} envios localizados.")
+    with ThreadPoolExecutor(max_workers=WORKERS) as ex:
+        for i, ok in enumerate(ex.map(lambda s: _local_de_envio(s, access, seller_id), envios)):
+            if ok:
+                feitos += 1
+            if (i + 1) % 200 == 0:
+                print(f"  ...estado/cidade {i+1}/{len(envios)}", flush=True)
+    print(f"Local: {feitos} envios localizados.", flush=True)
     return feitos
 
 
+def _repasse_de_pedido(oid, pid, access, seller_id):
+    """Busca o líquido (/collections) e o rebate (/orders/discounts). Retorna
+    o dict pronto pra gravar, ou None se ainda não há repasse."""
+    try:
+        c = ml_get(f"/collections/{pid}", access)
+    except Exception:
+        return None
+    if not isinstance(c, dict) or c.get("net_received_amount") is None:
+        return None
+    mrd = c.get("money_release_date")
+    dap = c.get("date_approved") or c.get("date_created")
+    rebate = 0
+    try:
+        disc = ml_get(f"/orders/{oid}/discounts", access)
+        for det in (disc.get("details") or []):
+            if det.get("supplier"):
+                for itx in (det.get("items") or []):
+                    amts = itx.get("amounts") or {}
+                    rebate += max((amts.get("total") or 0) - (amts.get("seller") or 0), 0)
+    except Exception:
+        pass
+    return {
+        "order_id": str(oid), "payment_id": str(pid), "seller_id": seller_id,
+        "transaction_amount": c.get("transaction_amount"),
+        "net_received_amount": c.get("net_received_amount"),
+        "money_release_date": mrd[:10] if mrd else None,
+        "data_pagamento": dap[:10] if dap else None,
+        "released": c.get("released"), "amount_refunded": c.get("amount_refunded"),
+        "status": c.get("status"), "rebate": round(rebate, 2),
+    }
+
+
 def enriquecer_repasse(access, seller_id, limite=80):
-    """Para pedidos sem repasse registrado, busca o valor líquido em
-    /collections/{payment_id} e grava na tabela 'repasses'.
-    'limite' = quantos pedidos NOVOS processar por execução (no mutirão usamos
-    um número alto pra terminar de uma vez)."""
-    # IMPORTANTE: paginar (o PostgREST corta em 1000 linhas por consulta).
+    """Repasse + rebate por pedido (paralelo). Grava em lote na tabela 'repasses'."""
     vds = _select_all("vendas", "order_id, payment_id",
                       {"seller_id": seller_id, "status": "paid"})
     ja = set(r["order_id"] for r in
              _select_all("repasses", "order_id", {"seller_id": seller_id}))
-    pares = {}
+    pares = []
     for v in vds:
         oid, pid = v.get("order_id"), v.get("payment_id")
         if oid and pid and oid not in ja:
-            pares[oid] = pid
+            pares.append((oid, pid))
+    pares = pares[:limite]
+    if not pares:
+        print("Repasse: 0 pendentes.", flush=True)
+        return 0
+    print(f"Repasse: {len(pares)} pedidos pendentes (paralelo x{WORKERS})...", flush=True)
 
-    if pares:
-        print(f"Repasse: {len(pares)} pedidos pendentes nesta conta...", flush=True)
+    resultados = []
+    with ThreadPoolExecutor(max_workers=WORKERS) as ex:
+        for i, r in enumerate(ex.map(lambda p: _repasse_de_pedido(p[0], p[1], access, seller_id), pares)):
+            if r:
+                resultados.append(r)
+            if (i + 1) % 200 == 0:
+                print(f"  ...repasse {i+1}/{len(pares)} (ok: {len(resultados)})", flush=True)
 
-    feitos, tentados = 0, 0
-    for oid, pid in pares.items():
-        if feitos >= limite:
-            break
-        tentados += 1
-        if tentados % 50 == 0:
-            print(f"  ...repasse {tentados}/{len(pares)} (gravados: {feitos})", flush=True)
-        try:
-            c = ml_get(f"/collections/{pid}", access)
-        except Exception:
-            continue
-        if not isinstance(c, dict) or c.get("net_received_amount") is None:
-            continue
-        mrd = c.get("money_release_date")
-        dap = c.get("date_approved") or c.get("date_created")
-
-        # rebate = parte do desconto de campanha financiada pelo ML (total - seller)
-        rebate = 0
-        try:
-            disc = ml_get(f"/orders/{oid}/discounts", access)
-            for det in (disc.get("details") or []):
-                if det.get("supplier"):
-                    for itx in (det.get("items") or []):
-                        amts = itx.get("amounts") or {}
-                        rebate += max((amts.get("total") or 0) - (amts.get("seller") or 0), 0)
-        except Exception:
-            pass
-
-        sb.table("repasses").upsert({
-            "order_id": str(oid),
-            "payment_id": str(pid),
-            "seller_id": seller_id,
-            "transaction_amount": c.get("transaction_amount"),
-            "net_received_amount": c.get("net_received_amount"),
-            "money_release_date": mrd[:10] if mrd else None,
-            "data_pagamento": dap[:10] if dap else None,
-            "released": c.get("released"),
-            "amount_refunded": c.get("amount_refunded"),
-            "status": c.get("status"),
-            "rebate": round(rebate, 2),
-        }, on_conflict="order_id").execute()
-        feitos += 1
-        time.sleep(0.3)
-    print(f"Repasse: {feitos} pedidos registrados.")
-    return feitos
+    for i in range(0, len(resultados), 200):
+        lote = resultados[i:i + 200]
+        _retry(lambda l=lote: sb.table("repasses").upsert(l, on_conflict="order_id").execute())
+    print(f"Repasse: {len(resultados)} gravados (de {len(pares)}).", flush=True)
+    return len(resultados)
 
 
 def main():
