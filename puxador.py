@@ -339,12 +339,21 @@ def main():
             on_conflict="seller_id").execute()
 
         n = puxar_conta(access, sid)
-        enriquecer_frete(access, sid)
-        enriquecer_repasse(access, sid)
+        try:
+            enriquecer_frete(access, sid)
+        except Exception as e:
+            print("Aviso: falha no frete:", e)
+        try:
+            enriquecer_repasse(access, sid)
+        except Exception as e:
+            print("Aviso: falha no repasse:", e)
         print(f"[{sid}] {n} vendas atualizadas em {datetime.now()}")
 
     if NOTIFICAR:
-        notificar_vendas_novas()
+        try:
+            notificar_vendas_novas()
+        except Exception as e:
+            print("Aviso: falha na notificacao:", e)
 
 
 if __name__ == "__main__":
