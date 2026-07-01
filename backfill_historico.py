@@ -139,15 +139,15 @@ def main():
 
     for sid, access in contas:
         print(f"[{sid}] === FRETE ===", flush=True)
-        for _ in range(400):
+        for _ in range(20):
             try:
-                if enriquecer_frete(access, sid) == 0:
+                if enriquecer_frete(access, sid, limite=100000) == 0:
                     break
             except Exception as e:
                 print("  frete erro:", str(e)[:80], flush=True); time.sleep(3)
 
         print(f"[{sid}] === REPASSE/REBATE ===", flush=True)
-        for _ in range(30):
+        for _ in range(20):
             try:
                 if enriquecer_repasse(access, sid, limite=100000) == 0:
                     break
@@ -155,7 +155,7 @@ def main():
                 print("  repasse erro:", str(e)[:80], flush=True); time.sleep(5)
 
         print(f"[{sid}] === ESTADO/CIDADE ===", flush=True)
-        for _ in range(30):
+        for _ in range(20):
             try:
                 if enriquecer_local(access, sid, limite=100000) == 0:
                     break
