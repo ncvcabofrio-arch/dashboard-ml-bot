@@ -24,12 +24,13 @@ on:
           - '2025-11'
           - '2025-12'
       modo:
-        description: 'tudo = puxa pedidos + enriquece | enriquecer = só frete/repasse/estado (não re-puxa)'
+        description: 'tudo = puxa + enriquece | puxar = só pedidos | enriquecer = só frete/repasse/estado'
         required: false
         default: 'tudo'
         type: choice
         options:
           - tudo
+          - puxar
           - enriquecer
 
 concurrency:
