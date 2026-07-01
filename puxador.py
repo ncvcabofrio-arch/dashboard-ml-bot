@@ -307,10 +307,13 @@ def enriquecer_local(access, seller_id, limite=80):
     if not envios:
         return 0
 
+    print(f"Local: {len(envios)} envios pendentes nesta conta...", flush=True)
     feitos = 0
     for ship_id in envios:
         if feitos >= limite:
             break
+        if feitos and feitos % 50 == 0:
+            print(f"  ...estado/cidade {feitos}/{len(envios)}", flush=True)
         try:
             sj = ml_get(f"/shipments/{ship_id}", access)
         except Exception:
@@ -344,10 +347,16 @@ def enriquecer_repasse(access, seller_id, limite=80):
         if oid and pid and oid not in ja:
             pares[oid] = pid
 
-    feitos = 0
+    if pares:
+        print(f"Repasse: {len(pares)} pedidos pendentes nesta conta...", flush=True)
+
+    feitos, tentados = 0, 0
     for oid, pid in pares.items():
         if feitos >= limite:
             break
+        tentados += 1
+        if tentados % 50 == 0:
+            print(f"  ...repasse {tentados}/{len(pares)} (gravados: {feitos})", flush=True)
         try:
             c = ml_get(f"/collections/{pid}", access)
         except Exception:
