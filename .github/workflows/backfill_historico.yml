@@ -3,14 +3,26 @@ name: Mutirao historico (por periodo)
 on:
   workflow_dispatch:
     inputs:
-      data_ini:
-        description: 'Data inicial (AAAA-MM-DD)'
+      periodo:
+        description: 'Período a puxar (escolha na lista)'
         required: true
-        default: '2026-01-01'
-      data_fim:
-        description: 'Data final (AAAA-MM-DD) — deixe vazio para "hoje"'
-        required: false
-        default: ''
+        default: '2026-ano'
+        type: choice
+        options:
+          - '2026-ano'      # 2026 inteiro (até hoje)
+          - '2025-ano'      # 2025 inteiro
+          - '2025-01'
+          - '2025-02'
+          - '2025-03'
+          - '2025-04'
+          - '2025-05'
+          - '2025-06'
+          - '2025-07'
+          - '2025-08'
+          - '2025-09'
+          - '2025-10'
+          - '2025-11'
+          - '2025-12'
       modo:
         description: 'tudo = puxa pedidos + enriquece | enriquecer = só frete/repasse/estado (não re-puxa)'
         required: false
@@ -33,8 +45,25 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+
+      - name: Definir datas do periodo escolhido
+        run: |
+          periodo="${{ inputs.periodo }}"
+          if [ "$periodo" = "2026-ano" ]; then
+            ini="2026-01-01"; fim=""                       # vazio = até hoje
+          elif [ "$periodo" = "2025-ano" ]; then
+            ini="2025-01-01"; fim="2025-12-31"
+          else
+            ini="${periodo}-01"
+            fim=$(date -d "${ini} +1 month -1 day" +%F)     # último dia do mês
+          fi
+          echo "DATA_INI=${ini}" >> "$GITHUB_ENV"
+          echo "DATA_FIM=${fim}" >> "$GITHUB_ENV"
+          echo "Período: ${periodo}  ->  de ${ini} até ${fim:-hoje}"
+
       - name: Instalar dependencias
         run: pip install requests supabase
+
       - name: Rodar mutirao historico
         env:
           ML_CLIENT_ID:     ${{ secrets.ML_CLIENT_ID }}
@@ -42,7 +71,6 @@ jobs:
           ML_REFRESH_TOKEN: ${{ secrets.ML_REFRESH_TOKEN }}
           SUPABASE_URL:     ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY:     ${{ secrets.SUPABASE_KEY }}
-          DATA_INI:         ${{ inputs.data_ini }}
-          DATA_FIM:         ${{ inputs.data_fim }}
           MODO:             ${{ inputs.modo }}
-        run: python backfill_historico.py
+          PYTHONUNBUFFERED: '1'
+        run: python -u backfill_historico.py
