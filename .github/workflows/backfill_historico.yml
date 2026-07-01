@@ -1,7 +1,24 @@
-name: Mutirao historico (desde janeiro)
+name: Mutirao historico (por periodo)
 
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      data_ini:
+        description: 'Data inicial (AAAA-MM-DD)'
+        required: true
+        default: '2026-01-01'
+      data_fim:
+        description: 'Data final (AAAA-MM-DD) — deixe vazio para "hoje"'
+        required: false
+        default: ''
+      modo:
+        description: 'tudo = puxa pedidos + enriquece | enriquecer = só frete/repasse/estado (não re-puxa)'
+        required: false
+        default: 'tudo'
+        type: choice
+        options:
+          - tudo
+          - enriquecer
 
 concurrency:
   group: ml-puxador
@@ -25,6 +42,7 @@ jobs:
           ML_REFRESH_TOKEN: ${{ secrets.ML_REFRESH_TOKEN }}
           SUPABASE_URL:     ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY:     ${{ secrets.SUPABASE_KEY }}
-          ANO_INI: '2026'          # ano inicial
-          MES_INI: '1'             # mês inicial (1 = janeiro)
+          DATA_INI:         ${{ inputs.data_ini }}
+          DATA_FIM:         ${{ inputs.data_fim }}
+          MODO:             ${{ inputs.modo }}
         run: python backfill_historico.py
