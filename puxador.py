@@ -216,44 +216,53 @@ def puxar_conta(access, seller_id):
 
 
 def enriquecer_frete(access, seller_id):
-    """Para pedidos sem frete, busca o custo do envio (senders.cost) e
-    distribui entre os itens do pedido. Só preenche o que está vazio."""
-    pend = (sb.table("vendas")
-            .select("id, order_id, shipping_id, valor_unitario, quantidade")
+    """Busca o custo do envio e RATEIA entre todos os itens que dividem o mesmo
+    envio (inclusive quando são pedidos diferentes de um 'carrinho'/pack).
+    Assim o frete nunca é duplicado. Só preenche o que está vazio."""
+    pend = (sb.table("vendas").select("shipping_id")
             .eq("seller_id", seller_id).eq("status", "paid")
-            .is_("frete", "null").limit(400).execute().data) or []
-    pend = [r for r in pend if r.get("shipping_id")]
-    if not pend:
+            .is_("frete", "null").limit(1000).execute().data) or []
+
+    # envios distintos que ainda têm item sem frete
+    envios, visto = [], set()
+    for r in pend:
+        s = r.get("shipping_id")
+        if s and s not in visto:
+            visto.add(s)
+            envios.append(s)
+    if not envios:
         return
 
-    pedidos = defaultdict(list)
-    for r in pend:
-        pedidos[r["order_id"]].append(r)
-
     feitos = 0
-    for oid, itens in pedidos.items():
+    for ship_id in envios:
         if feitos >= 80:        # limita por execucao (respeita rate limit)
             break
-        ship_id = itens[0]["shipping_id"]
+        # TODOS os itens desse envio (pode ser de vários pedidos = carrinho)
+        itens = (sb.table("vendas")
+                 .select("id, valor_unitario, quantidade")
+                 .eq("seller_id", seller_id).eq("shipping_id", ship_id)
+                 .eq("status", "paid").execute().data) or []
+        if not itens:
+            continue
         try:
             c = ml_get(f"/shipments/{ship_id}/costs", access)
         except Exception:
             continue
         senders = c.get("senders") or []
-        frete_ped = 0
+        frete_env = 0
         if senders:
             match = [s for s in senders if str(s.get("user_id")) == str(seller_id)]
-            frete_ped = (match[0] if match else senders[0]).get("cost") or 0
+            frete_env = (match[0] if match else senders[0]).get("cost") or 0
 
         total_val = sum((it["valor_unitario"] or 0) * (it["quantidade"] or 1)
                         for it in itens) or 1
         for it in itens:
             val = (it["valor_unitario"] or 0) * (it["quantidade"] or 1)
-            frete_item = round(frete_ped * (val / total_val), 2)
+            frete_item = round(frete_env * (val / total_val), 2)
             sb.table("vendas").update({"frete": frete_item}).eq("id", it["id"]).execute()
         feitos += 1
         time.sleep(0.4)
-    print(f"Frete enriquecido em {feitos} pedidos.")
+    print(f"Frete: {feitos} envios rateados.")
 
 
 def enriquecer_repasse(access, seller_id):
