@@ -107,49 +107,60 @@ def _retry(fn, tentativas=4):
 
 def main():
     js = janelas()
+
+    # renova token de todas as contas (e já guarda o access pra reusar)
+    contas = []
     for seller_id, refresh in lista_refresh_tokens():
         d = renovar_token(refresh)
-        access = d["access_token"]
         sid = str(d.get("user_id") or seller_id)
         sb.table("contas").upsert(
             {"seller_id": sid, "refresh_token": d.get("refresh_token", refresh)},
             on_conflict="seller_id").execute()
+        contas.append((sid, d["access_token"]))
 
-        if MODO != "enriquecer":
+    # ===== FASE 1: PUXAR os pedidos de TODAS as contas primeiro (rápido) =====
+    if MODO != "enriquecer":
+        for sid, access in contas:
+            print(f"[{sid}] === PUXANDO PEDIDOS ===", flush=True)
             for de, ate, label in js:
                 try:
                     n = pull_range(access, sid, de, ate)
-                    print(f"[{sid}] {label}: {n} itens")
+                    print(f"[{sid}] {label}: {n} itens", flush=True)
                 except Exception as e:
-                    print(f"[{sid}] {label}: ERRO {str(e)[:80]}")
-        else:
-            print(f"[{sid}] MODO=enriquecer: pulando a puxada de pedidos.")
+                    print(f"[{sid}] {label}: ERRO {str(e)[:80]}", flush=True)
+    else:
+        print("MODO=enriquecer: pulando a puxada de pedidos.", flush=True)
 
-        print(f"[{sid}] preenchendo frete...")
+    # ===== FASE 2: ENRIQUECER (frete, repasse, estado/cidade) conta a conta =====
+    if MODO == "puxar":
+        print("MODO=puxar: pedidos puxados. Enriquecimento pulado "
+              "(rode depois com MODO=enriquecer).", flush=True)
+        return
+
+    for sid, access in contas:
+        print(f"[{sid}] === FRETE ===", flush=True)
         for _ in range(400):
             try:
                 if enriquecer_frete(access, sid) == 0:
                     break
             except Exception as e:
-                print("  frete erro:", str(e)[:80]); time.sleep(3)
+                print("  frete erro:", str(e)[:80], flush=True); time.sleep(3)
 
-        print(f"[{sid}] preenchendo repasse/rebate...")
-        # limite alto = processa TODOS os pedidos da conta de uma vez.
-        # o range externo é só rede de segurança pra quedas de conexão.
+        print(f"[{sid}] === REPASSE/REBATE ===", flush=True)
         for _ in range(30):
             try:
                 if enriquecer_repasse(access, sid, limite=100000) == 0:
                     break
             except Exception as e:
-                print("  repasse erro:", str(e)[:80]); time.sleep(5)
+                print("  repasse erro:", str(e)[:80], flush=True); time.sleep(5)
 
-        print(f"[{sid}] preenchendo estado/cidade...")
+        print(f"[{sid}] === ESTADO/CIDADE ===", flush=True)
         for _ in range(30):
             try:
                 if enriquecer_local(access, sid, limite=100000) == 0:
                     break
             except Exception as e:
-                print("  local erro:", str(e)[:80]); time.sleep(5)
+                print("  local erro:", str(e)[:80], flush=True); time.sleep(5)
 
     try:
         sb.rpc("backfill_custos").execute()
