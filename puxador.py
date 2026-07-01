@@ -129,6 +129,12 @@ def ml_get(path, access):
                         timeout=30).json()
 
 
+def tipo_anuncio(lt):
+    """gold_pro = Premium, gold_special = Clássico (mantém o resto como veio)."""
+    return {"gold_pro": "Premium", "gold_special": "Clássico",
+            "gold_premium": "Premium", "gold": "Clássico"}.get(lt, lt)
+
+
 def lista_refresh_tokens():
     res = sb.table("contas").select("seller_id, refresh_token").execute()
     tokens = [(c["seller_id"], c["refresh_token"])
@@ -185,8 +191,10 @@ def puxar_conta(access, seller_id):
                     "data_aprovacao": o.get("date_created"),
                     "total": o.get("total_amount"),
                     "forma_pagamento": pay.get("payment_method_id"),
+                    "tipo_pagamento": pay.get("payment_type"),
                     "payment_id": str(pay.get("id")) if pay.get("id") else None,
                     "comissao": it.get("sale_fee"),
+                    "tipo_anuncio": tipo_anuncio(it.get("listing_type_id")),
                     "shipping_id": str(ship) if ship else None,
                     "item_id": item.get("id"),
                     "sku": item.get("seller_sku") or item.get("seller_custom_field"),
@@ -215,6 +223,24 @@ def puxar_conta(access, seller_id):
     return len(linhas)
 
 
+def _select_all(tabela, cols, filtros=None, is_null=None):
+    """Lê TODAS as linhas (o PostgREST devolve no máx. 1000 por vez, então
+    paginamos com .range até acabar)."""
+    out, passo, ini = [], 1000, 0
+    while True:
+        q = sb.table(tabela).select(cols)
+        for k, v in (filtros or {}).items():
+            q = q.eq(k, v)
+        if is_null:
+            q = q.is_(is_null, "null")
+        linhas = (q.range(ini, ini + passo - 1).execute().data) or []
+        out += linhas
+        if len(linhas) < passo:
+            break
+        ini += passo
+    return out
+
+
 def enriquecer_frete(access, seller_id):
     """Busca o custo do envio e RATEIA entre todos os itens que dividem o mesmo
     envio (inclusive quando são pedidos diferentes de um 'carrinho'/pack).
@@ -231,7 +257,7 @@ def enriquecer_frete(access, seller_id):
             visto.add(s)
             envios.append(s)
     if not envios:
-        return
+        return 0
 
     feitos = 0
     for ship_id in envios:
@@ -266,15 +292,52 @@ def enriquecer_frete(access, seller_id):
     return feitos
 
 
-def enriquecer_repasse(access, seller_id):
+def enriquecer_local(access, seller_id, limite=80):
+    """Preenche UF/estado/cidade do comprador a partir do envio
+    (/shipments/{id} -> receiver_address). Só mexe no que está sem UF.
+    Resumível: cada envio preenchido sai da fila."""
+    pend = _select_all("vendas", "shipping_id",
+                       {"seller_id": seller_id, "status": "paid"}, is_null="uf")
+    envios, visto = [], set()
+    for r in pend:
+        s = r.get("shipping_id")
+        if s and s not in visto:
+            visto.add(s)
+            envios.append(s)
+    if not envios:
+        return 0
+
+    feitos = 0
+    for ship_id in envios:
+        if feitos >= limite:
+            break
+        try:
+            sj = ml_get(f"/shipments/{ship_id}", access)
+        except Exception:
+            continue
+        ra = (sj or {}).get("receiver_address") or {}
+        st = ra.get("state") or {}
+        ci = ra.get("city") or {}
+        uf = (st.get("id") or "").replace("BR-", "").strip() or "ND"  # 'ND' evita reprocessar sem fim
+        dados = {"uf": uf, "estado": st.get("name"), "cidade": ci.get("name")}
+        sb.table("vendas").update(dados).eq("seller_id", seller_id) \
+            .eq("shipping_id", ship_id).eq("status", "paid").execute()
+        feitos += 1
+        time.sleep(0.3)
+    print(f"Local: {feitos} envios localizados.")
+    return feitos
+
+
+def enriquecer_repasse(access, seller_id, limite=80):
     """Para pedidos sem repasse registrado, busca o valor líquido em
-    /collections/{payment_id} e grava na tabela 'repasses'."""
-    vds = (sb.table("vendas").select("order_id, payment_id")
-           .eq("seller_id", seller_id).eq("status", "paid")
-           .limit(1500).execute().data) or []
+    /collections/{payment_id} e grava na tabela 'repasses'.
+    'limite' = quantos pedidos NOVOS processar por execução (no mutirão usamos
+    um número alto pra terminar de uma vez)."""
+    # IMPORTANTE: paginar (o PostgREST corta em 1000 linhas por consulta).
+    vds = _select_all("vendas", "order_id, payment_id",
+                      {"seller_id": seller_id, "status": "paid"})
     ja = set(r["order_id"] for r in
-             (sb.table("repasses").select("order_id")
-              .eq("seller_id", seller_id).limit(5000).execute().data or []))
+             _select_all("repasses", "order_id", {"seller_id": seller_id}))
     pares = {}
     for v in vds:
         oid, pid = v.get("order_id"), v.get("payment_id")
@@ -283,7 +346,7 @@ def enriquecer_repasse(access, seller_id):
 
     feitos = 0
     for oid, pid in pares.items():
-        if feitos >= 80:
+        if feitos >= limite:
             break
         try:
             c = ml_get(f"/collections/{pid}", access)
@@ -349,6 +412,10 @@ def main():
             enriquecer_repasse(access, sid)
         except Exception as e:
             print("Aviso: falha no repasse:", e)
+        try:
+            enriquecer_local(access, sid)
+        except Exception as e:
+            print("Aviso: falha na localizacao:", e)
         print(f"[{sid}] {n} vendas atualizadas em {datetime.now()}")
 
     if NOTIFICAR:
