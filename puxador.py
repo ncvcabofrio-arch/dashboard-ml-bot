@@ -263,6 +263,7 @@ def enriquecer_frete(access, seller_id):
         feitos += 1
         time.sleep(0.4)
     print(f"Frete: {feitos} envios rateados.")
+    return feitos
 
 
 def enriquecer_repasse(access, seller_id):
@@ -321,6 +322,7 @@ def enriquecer_repasse(access, seller_id):
         feitos += 1
         time.sleep(0.3)
     print(f"Repasse: {feitos} pedidos registrados.")
+    return feitos
 
 
 def main():
