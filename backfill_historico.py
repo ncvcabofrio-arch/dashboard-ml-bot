@@ -1,33 +1,34 @@
 """
-Mutirao HISTORICO — puxa as vendas desde jan/2026 (ou o mês que você definir),
-em blocos MENSAIS (para não estourar a paginação do ML), e preenche
-frete, repasse, rebate e custo.
+Mutirao HISTORICO — puxa as vendas desde jan/2026 (ou o mês definido),
+em janelas de 10 dias (para não estourar a paginação do ML mesmo em meses
+grandes), e preenche frete, repasse, rebate e custo.
 
-É pesado e RESUMÍVEL: se não terminar tudo numa vez, é só rodar de novo que
-ele continua de onde parou. Reaproveita o puxador.py.
+RESUMÍVEL e resistente a quedas: se parar, é só rodar de novo. Reaproveita o puxador.py.
 """
 
 import os
 import time
 import urllib.parse
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date, timedelta
 
 from puxador import (sb, ml_get, lista_refresh_tokens, renovar_token,
                      enriquecer_frete, enriquecer_repasse)
 
 ANO_INI = int(os.environ.get("ANO_INI", "2026"))
 MES_INI = int(os.environ.get("MES_INI", "1"))
+PASSO = int(os.environ.get("PASSO_DIAS", "10"))   # tamanho da janela em dias
 
 
-def blocos_mensais():
-    agora = datetime.now(timezone.utc)
-    y, m, out = ANO_INI, MES_INI, []
-    while (y < agora.year) or (y == agora.year and m <= agora.month):
-        de = f"{y:04d}-{m:02d}-01T00:00:00.000-03:00"
-        ny, nm = (y + 1, 1) if m == 12 else (y, m + 1)
-        ate = f"{ny:04d}-{nm:02d}-01T00:00:00.000-03:00"
-        out.append((de, ate, f"{m:02d}/{y}"))
-        y, m = ny, nm
+def janelas():
+    d = date(ANO_INI, MES_INI, 1)
+    hoje = datetime.now(timezone.utc).date()
+    out = []
+    while d <= hoje:
+        fim = d + timedelta(days=PASSO)
+        de = d.strftime("%Y-%m-%dT00:00:00.000-03:00")
+        ate = fim.strftime("%Y-%m-%dT00:00:00.000-03:00")
+        out.append((de, ate, d.strftime("%d/%m/%Y")))
+        d = fim
     return out
 
 
@@ -66,8 +67,8 @@ def pull_range(access, sid, de_iso, ate_iso):
         time.sleep(0.3)
 
     for i in range(0, len(linhas), 200):
-        sb.table("vendas").upsert(linhas[i:i + 200],
-                                  on_conflict="order_id,item_id,seller_id").execute()
+        _retry(lambda: sb.table("vendas").upsert(
+            linhas[i:i + 200], on_conflict="order_id,item_id,seller_id").execute())
     skus = sorted({l["sku"] for l in linhas if l.get("sku")})
     if skus:
         try:
@@ -78,8 +79,19 @@ def pull_range(access, sid, de_iso, ate_iso):
     return len(linhas)
 
 
+def _retry(fn, tentativas=4):
+    for i in range(tentativas):
+        try:
+            return fn()
+        except Exception as e:
+            if i == tentativas - 1:
+                raise
+            print("  retry por erro de conexao:", str(e)[:80])
+            time.sleep(3 * (i + 1))
+
+
 def main():
-    blocos = blocos_mensais()
+    js = janelas()
     for seller_id, refresh in lista_refresh_tokens():
         d = renovar_token(refresh)
         access = d["access_token"]
@@ -88,24 +100,36 @@ def main():
             {"seller_id": sid, "refresh_token": d.get("refresh_token", refresh)},
             on_conflict="seller_id").execute()
 
-        for de, ate, label in blocos:
-            n = pull_range(access, sid, de, ate)
-            print(f"[{sid}] {label}: {n} itens")
+        for de, ate, label in js:
+            try:
+                n = pull_range(access, sid, de, ate)
+                print(f"[{sid}] {label}: {n} itens")
+            except Exception as e:
+                print(f"[{sid}] {label}: ERRO {str(e)[:80]}")
 
         print(f"[{sid}] preenchendo frete...")
-        for _ in range(40):
-            enriquecer_frete(access, sid)
+        for _ in range(200):
+            try:
+                if enriquecer_frete(access, sid) == 0:
+                    break
+            except Exception as e:
+                print("  frete erro:", str(e)[:80]); time.sleep(3)
+
         print(f"[{sid}] preenchendo repasse/rebate...")
-        for _ in range(40):
-            enriquecer_repasse(access, sid)
+        for _ in range(200):
+            try:
+                if enriquecer_repasse(access, sid) == 0:
+                    break
+            except Exception as e:
+                print("  repasse erro:", str(e)[:80]); time.sleep(3)
 
     try:
         sb.rpc("backfill_custos").execute()
         print("Custos preenchidos.")
     except Exception as e:
-        print("Aviso custo:", e)
+        print("Aviso custo:", str(e)[:80])
 
-    print("✅ Historico concluido (se sobrou frete/repasse, rode de novo).")
+    print("✅ Historico concluido.")
 
 
 if __name__ == "__main__":
