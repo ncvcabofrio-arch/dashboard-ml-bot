@@ -1,14 +1,15 @@
 """
-Sincronizador Ideris -> Supabase (roda 1x/dia, 6h).
-Atualiza CUSTO e ESTOQUE BASE de cada produto.
+Sincronizador Ideris -> Supabase (roda 1x/dia).
+Atualiza CUSTO, NOME e MODELO de cada produto.
 
 - Login no Ideris (POST /login com o token como texto puro)
-- Percorre os modelos de anuncio (/listingModel/search) lendo sku, cost, quantity
-- Atualiza 'custo' e 'estoque_base' (+ 'estoque_sync_em') na tabela 'produtos'
+- Percorre os modelos de anuncio (/listingModel/search) lendo sku, cost, title, model
+- Atualiza 'custo', 'nome' e 'modelo' na tabela 'produtos'
 - Congela o custo nas vendas que ainda estao sem (funcao backfill_custos)
 
-O estoque do dia a dia é calculado pela view 'estoque_atual'
-(estoque_base - vendas pagas desde estoque_sync_em).
+OBS.: o ESTOQUE não é mais atualizado aqui — quem cuida disso é o 'sync_estoque.py'
+(de 2 em 2h, pela fonte correta /sku/search). Assim evitamos sobrescrever o estoque
+bom com a fonte antiga do /listingModel.
 """
 
 import os
@@ -37,11 +38,26 @@ def login():
     return str(tok)
 
 
+# campos onde o nome do produto pode estar no modelo de anúncio do Ideris.
+# tenta nesta ordem e usa o primeiro que vier preenchido.
+CAMPOS_NOME = ["title", "name", "productName", "nome", "modelName",
+               "listingName", "product_title", "description"]
+
+
+def extrair_nome(item):
+    for c in CAMPOS_NOME:
+        v = item.get(c)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return None
+
+
 def coletar(token):
-    """Retorna dois dicts: custos {sku:custo} e estoques {sku:quantidade}."""
+    """Retorna dicts: custos, nomes e modelos (todos {sku: valor})."""
     H = {"Authorization": "Bearer " + token}
-    custos, estoques = {}, {}
+    custos, nomes, modelos = {}, {}, {}
     offset, total, limit = 0, None, 100
+    mostrou_campos = False
     while total is None or offset < total:
         resp = requests.get(
             BASE + f"/listingModel/search?limit={limit}&offset={offset}",
@@ -54,36 +70,36 @@ def coletar(token):
         batch = data.get("obj", []) or []
         if not batch:
             break
+        if not mostrou_campos:
+            # debug (1x): mostra os campos disponíveis para confirmarmos o nome
+            print("Campos do modelo Ideris:", sorted(batch[0].keys()))
+            mostrou_campos = True
         for item in batch:
             sku = item.get("sku")
             if not sku:
                 continue
             if item.get("cost") is not None:
                 custos[sku] = item.get("cost")
-            if item.get("quantity") is not None:
-                estoques[sku] = item.get("quantity")
+            nome = extrair_nome(item)
+            if nome:
+                nomes[sku] = nome
+            modelo = item.get("model")
+            if isinstance(modelo, str) and modelo.strip():
+                modelos[sku] = modelo.strip()
         offset += len(batch)
         time.sleep(1.3)               # respeita o limite (50 chamadas/min)
-    print(f"Coletado: {len(custos)} custos e {len(estoques)} estoques (de {total} modelos)")
-    return custos, estoques
+    print(f"Coletado: {len(custos)} custos, "
+          f"{len(nomes)} nomes e {len(modelos)} modelos (de {total} modelos)")
+    return custos, nomes, modelos
 
 
 def main():
     token = login()
-    custos, estoques = coletar(token)
+    custos, nomes, modelos = coletar(token)
 
-    if not custos and not estoques:
+    if not custos and not nomes:
         print("⚠️ Nada coletado. Me avise para ajustar.")
         return
-
-    agora = datetime.now(timezone.utc).isoformat()
-
-    # 1) atualiza ESTOQUE base (não toca no custo)
-    linhas_est = [{"sku": s, "estoque_base": q, "estoque_sync_em": agora}
-                  for s, q in estoques.items()]
-    for i in range(0, len(linhas_est), 200):
-        sb.table("produtos").upsert(linhas_est[i:i + 200], on_conflict="sku").execute()
-    print(f"Estoque atualizado: {len(linhas_est)} produtos")
 
     # 2) atualiza CUSTO (não toca no estoque)
     linhas_custo = [{"sku": s, "custo": c} for s, c in custos.items()]
@@ -91,7 +107,19 @@ def main():
         sb.table("produtos").upsert(linhas_custo[i:i + 200], on_conflict="sku").execute()
     print(f"Custo atualizado: {len(linhas_custo)} produtos")
 
-    # 3) congela o custo nas vendas que ainda estão sem (nunca sobrescreve)
+    # 3) atualiza NOME com o nome exato do Ideris
+    linhas_nome = [{"sku": s, "nome": n} for s, n in nomes.items()]
+    for i in range(0, len(linhas_nome), 200):
+        sb.table("produtos").upsert(linhas_nome[i:i + 200], on_conflict="sku").execute()
+    print(f"Nome atualizado: {len(linhas_nome)} produtos")
+
+    # 3b) atualiza MODELO com o campo 'model' do Ideris
+    linhas_modelo = [{"sku": s, "modelo": m} for s, m in modelos.items()]
+    for i in range(0, len(linhas_modelo), 200):
+        sb.table("produtos").upsert(linhas_modelo[i:i + 200], on_conflict="sku").execute()
+    print(f"Modelo atualizado: {len(linhas_modelo)} produtos")
+
+    # 4) congela o custo nas vendas que ainda estão sem (nunca sobrescreve)
     try:
         sb.rpc("backfill_custos").execute()
         print("Backfill de custo nas vendas concluído.")
