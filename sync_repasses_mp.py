@@ -112,15 +112,23 @@ def lista_arquivos(H):
     return lst if isinstance(lst, list) else []
 
 
-def achar_pronto(H, corte_data):
-    """Acha um relatório PRONTO (com arquivo) cujo período termina recentemente
-    (>= corte_data), ou seja, o que a gente acabou de pedir — novo OU reaproveitado."""
-    prontos = [x for x in lista_arquivos(H)
-               if x.get("file_name") and (x.get("end_date", "")[:10] >= corte_data)]
-    if prontos:
-        rel = sorted(prontos, key=lambda x: x.get("date_created", ""), reverse=True)[0]
-        return rel.get("file_name")
-    return None
+def achar_pronto(H, corte_data, alvo_ini):
+    """Acha o relatório PRONTO que cobre a faixa que a gente pediu:
+       - TERMINA recentemente  (end_date  >= corte_data), e
+       - COMEÇA lá atrás        (begin_date <= alvo_ini).
+    O segundo teste é o que evita pegar um relatório curto (ex.: 40 dias) que
+    também termina hoje mas começa há pouco tempo. Assim só aceitamos o que
+    realmente cobre o período pedido (ex.: 1 ano)."""
+    cand = [x for x in lista_arquivos(H)
+            if x.get("file_name")
+            and (x.get("end_date", "")[:10]  >= corte_data)
+            and (x.get("begin_date", "")[:10] <= alvo_ini)]
+    if not cand:
+        return None
+    # prefere a faixa mais ampla (começa mais cedo); desempata pelo mais novo
+    cand.sort(key=lambda x: x.get("date_created", ""), reverse=True)
+    cand.sort(key=lambda x: x.get("begin_date", ""))
+    return cand[0]
 
 
 def baixar_e_gravar(H, fn, sid_real):
@@ -173,19 +181,21 @@ def main():
             continue
         jobs.append({"sid": sid_real, "apelido": apelido, "H": H, "fn": None})
 
-    # ---- PASSO 2: espera todos ficarem prontos e baixa (até ~18 min) ----
-    corte = (fim - timedelta(days=2)).strftime("%Y-%m-%d")   # relatório terminando "de hoje"
-    print("Aguardando os relatórios ficarem prontos...")
-    for volta in range(54):          # 54 x 20s = ~18 min
+    # ---- PASSO 2: espera todos ficarem prontos e baixa (até ~30 min) ----
+    corte    = (fim - timedelta(days=2)).strftime("%Y-%m-%d")   # tem que terminar "de hoje"
+    alvo_ini = (ini + timedelta(days=3)).strftime("%Y-%m-%d")   # e começar lá no começo do período
+    print(f"Aguardando os relatórios da faixa {ini.strftime('%Y-%m-%d')} a {fim.strftime('%Y-%m-%d')}...")
+    for volta in range(90):          # 90 x 20s = ~30 min (relatório de 1 ano demora mais)
         pendentes = [j for j in jobs if not j["fn"]]
         if not pendentes:
             break
         time.sleep(20)
         for j in pendentes:
-            fn = achar_pronto(j["H"], corte)
-            if fn:
-                j["fn"] = fn
-                print(f"  pronto: {j['apelido'] or j['sid']} -> {fn}")
+            rel = achar_pronto(j["H"], corte, alvo_ini)
+            if rel:
+                j["fn"] = rel.get("file_name")
+                faixa = f'{rel.get("begin_date","?")[:10]} a {rel.get("end_date","?")[:10]}'
+                print(f"  pronto: {j['apelido'] or j['sid']} -> {j['fn']} (faixa {faixa})")
 
     # ---- PASSO 3: baixa e grava ----
     print("=" * 55)
