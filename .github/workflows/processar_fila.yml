@@ -1,0 +1,37 @@
+name: Processar fila (webhook tempo real)
+
+on:
+  repository_dispatch:
+    types: [processar_fila]     # acionado pelo webhook (ml_webhook)
+  workflow_dispatch: {}         # permite rodar manualmente (botão), pra testar
+
+# MESMA trava do puxador de 5 min: os dois renovam o token do ML,
+# então NUNCA podem rodar ao mesmo tempo.
+concurrency:
+  group: ml-puxador
+  cancel-in-progress: false
+
+jobs:
+  processar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Instalar dependencias
+        run: pip install requests supabase
+
+      - name: Processar fila
+        env:
+          MODO:               fila
+          ML_CLIENT_ID:       ${{ secrets.ML_CLIENT_ID }}
+          ML_CLIENT_SECRET:   ${{ secrets.ML_CLIENT_SECRET }}
+          ML_REFRESH_TOKEN:   ${{ secrets.ML_REFRESH_TOKEN }}
+          SUPABASE_URL:       ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY:       ${{ secrets.SUPABASE_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python -u puxador.py
