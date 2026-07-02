@@ -1,17 +1,13 @@
 """
-Teste (diagnóstico) — verifica se o token do Mercado Livre também acessa o
-Relatório de Liberações do Mercado Pago (/v1/account/release_report).
-Não grava nada de venda; só testa o acesso e mostra a resposta no log.
-
-Roda no GitHub Actions, na MESMA trava do puxador (ml-puxador), porque renova
-o token (que é de uso único).
+Teste 2 (diagnóstico) — BAIXA um relatório de liberações já pronto do Mercado Pago
+e mostra as COLUNAS e algumas linhas, pra a gente ver o formato exato.
+Não grava nada; só lê e imprime no log.  Roda na trava 'ml-puxador'.
 """
 
 import os
-import json
-import time
+import io
+import csv
 import requests
-from datetime import datetime, timedelta, timezone
 from supabase import create_client
 
 CLIENT_ID = os.environ["ML_CLIENT_ID"]
@@ -44,24 +40,35 @@ def lista_contas():
     return tk
 
 
-def mostra(nome, r):
-    print(f"  [{nome}] HTTP {r.status_code}")
-    txt = r.text[:600]
-    print("     " + txt.replace("\n", " "))
+def mostra_xlsx(conteudo):
+    try:
+        from openpyxl import load_workbook
+    except Exception:
+        print("   (openpyxl não instalado — não consegui abrir o xlsx)")
+        return
+    wb = load_workbook(io.BytesIO(conteudo), read_only=True, data_only=True)
+    ws = wb.active
+    linhas = []
+    for i, row in enumerate(ws.iter_rows(values_only=True)):
+        linhas.append(row)
+        if i >= 4:
+            break
+    if linhas:
+        print("   COLUNAS:", list(linhas[0]))
+        for r in linhas[1:]:
+            print("   linha:", list(r))
+
+
+def mostra_csv(texto):
+    rd = list(csv.reader(io.StringIO(texto)))
+    if rd:
+        print("   COLUNAS:", rd[0])
+        for r in rd[1:4]:
+            print("   linha:", r)
 
 
 def main():
-    contas = lista_contas()
-    if not contas:
-        print("Nenhuma conta com refresh_token.")
-        return
-
-    fim = datetime.now(timezone.utc)
-    ini = fim - timedelta(days=7)
-    corpo = {"begin_date": ini.strftime("%Y-%m-%dT%H:%M:%SZ"),
-             "end_date": fim.strftime("%Y-%m-%dT%H:%M:%SZ")}
-
-    for sid, apelido, refresh in contas:
+    for sid, apelido, refresh in lista_contas():
         print("=" * 60)
         print(f"CONTA {apelido or sid} ({sid})")
         try:
@@ -77,21 +84,26 @@ def main():
                 on_conflict="seller_id").execute()
         H = {"Authorization": "Bearer " + access}
 
-        # 1) o token acessa a config do relatório? (só leitura)
-        mostra("GET config", requests.get(MP + "/v1/account/release_report/config", headers=H, timeout=30))
-        # 2) lista de relatórios já gerados (só leitura)
-        mostra("GET list", requests.get(MP + "/v1/account/release_report/list", headers=H, timeout=30))
-        # 3) tenta gerar um relatório dos últimos 7 dias (gera um arquivo, não altera dados)
-        mostra("POST gerar", requests.post(
-            MP + "/v1/account/release_report",
-            headers={**H, "Content-Type": "application/json"},
-            data=json.dumps(corpo), timeout=30))
-        time.sleep(1)
+        lst = requests.get(MP + "/v1/account/release_report/list", headers=H, timeout=30).json()
+        if not isinstance(lst, list) or not lst:
+            print("  (sem relatório pronto ainda — gere um e rode de novo em uns minutos)")
+            continue
+        # pega o mais recente
+        rel = sorted(lst, key=lambda x: x.get("date_created", ""), reverse=True)[0]
+        fn = rel.get("file_name")
+        print(f"  Baixando: {fn}")
+        r = requests.get(MP + f"/v1/account/release_report/{fn}", headers=H, timeout=60)
+        print(f"  download HTTP {r.status_code}, {len(r.content)} bytes")
+        if r.status_code != 200:
+            print("   ", r.text[:200])
+            continue
+        if (fn or "").lower().endswith(".xlsx"):
+            mostra_xlsx(r.content)
+        else:
+            mostra_csv(r.text)
 
     print("=" * 60)
-    print("Interprete: se aparecer HTTP 200/202 no 'GET config'/'POST gerar', o token "
-          "JÁ acessa o Mercado Pago e a gente segue. Se aparecer 401/403, precisamos de "
-          "um access_token separado do Mercado Pago.")
+    print("Me manda as COLUNAS que apareceram — com elas eu monto a tabela e a conciliação.")
 
 
 if __name__ == "__main__":
