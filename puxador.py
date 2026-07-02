@@ -252,6 +252,18 @@ def _select_all(tabela, cols, filtros=None, is_null=None):
     return out
 
 
+def _retry(fn, tentativas=4):
+    """Tenta uma operação (ex.: gravar no banco) algumas vezes antes de desistir."""
+    for i in range(tentativas):
+        try:
+            return fn()
+        except Exception as e:
+            if i == tentativas - 1:
+                raise
+            print("  retry por erro:", str(e)[:80], flush=True)
+            time.sleep(2 * (i + 1))
+
+
 def _distintos_envios(pend):
     envios, visto = [], set()
     for r in pend:
