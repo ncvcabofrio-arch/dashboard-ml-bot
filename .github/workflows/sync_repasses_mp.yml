@@ -1,0 +1,36 @@
+name: Repasses Mercado Pago (relatorio de liberacoes)
+
+on:
+  schedule:
+    - cron: '30 8 * * *'         # 1x/dia, 05:30 de Brasília
+  workflow_dispatch:
+    inputs:
+      dias:
+        description: 'Quantos dias pra trás puxar (padrão 40; aumente p/ histórico)'
+        required: false
+        default: '40'
+
+# mesma trava do puxador (renova o token, que é de uso único)
+concurrency:
+  group: ml-puxador
+  cancel-in-progress: false
+
+jobs:
+  repasses:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Instalar dependencias
+        run: pip install requests supabase openpyxl
+      - name: Rodar
+        env:
+          ML_CLIENT_ID:     ${{ secrets.ML_CLIENT_ID }}
+          ML_CLIENT_SECRET: ${{ secrets.ML_CLIENT_SECRET }}
+          ML_REFRESH_TOKEN: ${{ secrets.ML_REFRESH_TOKEN }}
+          SUPABASE_URL:     ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY:     ${{ secrets.SUPABASE_KEY }}
+          DIAS_MP:          ${{ github.event.inputs.dias || '40' }}
+        run: python -u sync_repasses_mp.py
