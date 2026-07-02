@@ -158,6 +158,46 @@ def lista_refresh_tokens():
     return tokens
 
 
+def linhas_do_pedido(o, seller_id):
+    """Transforma um pedido (/orders/{id}) nas linhas de 'vendas' (uma por item)."""
+    ship = (o.get("shipping") or {}).get("id")
+    pay = (o.get("payments") or [{}])[0]
+    linhas = []
+    for it in o.get("order_items", []):
+        item = it.get("item") or {}
+        linhas.append({
+            "seller_id": seller_id,
+            "order_id": str(o.get("id")),
+            "status": o.get("status"),
+            "data_aprovacao": o.get("date_created"),
+            "total": o.get("total_amount"),
+            "forma_pagamento": pay.get("payment_method_id"),
+            "tipo_pagamento": pay.get("payment_type"),
+            "payment_id": str(pay.get("id")) if pay.get("id") else None,
+            "comissao": it.get("sale_fee"),
+            "tipo_anuncio": tipo_anuncio(it.get("listing_type_id")),
+            "shipping_id": str(ship) if ship else None,
+            "item_id": item.get("id"),
+            "sku": item.get("seller_sku") or item.get("seller_custom_field"),
+            "titulo": item.get("title"),
+            "categoria_id": item.get("category_id"),
+            "quantidade": it.get("quantity"),
+            "valor_unitario": it.get("unit_price"),
+        })
+    return linhas
+
+
+def cadastrar_skus_novos(linhas):
+    skus = sorted({l["sku"] for l in linhas if l.get("sku")})
+    if skus:
+        try:
+            sb.table("produtos").upsert(
+                [{"sku": s} for s in skus],
+                on_conflict="sku", ignore_duplicates=True).execute()
+        except Exception as e:
+            print("Aviso: falha ao cadastrar SKUs novos:", e)
+
+
 def puxar_conta(access, seller_id):
     u = ml_get("/users/" + seller_id, access)
     sb.table("contas").upsert(
@@ -194,29 +234,7 @@ def puxar_conta(access, seller_id):
         data = ml_get(path, access)
         total = (data.get("paging") or {}).get("total", 0)
         for o in data.get("results", []):
-            ship = (o.get("shipping") or {}).get("id")
-            pay = (o.get("payments") or [{}])[0]
-            for it in o.get("order_items", []):
-                item = it.get("item") or {}
-                linhas.append({
-                    "seller_id": seller_id,
-                    "order_id": str(o.get("id")),
-                    "status": o.get("status"),
-                    "data_aprovacao": o.get("date_created"),
-                    "total": o.get("total_amount"),
-                    "forma_pagamento": pay.get("payment_method_id"),
-                    "tipo_pagamento": pay.get("payment_type"),
-                    "payment_id": str(pay.get("id")) if pay.get("id") else None,
-                    "comissao": it.get("sale_fee"),
-                    "tipo_anuncio": tipo_anuncio(it.get("listing_type_id")),
-                    "shipping_id": str(ship) if ship else None,
-                    "item_id": item.get("id"),
-                    "sku": item.get("seller_sku") or item.get("seller_custom_field"),
-                    "titulo": item.get("title"),
-                    "categoria_id": item.get("category_id"),
-                    "quantidade": it.get("quantity"),
-                    "valor_unitario": it.get("unit_price"),
-                })
+            linhas.extend(linhas_do_pedido(o, seller_id))
         offset += 50
         time.sleep(0.3)
 
@@ -225,15 +243,7 @@ def puxar_conta(access, seller_id):
             linhas[i:i + 200],
             on_conflict="order_id,item_id,seller_id").execute()
 
-    skus = sorted({l["sku"] for l in linhas if l.get("sku")})
-    if skus:
-        try:
-            sb.table("produtos").upsert(
-                [{"sku": s} for s in skus],
-                on_conflict="sku", ignore_duplicates=True).execute()
-        except Exception as e:
-            print("Aviso: falha ao cadastrar SKUs novos:", e)
-
+    cadastrar_skus_novos(linhas)
     return len(linhas)
 
 
@@ -433,6 +443,73 @@ def enriquecer_repasse(access, seller_id, limite=80):
     return len(resultados)
 
 
+def processar_fila():
+    """MODO FILA (webhook): processa só os pedidos que estão na 'fila_pedidos',
+    na hora. Reaproveita tudo: puxa cada pedido, enriquece (frete/repasse/local)
+    e manda o MESMO aviso no Telegram (venda, estoque e margem)."""
+    pend = _select_all("fila_pedidos", "order_id, seller_id", {"processado": False})
+    if not pend:
+        print("Fila vazia — nada a processar.")
+        return 0
+
+    # agrupa os pedidos por conta
+    por_conta = defaultdict(list)
+    for r in pend:
+        por_conta[str(r.get("seller_id") or "")].append(str(r["order_id"]))
+
+    tokens = {str(sid): rt for sid, rt in lista_refresh_tokens() if sid}
+    total = 0
+    for sid, order_ids in por_conta.items():
+        refresh = tokens.get(sid)
+        if not refresh:
+            print(f"Conta {sid} sem token cadastrado — pulando {len(order_ids)} pedido(s).")
+            continue
+        d = renovar_token(refresh)
+        access = d["access_token"]
+        sb.table("contas").upsert(
+            {"seller_id": sid, "refresh_token": d.get("refresh_token", refresh)},
+            on_conflict="seller_id").execute()
+
+        linhas = []
+        for oid in order_ids:
+            try:
+                o = ml_get(f"/orders/{oid}", access)
+                if isinstance(o, dict) and o.get("id"):
+                    linhas.extend(linhas_do_pedido(o, sid))
+            except Exception as e:
+                print(f"  erro ao puxar pedido {oid}: {str(e)[:80]}")
+
+        if linhas:
+            for i in range(0, len(linhas), 200):
+                _retry(lambda l=linhas[i:i + 200]: sb.table("vendas").upsert(
+                    l, on_conflict="order_id,item_id,seller_id").execute())
+            cadastrar_skus_novos(linhas)
+            total += len(linhas)
+
+        # enriquece (pega os pendentes, inclui os que acabaram de entrar)
+        for fn, nome in ((enriquecer_frete, "frete"),
+                         (enriquecer_repasse, "repasse"),
+                         (enriquecer_local, "local")):
+            try:
+                fn(access, sid)
+            except Exception as e:
+                print(f"Aviso: falha no {nome}:", e)
+
+        # marca esses pedidos como processados (o puxador diário é a rede de segurança)
+        agora = datetime.now(timezone.utc).isoformat()
+        _retry(lambda ids=order_ids: sb.table("fila_pedidos").update(
+            {"processado": True, "processado_em": agora}).in_("order_id", ids).execute())
+        print(f"[{sid}] {len(order_ids)} pedido(s) da fila processados.")
+
+    # MESMO aviso do Telegram de sempre (venda, estoque e margem)
+    if NOTIFICAR:
+        try:
+            notificar_vendas_novas()
+        except Exception as e:
+            print("Aviso: falha na notificacao:", e)
+    return total
+
+
 def main():
     tokens = lista_refresh_tokens()
     if not tokens:
@@ -471,4 +548,9 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # MODO=fila -> processa só a fila do webhook (tempo real)
+    # sem MODO    -> rodada normal (a cada 5 min, últimos DIAS dias)
+    if os.environ.get("MODO") == "fila":
+        processar_fila()
+    else:
+        main()
