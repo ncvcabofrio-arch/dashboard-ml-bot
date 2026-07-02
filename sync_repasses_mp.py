@@ -107,31 +107,27 @@ def linhas_do_arquivo(file_name, conteudo, seller_id):
     return linhas
 
 
-def gerar_e_baixar(H, ini, fim):
-    """Gera o relatório do período e espera ficar pronto. Retorna o file_name."""
-    # o que já existe antes (pra achar o novo depois)
-    antes = requests.get(MP + "/v1/account/release_report/list", headers=H, timeout=30).json()
-    tinha = set(x.get("file_name") for x in antes if isinstance(x, dict)) if isinstance(antes, list) else set()
+def lista_arquivos(H):
+    lst = requests.get(MP + "/v1/account/release_report/list", headers=H, timeout=30).json()
+    return lst if isinstance(lst, list) else []
 
-    corpo = {"begin_date": ini, "end_date": fim}
-    g = requests.post(MP + "/v1/account/release_report",
-                      headers={**H, "Content-Type": "application/json"},
-                      data=json.dumps(corpo), timeout=30)
-    if g.status_code not in (200, 202):
-        print("  falha ao gerar:", g.status_code, g.text[:150])
-        return None
 
-    for tent in range(18):          # até ~6 min
-        time.sleep(20)
-        lst = requests.get(MP + "/v1/account/release_report/list", headers=H, timeout=30).json()
-        if not isinstance(lst, list):
-            continue
-        novos = [x for x in lst if x.get("file_name") and x.get("file_name") not in tinha]
-        if novos:
-            rel = sorted(novos, key=lambda x: x.get("date_created", ""), reverse=True)[0]
-            return rel.get("file_name")
-    print("  relatório ainda não ficou pronto (tenta de novo na próxima rodada).")
-    return None
+def baixar_e_gravar(H, fn, sid_real):
+    r = requests.get(MP + f"/v1/account/release_report/{fn}", headers=H, timeout=120)
+    if r.status_code != 200:
+        print(f"  falha ao baixar {fn}: {r.status_code}")
+        return 0
+    linhas = linhas_do_arquivo(fn, r.content, sid_real)
+    n = 0
+    for i in range(0, len(linhas), 200):
+        lote = linhas[i:i + 200]
+        try:
+            sb.table("releases_mp").upsert(lote, on_conflict="hash").execute()
+            n += len(lote)
+        except Exception as e:
+            print("  erro ao gravar lote:", str(e)[:100])
+    print(f"  {fn}: {len(linhas)} movimentos lidos, {n} gravados.")
+    return n
 
 
 def main():
@@ -139,10 +135,12 @@ def main():
     ini = fim - timedelta(days=DIAS_MP)
     ini_s = ini.strftime("%Y-%m-%dT%H:%M:%SZ")
     fim_s = fim.strftime("%Y-%m-%dT%H:%M:%SZ")
+    corpo = json.dumps({"begin_date": ini_s, "end_date": fim_s})
 
+    # ---- PASSO 1: renova token e manda GERAR de todas as contas (rápido) ----
+    jobs = []
     for sid, apelido, refresh in lista_contas():
-        print("=" * 55)
-        print(f"CONTA {apelido or sid} ({sid})")
+        print(f"[gerar] {apelido or sid} ({sid})")
         try:
             d = renovar_token(refresh)
         except Exception as e:
@@ -156,25 +154,38 @@ def main():
                 {"seller_id": sid_real, "refresh_token": novo},
                 on_conflict="seller_id").execute()
         H = {"Authorization": "Bearer " + access}
+        tinha = set(x.get("file_name") for x in lista_arquivos(H))
+        g = requests.post(MP + "/v1/account/release_report",
+                          headers={**H, "Content-Type": "application/json"},
+                          data=corpo, timeout=30)
+        if g.status_code not in (200, 202):
+            print("  falha ao gerar:", g.status_code, g.text[:150])
+            continue
+        jobs.append({"sid": sid_real, "apelido": apelido, "H": H, "tinha": tinha, "fn": None})
 
-        fn = gerar_e_baixar(H, ini_s, fim_s)
-        if not fn:
-            continue
-        r = requests.get(MP + f"/v1/account/release_report/{fn}", headers=H, timeout=90)
-        if r.status_code != 200:
-            print("  falha ao baixar:", r.status_code)
-            continue
-        linhas = linhas_do_arquivo(fn, r.content, sid_real)
-        # grava sem duplicar
-        n = 0
-        for i in range(0, len(linhas), 200):
-            lote = linhas[i:i + 200]
-            try:
-                sb.table("releases_mp").upsert(lote, on_conflict="hash").execute()
-                n += len(lote)
-            except Exception as e:
-                print("  erro ao gravar lote:", str(e)[:100])
-        print(f"  {fn}: {len(linhas)} movimentos lidos, {n} gravados.")
+    # ---- PASSO 2: espera todos ficarem prontos e baixa (até ~12 min) ----
+    print("Aguardando os relatórios ficarem prontos...")
+    for volta in range(36):          # 36 x 20s = ~12 min
+        pendentes = [j for j in jobs if not j["fn"]]
+        if not pendentes:
+            break
+        time.sleep(20)
+        for j in pendentes:
+            novos = [x for x in lista_arquivos(j["H"])
+                     if x.get("file_name") and x.get("file_name") not in j["tinha"]]
+            if novos:
+                rel = sorted(novos, key=lambda x: x.get("date_created", ""), reverse=True)[0]
+                j["fn"] = rel.get("file_name")
+                print(f"  pronto: {j['apelido'] or j['sid']} -> {j['fn']}")
+
+    # ---- PASSO 3: baixa e grava ----
+    print("=" * 55)
+    for j in jobs:
+        print(f"CONTA {j['apelido'] or j['sid']} ({j['sid']})")
+        if j["fn"]:
+            baixar_e_gravar(j["H"], j["fn"], j["sid"])
+        else:
+            print("  relatório não ficou pronto a tempo (roda de novo mais tarde).")
 
     print("=" * 55)
     print("✅ Fim. Tabela releases_mp atualizada.")
