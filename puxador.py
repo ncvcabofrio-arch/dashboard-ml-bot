@@ -16,6 +16,9 @@ from supabase import create_client
 
 # quantas chamadas ao ML em paralelo no enriquecimento (frete/repasse/estado)
 WORKERS = int(os.environ.get("ENRIQ_WORKERS", "6"))
+# no mutirão histórico dá pra pular a busca do rebate (2ª chamada por pedido),
+# o que corta o tempo do repasse pela metade. Rebate é só informativo.
+PULAR_REBATE = os.environ.get("PULAR_REBATE", "0") == "1"
 
 # ---- Configuracao (vem dos secrets do GitHub) ----
 CLIENT_ID = os.environ["ML_CLIENT_ID"]
@@ -131,7 +134,7 @@ def ml_get(path, access, tentativas=3):
     r = None
     for i in range(tentativas):
         r = requests.get(API + path,
-                         headers={"Authorization": "Bearer " + access}, timeout=30)
+                         headers={"Authorization": "Bearer " + access}, timeout=15)
         # 429 = limite de taxa, 5xx = instabilidade: espera e tenta de novo
         if r.status_code == 429 or r.status_code >= 500:
             time.sleep(0.6 * (i + 1))
@@ -377,15 +380,16 @@ def _repasse_de_pedido(oid, pid, access, seller_id):
     mrd = c.get("money_release_date")
     dap = c.get("date_approved") or c.get("date_created")
     rebate = 0
-    try:
-        disc = ml_get(f"/orders/{oid}/discounts", access)
-        for det in (disc.get("details") or []):
-            if det.get("supplier"):
-                for itx in (det.get("items") or []):
-                    amts = itx.get("amounts") or {}
-                    rebate += max((amts.get("total") or 0) - (amts.get("seller") or 0), 0)
-    except Exception:
-        pass
+    if not PULAR_REBATE:
+        try:
+            disc = ml_get(f"/orders/{oid}/discounts", access)
+            for det in (disc.get("details") or []):
+                if det.get("supplier"):
+                    for itx in (det.get("items") or []):
+                        amts = itx.get("amounts") or {}
+                        rebate += max((amts.get("total") or 0) - (amts.get("seller") or 0), 0)
+        except Exception:
+            pass
     return {
         "order_id": str(oid), "payment_id": str(pid), "seller_id": seller_id,
         "transaction_amount": c.get("transaction_amount"),
