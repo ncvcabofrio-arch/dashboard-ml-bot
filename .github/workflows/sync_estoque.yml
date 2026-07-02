@@ -1,0 +1,31 @@
+name: Sincronizar estoque (2h)
+
+on:
+  schedule:
+    - cron: '5 */2 * * *'         # a cada 2 horas (min 5, p/ evitar horário cheio)
+  workflow_dispatch: {}           # permite rodar manualmente (botão)
+
+# não deixa duas execuções ao mesmo tempo
+concurrency:
+  group: sync-estoque
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Instalar dependencias
+        run: pip install requests supabase
+
+      - name: Rodar sincronizacao de estoque
+        env:
+          IDERIS_TOKEN: ${{ secrets.IDERIS_TOKEN }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: python -u sync_estoque.py
