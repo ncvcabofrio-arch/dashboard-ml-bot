@@ -112,6 +112,17 @@ def lista_arquivos(H):
     return lst if isinstance(lst, list) else []
 
 
+def achar_pronto(H, corte_data):
+    """Acha um relatório PRONTO (com arquivo) cujo período termina recentemente
+    (>= corte_data), ou seja, o que a gente acabou de pedir — novo OU reaproveitado."""
+    prontos = [x for x in lista_arquivos(H)
+               if x.get("file_name") and (x.get("end_date", "")[:10] >= corte_data)]
+    if prontos:
+        rel = sorted(prontos, key=lambda x: x.get("date_created", ""), reverse=True)[0]
+        return rel.get("file_name")
+    return None
+
+
 def baixar_e_gravar(H, fn, sid_real):
     r = requests.get(MP + f"/v1/account/release_report/{fn}", headers=H, timeout=120)
     if r.status_code != 200:
@@ -154,29 +165,27 @@ def main():
                 {"seller_id": sid_real, "refresh_token": novo},
                 on_conflict="seller_id").execute()
         H = {"Authorization": "Bearer " + access}
-        tinha = set(x.get("file_name") for x in lista_arquivos(H))
         g = requests.post(MP + "/v1/account/release_report",
                           headers={**H, "Content-Type": "application/json"},
                           data=corpo, timeout=30)
         if g.status_code not in (200, 202):
             print("  falha ao gerar:", g.status_code, g.text[:150])
             continue
-        jobs.append({"sid": sid_real, "apelido": apelido, "H": H, "tinha": tinha, "fn": None})
+        jobs.append({"sid": sid_real, "apelido": apelido, "H": H, "fn": None})
 
-    # ---- PASSO 2: espera todos ficarem prontos e baixa (até ~12 min) ----
+    # ---- PASSO 2: espera todos ficarem prontos e baixa (até ~18 min) ----
+    corte = (fim - timedelta(days=2)).strftime("%Y-%m-%d")   # relatório terminando "de hoje"
     print("Aguardando os relatórios ficarem prontos...")
-    for volta in range(36):          # 36 x 20s = ~12 min
+    for volta in range(54):          # 54 x 20s = ~18 min
         pendentes = [j for j in jobs if not j["fn"]]
         if not pendentes:
             break
         time.sleep(20)
         for j in pendentes:
-            novos = [x for x in lista_arquivos(j["H"])
-                     if x.get("file_name") and x.get("file_name") not in j["tinha"]]
-            if novos:
-                rel = sorted(novos, key=lambda x: x.get("date_created", ""), reverse=True)[0]
-                j["fn"] = rel.get("file_name")
-                print(f"  pronto: {j['apelido'] or j['sid']} -> {j['fn']}")
+            fn = achar_pronto(j["H"], corte)
+            if fn:
+                j["fn"] = fn
+                print(f"  pronto: {j['apelido'] or j['sid']} -> {fn}")
 
     # ---- PASSO 3: baixa e grava ----
     print("=" * 55)
