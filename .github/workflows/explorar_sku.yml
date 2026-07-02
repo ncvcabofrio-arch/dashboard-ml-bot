@@ -1,0 +1,22 @@
+name: Explorar endpoint de SKU (Ideris, so leitura)
+
+on:
+  workflow_dispatch: {}           # só manual (botão Run workflow)
+
+jobs:
+  explorar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Instalar dependencias
+        run: pip install requests
+
+      - name: Rodar explorador (so leitura)
+        env:
+          IDERIS_TOKEN: ${{ secrets.IDERIS_TOKEN }}
+        run: python -u explorar_sku.py
