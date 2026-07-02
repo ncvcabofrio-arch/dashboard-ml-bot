@@ -1,0 +1,2372 @@
+ano,mes,estado,status,receita,unidades,pedidos
+2020,12,(sem estado),cancelled,505.92,6.0,6
+2020,12,(sem estado),paid,3174.0,9.0,9
+2020,12,Acre,paid,1541.0,2.0,2
+2020,12,Alagoas,paid,15694.4,12.0,12
+2020,12,Amapá,paid,62.0,2.0,1
+2020,12,Amazonas,paid,7158.5,4.0,4
+2020,12,Bahia,cancelled,3438.58,4.0,4
+2020,12,Bahia,paid,25500.5,48.0,41
+2020,12,Ceará,cancelled,2120.5,1.0,1
+2020,12,Ceará,paid,10445.3,15.0,15
+2020,12,Distrito Federal,cancelled,1778.5,2.0,2
+2020,12,Distrito Federal,paid,19781.39,30.0,28
+2020,12,Espírito Santo,cancelled,8473.4,3.0,3
+2020,12,Espírito Santo,paid,13947.18,20.0,19
+2020,12,Goiás,paid,27885.4,26.0,25
+2020,12,Maranhão,cancelled,94.9,1.0,1
+2020,12,Maranhão,paid,8867.02,8.0,8
+2020,12,Mato Grosso,cancelled,2204.5,2.0,2
+2020,12,Mato Grosso,paid,14443.4,22.0,15
+2020,12,Mato Grosso do Sul,paid,8850.13,13.0,13
+2020,12,Minas Gerais,cancelled,1873.5,9.0,9
+2020,12,Minas Gerais,paid,100915.49,140.0,132
+2020,12,Paraná,paid,25122.51,55.0,52
+2020,12,Paraíba,paid,6495.5,8.0,8
+2020,12,Pará,cancelled,420.0,1.0,1
+2020,12,Pará,paid,10852.5,11.0,11
+2020,12,Pernambuco,cancelled,4680.5,2.0,2
+2020,12,Pernambuco,paid,21713.18,23.0,20
+2020,12,Piauí,paid,7741.9,5.0,5
+2020,12,Rio Grande do Norte,paid,10563.2,12.0,9
+2020,12,Rio Grande do Sul,cancelled,5559.5,2.0,2
+2020,12,Rio Grande do Sul,paid,20682.7,42.0,40
+2020,12,Rio de Janeiro,cancelled,5617.0,7.0,7
+2020,12,Rio de Janeiro,paid,88316.57,151.0,136
+2020,12,Rondônia,paid,3710.0,3.0,3
+2020,12,Santa Catarina,cancelled,6335.0,6.0,6
+2020,12,Santa Catarina,paid,34825.59,38.0,38
+2020,12,Sergipe,cancelled,23.0,2.0,1
+2020,12,Sergipe,paid,7301.9,7.0,7
+2020,12,São Paulo,cancelled,16887.01,22.0,22
+2020,12,São Paulo,paid,253847.86,414.0,382
+2020,12,Tocantins,paid,164.5,1.0,1
+2021,1,(sem estado),cancelled,4913.5,4.0,4
+2021,1,(sem estado),paid,2749.5,1.0,1
+2021,1,Acre,paid,99.0,1.0,1
+2021,1,Alagoas,paid,3072.62,3.0,3
+2021,1,Amapá,paid,6344.26,3.0,3
+2021,1,Amazonas,paid,3735.0,2.0,2
+2021,1,Bahia,cancelled,12650.2,5.0,3
+2021,1,Bahia,paid,18779.06,33.0,27
+2021,1,Ceará,cancelled,478.0,1.0,1
+2021,1,Ceará,paid,31894.02,21.0,19
+2021,1,Distrito Federal,cancelled,2670.1,2.0,2
+2021,1,Distrito Federal,paid,15356.13,17.0,15
+2021,1,Espírito Santo,paid,18605.57,14.0,14
+2021,1,Goiás,paid,6060.61,21.0,16
+2021,1,Maranhão,cancelled,492.76,1.0,1
+2021,1,Maranhão,paid,15376.94,9.0,9
+2021,1,Mato Grosso,cancelled,744.76,2.0,2
+2021,1,Mato Grosso,paid,5650.46,14.0,12
+2021,1,Mato Grosso do Sul,paid,9719.8,4.0,4
+2021,1,Minas Gerais,cancelled,6134.5,6.0,6
+2021,1,Minas Gerais,paid,81914.39,91.0,89
+2021,1,Paraná,cancelled,3704.0,1.0,1
+2021,1,Paraná,paid,13232.16,22.0,21
+2021,1,Paraíba,paid,7286.26,10.0,10
+2021,1,Pará,paid,32072.02,17.0,17
+2021,1,Pernambuco,cancelled,520.0,1.0,1
+2021,1,Pernambuco,paid,20173.03,21.0,21
+2021,1,Piauí,cancelled,208.0,1.0,1
+2021,1,Piauí,paid,3765.0,4.0,4
+2021,1,Rio Grande do Norte,cancelled,686.76,1.0,1
+2021,1,Rio Grande do Norte,paid,3477.92,5.0,5
+2021,1,Rio Grande do Sul,cancelled,2949.0,1.0,1
+2021,1,Rio Grande do Sul,paid,20744.54,23.0,23
+2021,1,Rio de Janeiro,cancelled,8062.36,8.0,6
+2021,1,Rio de Janeiro,paid,101314.65,83.0,82
+2021,1,Rondônia,paid,3489.0,1.0,1
+2021,1,Roraima,paid,411.0,1.0,1
+2021,1,Santa Catarina,cancelled,2140.8,1.0,1
+2021,1,Santa Catarina,paid,39513.31,34.0,33
+2021,1,Sergipe,paid,3712.49,6.0,6
+2021,1,São Paulo,cancelled,18741.99,19.0,18
+2021,1,São Paulo,paid,213533.75,273.0,248
+2021,1,Tocantins,paid,1180.0,1.0,1
+2021,2,(sem estado),paid,15136.99,6.0,6
+2021,2,Acre,paid,4373.0,2.0,2
+2021,2,Alagoas,paid,7305.12,16.0,13
+2021,2,Amapá,cancelled,160.0,1.0,1
+2021,2,Amapá,paid,1572.73,2.0,2
+2021,2,Amazonas,cancelled,471.0,2.0,2
+2021,2,Amazonas,paid,1334.0,3.0,3
+2021,2,Bahia,cancelled,138.0,1.0,1
+2021,2,Bahia,paid,26864.25,35.0,33
+2021,2,Ceará,cancelled,3244.0,2.0,2
+2021,2,Ceará,paid,11134.0,11.0,11
+2021,2,Distrito Federal,cancelled,5278.0,2.0,2
+2021,2,Distrito Federal,paid,18092.74,22.0,22
+2021,2,Espírito Santo,cancelled,384.0,1.0,1
+2021,2,Espírito Santo,paid,12615.62,17.0,16
+2021,2,Goiás,paid,23443.79,16.0,16
+2021,2,Maranhão,paid,7880.74,16.0,14
+2021,2,Mato Grosso,cancelled,630.0,1.0,1
+2021,2,Mato Grosso,paid,9645.84,5.0,5
+2021,2,Mato Grosso do Sul,paid,5603.4,5.0,5
+2021,2,Minas Gerais,cancelled,668.0,2.0,2
+2021,2,Minas Gerais,paid,76941.06,102.0,97
+2021,2,Paraná,cancelled,9056.0,3.0,3
+2021,2,Paraná,paid,35116.37,42.0,39
+2021,2,Paraíba,cancelled,534.0,2.0,2
+2021,2,Paraíba,paid,3862.04,5.0,5
+2021,2,Pará,cancelled,118.0,1.0,1
+2021,2,Pará,paid,9823.99,12.0,11
+2021,2,Pernambuco,paid,11330.3,20.0,20
+2021,2,Piauí,paid,2514.0,2.0,2
+2021,2,Rio Grande do Norte,paid,3264.54,5.0,5
+2021,2,Rio Grande do Sul,cancelled,238.0,1.0,1
+2021,2,Rio Grande do Sul,paid,21248.59,35.0,34
+2021,2,Rio de Janeiro,cancelled,7531.0,6.0,5
+2021,2,Rio de Janeiro,paid,74844.25,115.0,112
+2021,2,Rondônia,paid,825.6,1.0,1
+2021,2,Santa Catarina,cancelled,3470.0,3.0,3
+2021,2,Santa Catarina,paid,24463.24,27.0,27
+2021,2,Sergipe,paid,13331.99,6.0,6
+2021,2,São Paulo,cancelled,13160.11,20.0,20
+2021,2,São Paulo,paid,136658.61,223.0,206
+2021,2,Tocantins,paid,3754.32,4.0,4
+2021,3,(sem estado),cancelled,136.0,1.0,1
+2021,3,(sem estado),paid,2916.0,4.0,4
+2021,3,Acre,cancelled,1289.0,1.0,1
+2021,3,Acre,paid,2979.12,4.0,4
+2021,3,Alagoas,cancelled,129.0,1.0,1
+2021,3,Alagoas,paid,2049.0,5.0,5
+2021,3,Amapá,paid,826.0,1.0,1
+2021,3,Amazonas,paid,4773.0,4.0,4
+2021,3,Bahia,cancelled,4407.99,5.0,5
+2021,3,Bahia,paid,29344.85,30.0,29
+2021,3,Ceará,cancelled,129.0,1.0,1
+2021,3,Ceará,paid,10199.6,12.0,12
+2021,3,Distrito Federal,cancelled,2486.0,3.0,3
+2021,3,Distrito Federal,paid,35965.88,29.0,27
+2021,3,Espírito Santo,cancelled,1448.0,8.0,6
+2021,3,Espírito Santo,paid,20875.93,27.0,26
+2021,3,Goiás,cancelled,70.5,2.0,2
+2021,3,Goiás,paid,20073.91,18.0,17
+2021,3,Maranhão,cancelled,719.0,1.0,1
+2021,3,Maranhão,paid,8507.59,5.0,5
+2021,3,Mato Grosso,cancelled,812.99,8.0,4
+2021,3,Mato Grosso,paid,1982.93,7.0,6
+2021,3,Mato Grosso do Sul,paid,1232.9,4.0,3
+2021,3,Minas Gerais,cancelled,9197.73,26.0,22
+2021,3,Minas Gerais,paid,49615.4,86.0,82
+2021,3,Paraná,cancelled,5135.5,6.0,6
+2021,3,Paraná,paid,34915.29,55.0,50
+2021,3,Paraíba,cancelled,508.0,1.0,1
+2021,3,Paraíba,paid,15172.24,11.0,9
+2021,3,Pará,cancelled,603.0,2.0,2
+2021,3,Pará,paid,28596.1,21.0,20
+2021,3,Pernambuco,cancelled,2230.0,3.0,3
+2021,3,Pernambuco,paid,11868.97,9.0,9
+2021,3,Piauí,paid,1840.0,2.0,2
+2021,3,Rio Grande do Norte,paid,7140.1,5.0,5
+2021,3,Rio Grande do Sul,cancelled,6841.0,9.0,8
+2021,3,Rio Grande do Sul,paid,44553.9,40.0,39
+2021,3,Rio de Janeiro,cancelled,15356.43,27.0,21
+2021,3,Rio de Janeiro,paid,89878.56,113.0,112
+2021,3,Rondônia,paid,5078.32,2.0,2
+2021,3,Roraima,paid,118.0,2.0,1
+2021,3,Santa Catarina,cancelled,3975.0,11.0,10
+2021,3,Santa Catarina,paid,22602.38,32.0,31
+2021,3,Sergipe,cancelled,129.0,1.0,1
+2021,3,Sergipe,paid,12893.44,8.0,8
+2021,3,São Paulo,cancelled,27377.27,126.0,109
+2021,3,São Paulo,paid,189650.65,274.0,244
+2021,3,Tocantins,cancelled,3349.0,1.0,1
+2021,3,Tocantins,paid,5579.0,3.0,3
+2021,4,(sem estado),cancelled,4039.0,2.0,2
+2021,4,(sem estado),paid,7428.0,6.0,6
+2021,4,Alagoas,cancelled,112.1,1.0,1
+2021,4,Alagoas,paid,4385.0,6.0,6
+2021,4,Amazonas,paid,303.0,2.0,2
+2021,4,Bahia,cancelled,6880.57,4.0,4
+2021,4,Bahia,paid,29241.0,33.0,32
+2021,4,Ceará,cancelled,1476.0,3.0,2
+2021,4,Ceará,paid,11457.72,15.0,13
+2021,4,Distrito Federal,cancelled,985.0,1.0,1
+2021,4,Distrito Federal,paid,32472.45,30.0,28
+2021,4,Espírito Santo,cancelled,1634.0,2.0,2
+2021,4,Espírito Santo,paid,9507.65,19.0,19
+2021,4,Goiás,cancelled,235.0,2.0,1
+2021,4,Goiás,paid,22695.21,20.0,18
+2021,4,Maranhão,paid,618.0,3.0,3
+2021,4,Mato Grosso,cancelled,295.0,1.0,1
+2021,4,Mato Grosso,paid,11414.0,11.0,11
+2021,4,Mato Grosso do Sul,cancelled,726.0,1.0,1
+2021,4,Mato Grosso do Sul,paid,2389.0,4.0,4
+2021,4,Minas Gerais,cancelled,5320.0,3.0,3
+2021,4,Minas Gerais,paid,56728.58,85.0,76
+2021,4,Paraná,cancelled,2293.0,3.0,2
+2021,4,Paraná,paid,25375.93,39.0,34
+2021,4,Paraíba,cancelled,3198.0,1.0,1
+2021,4,Paraíba,paid,3723.0,6.0,6
+2021,4,Pará,cancelled,138.0,1.0,1
+2021,4,Pará,paid,20790.22,26.0,18
+2021,4,Pernambuco,cancelled,2692.15,2.0,2
+2021,4,Pernambuco,paid,15230.31,14.0,12
+2021,4,Piauí,paid,10568.75,7.0,7
+2021,4,Rio Grande do Norte,paid,2619.5,7.0,7
+2021,4,Rio Grande do Sul,cancelled,2464.0,8.0,3
+2021,4,Rio Grande do Sul,paid,41650.6,54.0,40
+2021,4,Rio de Janeiro,cancelled,7997.49,10.0,9
+2021,4,Rio de Janeiro,paid,96053.08,146.0,124
+2021,4,Rondônia,paid,3245.0,3.0,3
+2021,4,Roraima,paid,908.0,2.0,2
+2021,4,Santa Catarina,cancelled,1962.72,1.0,1
+2021,4,Santa Catarina,paid,41403.35,34.0,34
+2021,4,Sergipe,paid,3573.5,4.0,4
+2021,4,São Paulo,cancelled,10956.17,17.0,16
+2021,4,São Paulo,paid,174532.59,283.0,258
+2021,4,Tocantins,cancelled,748.0,1.0,1
+2021,4,Tocantins,paid,1330.7,3.0,3
+2021,5,(sem estado),cancelled,463.0,2.0,2
+2021,5,(sem estado),paid,6903.45,3.0,3
+2021,5,Acre,paid,450.5,1.0,1
+2021,5,Alagoas,cancelled,1983.75,2.0,2
+2021,5,Alagoas,paid,10671.35,8.0,8
+2021,5,Amapá,paid,4812.75,7.0,5
+2021,5,Amazonas,paid,8321.28,8.0,6
+2021,5,Bahia,cancelled,3948.5,3.0,3
+2021,5,Bahia,paid,23900.8,26.0,22
+2021,5,Ceará,paid,10559.15,12.0,11
+2021,5,Distrito Federal,paid,19381.44,23.0,23
+2021,5,Espírito Santo,cancelled,3417.55,3.0,3
+2021,5,Espírito Santo,paid,15804.6,15.0,15
+2021,5,Goiás,paid,13698.25,22.0,20
+2021,5,Maranhão,cancelled,1263.5,1.0,1
+2021,5,Maranhão,paid,8627.8,11.0,11
+2021,5,Mato Grosso,cancelled,131.1,1.0,1
+2021,5,Mato Grosso,paid,8833.64,7.0,7
+2021,5,Mato Grosso do Sul,paid,12734.05,8.0,8
+2021,5,Minas Gerais,cancelled,429.0,1.0,1
+2021,5,Minas Gerais,paid,86092.79,96.0,91
+2021,5,Paraná,cancelled,2644.75,4.0,4
+2021,5,Paraná,paid,27343.0,34.0,32
+2021,5,Paraíba,cancelled,1710.0,1.0,1
+2021,5,Paraíba,paid,10943.31,9.0,9
+2021,5,Pará,paid,8643.51,10.0,8
+2021,5,Pernambuco,paid,15478.7,20.0,16
+2021,5,Piauí,paid,7407.0,3.0,3
+2021,5,Rio Grande do Norte,paid,3105.95,8.0,8
+2021,5,Rio Grande do Sul,cancelled,58.0,1.0,1
+2021,5,Rio Grande do Sul,paid,17272.61,22.0,22
+2021,5,Rio de Janeiro,cancelled,4308.3,6.0,6
+2021,5,Rio de Janeiro,paid,101314.52,141.0,123
+2021,5,Rondônia,paid,6439.8,4.0,4
+2021,5,Roraima,cancelled,1151.0,1.0,1
+2021,5,Santa Catarina,paid,17596.78,22.0,22
+2021,5,Sergipe,paid,5535.0,3.0,3
+2021,5,São Paulo,cancelled,20393.1,25.0,18
+2021,5,São Paulo,paid,203916.09,231.0,209
+2021,5,Tocantins,paid,1981.55,2.0,2
+2021,6,(sem estado),paid,8005.0,3.0,3
+2021,6,Alagoas,cancelled,5640.0,1.0,1
+2021,6,Alagoas,paid,7535.65,4.0,4
+2021,6,Amapá,paid,1167.25,2.0,2
+2021,6,Amazonas,paid,5022.5,7.0,6
+2021,6,Bahia,paid,25824.4,31.0,31
+2021,6,Ceará,paid,27572.85,14.0,14
+2021,6,Distrito Federal,cancelled,280.0,1.0,1
+2021,6,Distrito Federal,paid,11731.55,19.0,19
+2021,6,Espírito Santo,cancelled,830.0,1.0,1
+2021,6,Espírito Santo,paid,16659.2,18.0,18
+2021,6,Goiás,cancelled,655.02,1.0,1
+2021,6,Goiás,paid,11666.85,13.0,13
+2021,6,Maranhão,paid,6284.35,6.0,6
+2021,6,Mato Grosso,paid,15538.75,8.0,8
+2021,6,Mato Grosso do Sul,paid,1682.65,5.0,5
+2021,6,Minas Gerais,cancelled,27298.45,10.0,10
+2021,6,Minas Gerais,paid,57023.1,68.0,65
+2021,6,Paraná,paid,29276.6,39.0,36
+2021,6,Paraíba,paid,5933.25,5.0,5
+2021,6,Pará,cancelled,84.5,1.0,1
+2021,6,Pará,paid,11854.2,15.0,15
+2021,6,Pernambuco,cancelled,276.45,1.0,1
+2021,6,Pernambuco,paid,17260.35,13.0,13
+2021,6,Piauí,cancelled,2999.0,1.0,1
+2021,6,Piauí,paid,2465.0,2.0,2
+2021,6,Rio Grande do Norte,paid,3316.0,3.0,3
+2021,6,Rio Grande do Sul,cancelled,2665.45,3.0,3
+2021,6,Rio Grande do Sul,paid,26711.93,28.0,25
+2021,6,Rio de Janeiro,cancelled,12489.55,10.0,10
+2021,6,Rio de Janeiro,paid,123295.64,122.0,113
+2021,6,Rondônia,paid,9012.6,3.0,3
+2021,6,Roraima,paid,3722.75,3.0,3
+2021,6,Santa Catarina,cancelled,11259.5,5.0,5
+2021,6,Santa Catarina,paid,24335.05,31.0,28
+2021,6,Sergipe,paid,1097.1,4.0,4
+2021,6,São Paulo,cancelled,4586.33,9.0,9
+2021,6,São Paulo,paid,161207.64,191.0,182
+2021,6,Tocantins,paid,931.0,1.0,1
+2021,7,(sem estado),cancelled,3230.0,1.0,1
+2021,7,(sem estado),paid,18265.5,8.0,7
+2021,7,Acre,paid,2217.46,1.0,1
+2021,7,Alagoas,paid,8315.7,11.0,11
+2021,7,Amapá,paid,485.0,1.0,1
+2021,7,Amazonas,paid,7912.0,7.0,7
+2021,7,Bahia,cancelled,5349.1,7.0,7
+2021,7,Bahia,paid,26584.42,34.0,34
+2021,7,Ceará,paid,22253.18,31.0,29
+2021,7,Distrito Federal,paid,9257.8,15.0,14
+2021,7,Espírito Santo,cancelled,1495.0,1.0,1
+2021,7,Espírito Santo,paid,19668.1,26.0,26
+2021,7,Goiás,cancelled,590.5,1.0,1
+2021,7,Goiás,paid,19061.6,39.0,31
+2021,7,Maranhão,paid,23354.16,15.0,11
+2021,7,Mato Grosso,paid,16801.77,15.0,14
+2021,7,Mato Grosso do Sul,paid,6297.6,16.0,12
+2021,7,Minas Gerais,cancelled,1651.25,4.0,4
+2021,7,Minas Gerais,paid,69026.1,133.0,104
+2021,7,Paraná,paid,40498.55,54.0,50
+2021,7,Paraíba,cancelled,497.73,1.0,1
+2021,7,Paraíba,paid,8091.25,10.0,10
+2021,7,Pará,paid,17787.21,15.0,15
+2021,7,Pernambuco,cancelled,248.0,1.0,1
+2021,7,Pernambuco,paid,37420.64,38.0,36
+2021,7,Piauí,paid,808.09,3.0,3
+2021,7,Rio Grande do Norte,paid,9239.35,13.0,11
+2021,7,Rio Grande do Sul,cancelled,263.5,1.0,1
+2021,7,Rio Grande do Sul,paid,25628.43,44.0,39
+2021,7,Rio de Janeiro,cancelled,17001.14,10.0,10
+2021,7,Rio de Janeiro,paid,93454.27,148.0,135
+2021,7,Rondônia,paid,6449.0,5.0,5
+2021,7,Roraima,paid,695.0,1.0,1
+2021,7,Santa Catarina,paid,57134.0,65.0,58
+2021,7,Sergipe,cancelled,6785.5,1.0,1
+2021,7,Sergipe,paid,2505.26,5.0,5
+2021,7,São Paulo,cancelled,13495.02,21.0,16
+2021,7,São Paulo,paid,201556.4,268.0,236
+2021,7,Tocantins,paid,1902.5,5.0,4
+2021,8,(sem estado),cancelled,1522.0,3.0,3
+2021,8,(sem estado),paid,19022.0,10.0,10
+2021,8,Acre,paid,3344.6,5.0,5
+2021,8,Alagoas,paid,2530.24,8.0,6
+2021,8,Amapá,paid,878.6,1.0,1
+2021,8,Amazonas,cancelled,429.0,1.0,1
+2021,8,Amazonas,paid,11911.0,8.0,8
+2021,8,Bahia,cancelled,3940.49,5.0,4
+2021,8,Bahia,paid,45026.77,45.0,43
+2021,8,Ceará,cancelled,708.4,1.0,1
+2021,8,Ceará,paid,30751.97,26.0,25
+2021,8,Distrito Federal,cancelled,3271.53,4.0,4
+2021,8,Distrito Federal,paid,19469.83,33.0,28
+2021,8,Espírito Santo,cancelled,2099.0,1.0,1
+2021,8,Espírito Santo,paid,21791.23,30.0,30
+2021,8,Goiás,cancelled,3367.6,4.0,4
+2021,8,Goiás,paid,22197.83,34.0,30
+2021,8,Maranhão,cancelled,6544.83,4.0,3
+2021,8,Maranhão,paid,11369.9,12.0,12
+2021,8,Mato Grosso,cancelled,529.4,1.0,1
+2021,8,Mato Grosso,paid,8923.0,11.0,10
+2021,8,Mato Grosso do Sul,paid,18146.82,29.0,24
+2021,8,Minas Gerais,cancelled,3650.42,5.0,5
+2021,8,Minas Gerais,paid,103286.35,123.0,121
+2021,8,Minas Gerais,pending,389.0,1.0,1
+2021,8,Paraná,cancelled,2226.0,5.0,5
+2021,8,Paraná,paid,53987.56,69.0,69
+2021,8,Paraíba,paid,2941.92,5.0,5
+2021,8,Pará,cancelled,6580.0,2.0,2
+2021,8,Pará,paid,15680.43,21.0,21
+2021,8,Pernambuco,paid,21992.09,28.0,28
+2021,8,Piauí,cancelled,1329.4,1.0,1
+2021,8,Piauí,paid,8433.5,8.0,7
+2021,8,Rio Grande do Norte,cancelled,803.0,2.0,2
+2021,8,Rio Grande do Norte,paid,7967.14,8.0,7
+2021,8,Rio Grande do Sul,cancelled,372.0,1.0,1
+2021,8,Rio Grande do Sul,paid,36111.46,65.0,56
+2021,8,Rio de Janeiro,cancelled,12713.5,18.0,16
+2021,8,Rio de Janeiro,paid,136879.04,191.0,184
+2021,8,Rondônia,paid,4934.49,7.0,7
+2021,8,Roraima,paid,279.99,1.0,1
+2021,8,Santa Catarina,cancelled,1318.8,2.0,2
+2021,8,Santa Catarina,paid,50363.1,63.0,56
+2021,8,Sergipe,paid,12152.72,9.0,9
+2021,8,Sergipe,pending,1950.0,1.0,1
+2021,8,São Paulo,cancelled,14129.74,19.0,19
+2021,8,São Paulo,paid,253942.24,331.0,313
+2021,8,Tocantins,cancelled,297.99,1.0,1
+2021,8,Tocantins,paid,5670.0,2.0,2
+2021,9,(sem estado),paid,1396.0,2.0,2
+2021,9,Acre,paid,4173.36,4.0,4
+2021,9,Alagoas,paid,2413.32,7.0,5
+2021,9,Amapá,cancelled,3485.0,1.0,1
+2021,9,Amapá,paid,1440.57,1.0,1
+2021,9,Amazonas,cancelled,2441.25,1.0,1
+2021,9,Amazonas,paid,4938.0,7.0,7
+2021,9,Bahia,cancelled,6395.0,5.0,5
+2021,9,Bahia,paid,29238.69,42.0,39
+2021,9,Ceará,paid,12132.39,19.0,16
+2021,9,Distrito Federal,cancelled,4174.36,2.0,2
+2021,9,Distrito Federal,paid,17618.61,24.0,19
+2021,9,Espírito Santo,paid,9659.22,19.0,19
+2021,9,Goiás,paid,15121.74,14.0,13
+2021,9,Maranhão,cancelled,6100.0,2.0,2
+2021,9,Maranhão,paid,18734.01,8.0,8
+2021,9,Mato Grosso,cancelled,3320.04,2.0,2
+2021,9,Mato Grosso,paid,4831.5,6.0,6
+2021,9,Mato Grosso do Sul,paid,6034.5,13.0,9
+2021,9,Minas Gerais,cancelled,6364.07,5.0,5
+2021,9,Minas Gerais,paid,78075.77,82.0,77
+2021,9,Paraná,cancelled,2394.51,4.0,4
+2021,9,Paraná,paid,28963.07,44.0,40
+2021,9,Paraíba,paid,5423.75,10.0,10
+2021,9,Pará,paid,25514.36,16.0,16
+2021,9,Pernambuco,paid,12789.98,22.0,17
+2021,9,Piauí,paid,12519.57,6.0,6
+2021,9,Rio Grande do Norte,paid,13991.1,11.0,11
+2021,9,Rio Grande do Sul,cancelled,3237.43,8.0,5
+2021,9,Rio Grande do Sul,paid,45908.6,59.0,48
+2021,9,Rio de Janeiro,cancelled,6356.01,12.0,12
+2021,9,Rio de Janeiro,paid,115938.36,147.0,140
+2021,9,Rondônia,cancelled,389.0,1.0,1
+2021,9,Rondônia,paid,5087.05,5.0,5
+2021,9,Roraima,paid,2477.0,4.0,4
+2021,9,Santa Catarina,cancelled,1314.0,3.0,2
+2021,9,Santa Catarina,paid,37194.06,50.0,46
+2021,9,Sergipe,paid,10568.0,4.0,4
+2021,9,São Paulo,cancelled,19018.35,21.0,21
+2021,9,São Paulo,paid,218435.74,284.0,259
+2021,10,(sem estado),cancelled,146.0,1.0,1
+2021,10,(sem estado),paid,445.99,2.0,2
+2021,10,(sem estado),pending,2500.0,2.0,2
+2021,10,Alagoas,cancelled,2575.0,1.0,1
+2021,10,Alagoas,paid,5812.49,4.0,4
+2021,10,Amapá,paid,2330.34,2.0,2
+2021,10,Amazonas,cancelled,389.0,1.0,1
+2021,10,Amazonas,paid,9382.74,8.0,8
+2021,10,Bahia,cancelled,4263.49,9.0,9
+2021,10,Bahia,paid,41326.11,57.0,56
+2021,10,Ceará,cancelled,2193.0,2.0,2
+2021,10,Ceará,paid,23981.89,36.0,28
+2021,10,Distrito Federal,cancelled,3624.94,2.0,2
+2021,10,Distrito Federal,paid,23005.7,17.0,15
+2021,10,Espírito Santo,cancelled,1154.95,2.0,2
+2021,10,Espírito Santo,paid,46029.29,40.0,36
+2021,10,Goiás,paid,35342.87,35.0,34
+2021,10,Maranhão,cancelled,2180.0,1.0,1
+2021,10,Maranhão,paid,8914.65,6.0,6
+2021,10,Mato Grosso,paid,16712.85,12.0,12
+2021,10,Mato Grosso do Sul,cancelled,666.24,1.0,1
+2021,10,Mato Grosso do Sul,paid,6478.28,17.0,12
+2021,10,Minas Gerais,cancelled,6856.05,5.0,5
+2021,10,Minas Gerais,paid,96639.37,125.0,124
+2021,10,Paraná,cancelled,5107.23,5.0,4
+2021,10,Paraná,paid,42975.09,50.0,47
+2021,10,Paraíba,cancelled,4140.0,1.0,1
+2021,10,Paraíba,paid,18854.99,21.0,13
+2021,10,Pará,paid,13110.02,20.0,18
+2021,10,Pernambuco,cancelled,5653.15,3.0,3
+2021,10,Pernambuco,paid,27586.73,46.0,32
+2021,10,Piauí,paid,4050.89,5.0,5
+2021,10,Rio Grande do Norte,paid,6811.85,5.0,5
+2021,10,Rio Grande do Sul,cancelled,1166.0,2.0,2
+2021,10,Rio Grande do Sul,paid,39334.71,56.0,50
+2021,10,Rio de Janeiro,cancelled,10313.67,11.0,11
+2021,10,Rio de Janeiro,paid,94183.82,149.0,137
+2021,10,Rondônia,paid,3166.04,2.0,2
+2021,10,Roraima,paid,4784.0,3.0,3
+2021,10,Santa Catarina,cancelled,4573.9,3.0,3
+2021,10,Santa Catarina,paid,53532.07,55.0,53
+2021,10,Sergipe,cancelled,3888.0,2.0,2
+2021,10,Sergipe,paid,11435.06,10.0,10
+2021,10,São Paulo,cancelled,24871.75,23.0,21
+2021,10,São Paulo,paid,229776.43,269.0,257
+2021,10,Tocantins,paid,2689.56,1.0,1
+2021,11,(sem estado),paid,2169.0,1.0,1
+2021,11,Acre,cancelled,550.05,1.0,1
+2021,11,Acre,paid,1228.5,1.0,1
+2021,11,Alagoas,paid,5548.6,9.0,9
+2021,11,Amapá,paid,2769.0,2.0,2
+2021,11,Amazonas,paid,14747.75,13.0,12
+2021,11,Bahia,cancelled,6694.82,7.0,7
+2021,11,Bahia,paid,58810.61,92.0,86
+2021,11,Ceará,cancelled,8581.1,5.0,5
+2021,11,Ceará,paid,14093.5,21.0,21
+2021,11,Distrito Federal,paid,15590.47,26.0,25
+2021,11,Espírito Santo,cancelled,128.0,1.0,1
+2021,11,Espírito Santo,paid,19664.92,26.0,26
+2021,11,Goiás,cancelled,1165.0,2.0,2
+2021,11,Goiás,paid,23014.46,26.0,24
+2021,11,Maranhão,cancelled,7070.1,4.0,4
+2021,11,Maranhão,paid,22395.62,19.0,19
+2021,11,Mato Grosso,cancelled,252.0,1.0,1
+2021,11,Mato Grosso,paid,7251.97,8.0,7
+2021,11,Mato Grosso do Sul,paid,9818.97,11.0,11
+2021,11,Minas Gerais,cancelled,7174.88,8.0,7
+2021,11,Minas Gerais,paid,130527.32,162.0,138
+2021,11,Paraná,cancelled,12193.87,8.0,8
+2021,11,Paraná,paid,32402.43,55.0,48
+2021,11,Paraíba,cancelled,5314.45,3.0,3
+2021,11,Paraíba,paid,17421.7,18.0,15
+2021,11,Pará,cancelled,413.25,1.0,1
+2021,11,Pará,paid,19797.99,17.0,16
+2021,11,Pernambuco,cancelled,1389.0,3.0,3
+2021,11,Pernambuco,paid,28829.77,42.0,39
+2021,11,Piauí,cancelled,158.0,1.0,1
+2021,11,Piauí,paid,12854.75,16.0,14
+2021,11,Rio Grande do Norte,paid,11548.45,16.0,14
+2021,11,Rio Grande do Sul,cancelled,4646.25,4.0,4
+2021,11,Rio Grande do Sul,paid,32210.55,54.0,53
+2021,11,Rio de Janeiro,cancelled,6653.74,8.0,7
+2021,11,Rio de Janeiro,paid,140895.39,200.0,180
+2021,11,Rondônia,paid,5636.0,4.0,4
+2021,11,Roraima,cancelled,576.0,1.0,1
+2021,11,Santa Catarina,cancelled,1886.72,6.0,5
+2021,11,Santa Catarina,paid,34429.93,45.0,42
+2021,11,Sergipe,cancelled,4170.9,1.0,1
+2021,11,Sergipe,paid,5090.4,4.0,4
+2021,11,São Paulo,cancelled,32456.51,26.0,26
+2021,11,São Paulo,paid,252447.59,333.0,306
+2021,11,Tocantins,paid,4331.48,7.0,7
+2021,12,(sem estado),paid,682.5,1.0,1
+2021,12,Acre,paid,869.05,1.0,1
+2021,12,Alagoas,cancelled,325.0,1.0,1
+2021,12,Alagoas,paid,10493.79,8.0,8
+2021,12,Amapá,paid,293.48,1.0,1
+2021,12,Amazonas,cancelled,1360.0,1.0,1
+2021,12,Amazonas,paid,15820.37,11.0,11
+2021,12,Bahia,cancelled,5152.18,3.0,3
+2021,12,Bahia,paid,55070.44,46.0,45
+2021,12,Ceará,paid,13719.68,13.0,13
+2021,12,Distrito Federal,cancelled,1986.0,6.0,3
+2021,12,Distrito Federal,paid,29885.01,26.0,23
+2021,12,Espírito Santo,cancelled,1399.9,1.0,1
+2021,12,Espírito Santo,paid,17931.27,31.0,29
+2021,12,Goiás,cancelled,1752.1,3.0,3
+2021,12,Goiás,paid,21644.15,24.0,22
+2021,12,Maranhão,paid,20197.76,18.0,14
+2021,12,Mato Grosso,cancelled,445.0,1.0,1
+2021,12,Mato Grosso,paid,11561.54,15.0,13
+2021,12,Mato Grosso do Sul,cancelled,639.0,1.0,1
+2021,12,Mato Grosso do Sul,paid,20077.63,15.0,15
+2021,12,Minas Gerais,cancelled,9935.87,9.0,9
+2021,12,Minas Gerais,paid,110833.21,139.0,127
+2021,12,Paraná,cancelled,1059.9,3.0,3
+2021,12,Paraná,paid,50099.64,47.0,45
+2021,12,Paraíba,paid,10479.02,11.0,10
+2021,12,Pará,cancelled,2379.0,1.0,1
+2021,12,Pará,paid,17086.15,23.0,23
+2021,12,Pernambuco,cancelled,1528.21,2.0,2
+2021,12,Pernambuco,paid,21157.51,27.0,27
+2021,12,Piauí,paid,5082.99,7.0,7
+2021,12,Rio Grande do Norte,cancelled,1565.0,3.0,3
+2021,12,Rio Grande do Norte,paid,12102.46,13.0,13
+2021,12,Rio Grande do Sul,cancelled,10880.0,1.0,1
+2021,12,Rio Grande do Sul,paid,77624.82,58.0,58
+2021,12,Rio de Janeiro,cancelled,11522.56,13.0,13
+2021,12,Rio de Janeiro,paid,133702.57,131.0,126
+2021,12,Rondônia,paid,724.0,2.0,2
+2021,12,Roraima,paid,4504.68,3.0,3
+2021,12,Santa Catarina,cancelled,793.38,2.0,2
+2021,12,Santa Catarina,paid,74680.08,67.0,64
+2021,12,Sergipe,cancelled,1808.0,2.0,2
+2021,12,Sergipe,paid,12728.72,8.0,8
+2021,12,São Paulo,cancelled,42102.2,32.0,31
+2021,12,São Paulo,paid,245564.96,280.0,271
+2021,12,Tocantins,paid,8774.97,6.0,6
+2022,1,(sem estado),paid,4593.0,3.0,3
+2022,1,Alagoas,paid,6695.94,9.0,9
+2022,1,Amazonas,cancelled,455.0,1.0,1
+2022,1,Amazonas,paid,4127.6,4.0,4
+2022,1,Bahia,cancelled,3639.9,4.0,4
+2022,1,Bahia,paid,39160.08,51.0,50
+2022,1,Ceará,cancelled,620.82,2.0,2
+2022,1,Ceará,paid,19056.44,23.0,23
+2022,1,Distrito Federal,cancelled,306.0,1.0,1
+2022,1,Distrito Federal,paid,16155.26,17.0,16
+2022,1,Espírito Santo,cancelled,1301.91,1.0,1
+2022,1,Espírito Santo,paid,8811.99,15.0,13
+2022,1,Goiás,cancelled,2885.0,2.0,2
+2022,1,Goiás,paid,25107.06,27.0,26
+2022,1,Maranhão,cancelled,2633.9,2.0,2
+2022,1,Maranhão,paid,9578.67,11.0,11
+2022,1,Mato Grosso,paid,18257.82,13.0,13
+2022,1,Mato Grosso do Sul,paid,8161.99,13.0,13
+2022,1,Minas Gerais,cancelled,10222.31,8.0,8
+2022,1,Minas Gerais,paid,72675.49,80.0,75
+2022,1,Paraná,cancelled,3728.0,10.0,4
+2022,1,Paraná,paid,35902.05,48.0,42
+2022,1,Paraíba,paid,14489.91,12.0,12
+2022,1,Pará,cancelled,6699.9,1.0,1
+2022,1,Pará,paid,20550.75,19.0,17
+2022,1,Pernambuco,cancelled,1919.97,3.0,3
+2022,1,Pernambuco,paid,37569.14,35.0,34
+2022,1,Piauí,paid,12228.32,10.0,10
+2022,1,Rio Grande do Norte,cancelled,1571.81,2.0,2
+2022,1,Rio Grande do Norte,paid,14896.14,14.0,12
+2022,1,Rio Grande do Sul,cancelled,2435.1,4.0,4
+2022,1,Rio Grande do Sul,paid,46803.52,48.0,44
+2022,1,Rio de Janeiro,cancelled,7154.55,9.0,7
+2022,1,Rio de Janeiro,paid,90452.99,104.0,103
+2022,1,Rondônia,paid,1094.9,2.0,2
+2022,1,Roraima,cancelled,540.0,1.0,1
+2022,1,Roraima,paid,985.0,3.0,2
+2022,1,Santa Catarina,cancelled,3742.7,5.0,5
+2022,1,Santa Catarina,paid,49432.46,48.0,47
+2022,1,Sergipe,paid,5389.82,9.0,9
+2022,1,São Paulo,cancelled,34054.42,26.0,26
+2022,1,São Paulo,paid,202603.72,240.0,225
+2022,1,Tocantins,paid,1266.9,3.0,3
+2022,2,Acre,paid,495.88,1.0,1
+2022,2,Alagoas,cancelled,2398.0,1.0,1
+2022,2,Alagoas,paid,7720.88,10.0,10
+2022,2,Amapá,paid,1499.0,1.0,1
+2022,2,Amazonas,cancelled,3972.3,2.0,2
+2022,2,Amazonas,paid,6072.9,4.0,4
+2022,2,Bahia,cancelled,3333.88,4.0,4
+2022,2,Bahia,paid,44699.85,56.0,55
+2022,2,Ceará,cancelled,7693.9,2.0,2
+2022,2,Ceará,paid,31496.8,33.0,27
+2022,2,Distrito Federal,paid,15923.07,15.0,13
+2022,2,Espírito Santo,paid,10360.27,15.0,13
+2022,2,Goiás,cancelled,1209.9,2.0,2
+2022,2,Goiás,paid,20624.09,27.0,27
+2022,2,Maranhão,cancelled,1638.52,1.0,1
+2022,2,Maranhão,paid,7234.01,9.0,9
+2022,2,Mato Grosso,cancelled,3184.88,2.0,2
+2022,2,Mato Grosso,paid,10982.26,16.0,12
+2022,2,Mato Grosso do Sul,paid,10350.49,8.0,8
+2022,2,Minas Gerais,cancelled,10797.68,10.0,9
+2022,2,Minas Gerais,paid,95266.01,94.0,87
+2022,2,Paraná,cancelled,1326.9,2.0,2
+2022,2,Paraná,paid,32046.74,27.0,26
+2022,2,Paraíba,cancelled,681.0,1.0,1
+2022,2,Paraíba,paid,7457.51,5.0,4
+2022,2,Pará,paid,12393.32,11.0,10
+2022,2,Pernambuco,cancelled,215.0,1.0,1
+2022,2,Pernambuco,paid,20486.18,34.0,34
+2022,2,Piauí,paid,3376.0,4.0,4
+2022,2,Rio Grande do Norte,cancelled,628.0,1.0,1
+2022,2,Rio Grande do Norte,paid,8854.71,20.0,16
+2022,2,Rio Grande do Sul,cancelled,644.9,2.0,2
+2022,2,Rio Grande do Sul,paid,22286.44,34.0,33
+2022,2,Rio de Janeiro,cancelled,11133.76,10.0,10
+2022,2,Rio de Janeiro,paid,76079.93,110.0,96
+2022,2,Rondônia,cancelled,4999.0,1.0,1
+2022,2,Rondônia,paid,4072.61,5.0,5
+2022,2,Santa Catarina,cancelled,560.28,1.0,1
+2022,2,Santa Catarina,paid,26465.43,27.0,26
+2022,2,Sergipe,paid,12046.95,16.0,15
+2022,2,São Paulo,cancelled,16259.98,11.0,11
+2022,2,São Paulo,paid,174790.11,182.0,174
+2022,2,Tocantins,paid,2951.58,5.0,5
+2022,3,(sem estado),cancelled,771.22,3.0,3
+2022,3,(sem estado),paid,1589.85,4.0,4
+2022,3,Acre,paid,3180.6,1.0,1
+2022,3,Alagoas,paid,8148.63,12.0,12
+2022,3,Amapá,cancelled,399.0,3.0,1
+2022,3,Amapá,paid,1990.0,1.0,1
+2022,3,Amazonas,paid,3494.06,7.0,6
+2022,3,Bahia,cancelled,1340.45,3.0,3
+2022,3,Bahia,paid,37682.79,70.0,66
+2022,3,Ceará,cancelled,3436.0,3.0,3
+2022,3,Ceará,paid,35694.94,36.0,34
+2022,3,Distrito Federal,cancelled,3285.2,2.0,2
+2022,3,Distrito Federal,paid,28212.9,22.0,21
+2022,3,Espírito Santo,cancelled,4524.24,2.0,2
+2022,3,Espírito Santo,paid,30986.78,21.0,19
+2022,3,Goiás,cancelled,3662.0,1.0,1
+2022,3,Goiás,paid,33416.16,46.0,38
+2022,3,Maranhão,paid,9832.38,12.0,12
+2022,3,Mato Grosso,paid,15219.52,21.0,20
+2022,3,Mato Grosso do Sul,cancelled,798.0,1.0,1
+2022,3,Mato Grosso do Sul,paid,11713.92,16.0,15
+2022,3,Minas Gerais,cancelled,5451.91,5.0,4
+2022,3,Minas Gerais,paid,105050.4,156.0,132
+2022,3,Paraná,cancelled,3608.75,8.0,8
+2022,3,Paraná,paid,43456.64,64.0,62
+2022,3,Paraíba,cancelled,1353.03,2.0,2
+2022,3,Paraíba,paid,8457.07,21.0,18
+2022,3,Pará,cancelled,420.3,1.0,1
+2022,3,Pará,paid,8447.57,13.0,13
+2022,3,Pernambuco,cancelled,2774.38,3.0,3
+2022,3,Pernambuco,paid,20721.78,37.0,33
+2022,3,Piauí,cancelled,565.8,1.0,1
+2022,3,Piauí,paid,11661.27,9.0,9
+2022,3,Rio Grande do Norte,cancelled,2115.9,1.0,1
+2022,3,Rio Grande do Norte,paid,12197.39,15.0,14
+2022,3,Rio Grande do Sul,cancelled,3846.21,8.0,8
+2022,3,Rio Grande do Sul,paid,41881.79,67.0,52
+2022,3,Rio de Janeiro,cancelled,3766.78,7.0,7
+2022,3,Rio de Janeiro,paid,91483.85,128.0,108
+2022,3,Rondônia,cancelled,2519.9,3.0,3
+2022,3,Rondônia,paid,4981.9,5.0,5
+2022,3,Santa Catarina,cancelled,5483.85,4.0,4
+2022,3,Santa Catarina,paid,53879.51,48.0,44
+2022,3,Sergipe,paid,5204.73,11.0,10
+2022,3,São Paulo,cancelled,26423.5,37.0,27
+2022,3,São Paulo,paid,223447.79,325.0,278
+2022,3,Tocantins,paid,2554.75,3.0,3
+2022,4,(sem estado),cancelled,345.0,1.0,1
+2022,4,Acre,paid,280.28,1.0,1
+2022,4,Alagoas,cancelled,671.0,1.0,1
+2022,4,Alagoas,paid,5123.71,9.0,8
+2022,4,Amapá,paid,1109.44,5.0,3
+2022,4,Amazonas,paid,3579.0,3.0,2
+2022,4,Bahia,cancelled,4211.99,6.0,6
+2022,4,Bahia,paid,51508.79,72.0,70
+2022,4,Ceará,cancelled,1289.76,3.0,3
+2022,4,Ceará,paid,9439.46,13.0,13
+2022,4,Distrito Federal,cancelled,992.38,4.0,3
+2022,4,Distrito Federal,paid,15448.45,19.0,19
+2022,4,Espírito Santo,cancelled,637.0,2.0,2
+2022,4,Espírito Santo,paid,27942.22,22.0,18
+2022,4,Goiás,cancelled,5595.59,1.0,1
+2022,4,Goiás,paid,39222.71,36.0,33
+2022,4,Maranhão,cancelled,2110.0,1.0,1
+2022,4,Maranhão,paid,11339.67,8.0,8
+2022,4,Mato Grosso,paid,14970.96,14.0,14
+2022,4,Mato Grosso do Sul,paid,3702.58,10.0,6
+2022,4,Minas Gerais,cancelled,14365.47,8.0,8
+2022,4,Minas Gerais,paid,105412.99,111.0,103
+2022,4,Paraná,cancelled,7526.54,9.0,7
+2022,4,Paraná,paid,39371.68,50.0,45
+2022,4,Paraíba,paid,13452.87,10.0,10
+2022,4,Pará,paid,12684.24,16.0,15
+2022,4,Pernambuco,cancelled,618.9,2.0,2
+2022,4,Pernambuco,paid,34493.39,39.0,37
+2022,4,Piauí,paid,2362.07,4.0,3
+2022,4,Rio Grande do Norte,cancelled,1279.0,1.0,1
+2022,4,Rio Grande do Norte,paid,3961.72,7.0,7
+2022,4,Rio Grande do Sul,cancelled,4230.93,6.0,6
+2022,4,Rio Grande do Sul,paid,41648.34,51.0,45
+2022,4,Rio de Janeiro,cancelled,14581.73,10.0,8
+2022,4,Rio de Janeiro,paid,84386.64,116.0,103
+2022,4,Rondônia,paid,2236.84,9.0,4
+2022,4,Roraima,paid,2872.0,3.0,3
+2022,4,Santa Catarina,cancelled,2108.0,2.0,2
+2022,4,Santa Catarina,paid,50961.87,48.0,43
+2022,4,Sergipe,cancelled,49.5,1.0,1
+2022,4,Sergipe,paid,9132.19,8.0,8
+2022,4,São Paulo,cancelled,11392.73,23.0,20
+2022,4,São Paulo,paid,185033.98,239.0,210
+2022,4,Tocantins,paid,1301.64,3.0,3
+2022,5,(sem estado),cancelled,545.97,2.0,2
+2022,5,(sem estado),paid,1728.91,3.0,3
+2022,5,Acre,paid,4640.9,4.0,4
+2022,5,Alagoas,paid,11262.97,14.0,14
+2022,5,Amapá,paid,1364.58,1.0,1
+2022,5,Amazonas,paid,6372.85,6.0,5
+2022,5,Bahia,cancelled,10542.15,4.0,4
+2022,5,Bahia,paid,46084.11,70.0,67
+2022,5,Ceará,cancelled,1466.1,2.0,2
+2022,5,Ceará,paid,13582.74,13.0,13
+2022,5,Distrito Federal,cancelled,848.8,2.0,2
+2022,5,Distrito Federal,paid,6362.24,9.0,9
+2022,5,Espírito Santo,cancelled,1851.0,1.0,1
+2022,5,Espírito Santo,paid,34012.16,32.0,30
+2022,5,Goiás,cancelled,1889.5,1.0,1
+2022,5,Goiás,paid,40155.29,31.0,30
+2022,5,Maranhão,cancelled,287.37,1.0,1
+2022,5,Maranhão,paid,17094.68,18.0,13
+2022,5,Mato Grosso,cancelled,2399.0,1.0,1
+2022,5,Mato Grosso,paid,10911.18,17.0,16
+2022,5,Mato Grosso do Sul,cancelled,1189.9,1.0,1
+2022,5,Mato Grosso do Sul,paid,7423.53,10.0,10
+2022,5,Minas Gerais,cancelled,3834.0,5.0,5
+2022,5,Minas Gerais,paid,111749.42,122.0,117
+2022,5,Paraná,cancelled,6390.3,5.0,4
+2022,5,Paraná,paid,55325.38,65.0,57
+2022,5,Paraíba,paid,2494.76,5.0,5
+2022,5,Pará,cancelled,5056.48,5.0,5
+2022,5,Pará,paid,20045.02,21.0,19
+2022,5,Pernambuco,cancelled,4273.0,2.0,2
+2022,5,Pernambuco,paid,25356.67,29.0,29
+2022,5,Piauí,paid,7570.66,6.0,6
+2022,5,Rio Grande do Norte,paid,17928.25,10.0,10
+2022,5,Rio Grande do Sul,cancelled,1753.0,3.0,3
+2022,5,Rio Grande do Sul,paid,41955.76,39.0,39
+2022,5,Rio de Janeiro,cancelled,18618.85,16.0,16
+2022,5,Rio de Janeiro,paid,116449.81,111.0,108
+2022,5,Rondônia,paid,10362.01,9.0,7
+2022,5,Santa Catarina,cancelled,3176.46,4.0,4
+2022,5,Santa Catarina,paid,35880.37,43.0,41
+2022,5,Sergipe,paid,9432.61,11.0,11
+2022,5,São Paulo,cancelled,43447.83,36.0,27
+2022,5,São Paulo,paid,301183.19,309.0,274
+2022,5,Tocantins,paid,808.0,3.0,3
+2022,6,(sem estado),cancelled,5733.91,1.0,1
+2022,6,(sem estado),paid,1589.9,2.0,2
+2022,6,Acre,paid,3022.1,1.0,1
+2022,6,Alagoas,paid,9981.6,9.0,9
+2022,6,Amazonas,paid,2306.0,2.0,2
+2022,6,Bahia,cancelled,16741.08,7.0,7
+2022,6,Bahia,paid,54166.23,40.0,39
+2022,6,Ceará,cancelled,3399.9,1.0,1
+2022,6,Ceará,paid,4595.82,10.0,9
+2022,6,Distrito Federal,cancelled,3905.82,2.0,2
+2022,6,Distrito Federal,paid,25108.84,12.0,12
+2022,6,Espírito Santo,cancelled,3241.0,2.0,2
+2022,6,Espírito Santo,paid,12699.78,20.0,20
+2022,6,Goiás,cancelled,735.0,1.0,1
+2022,6,Goiás,paid,7702.71,11.0,10
+2022,6,Maranhão,cancelled,1755.1,2.0,2
+2022,6,Maranhão,paid,19021.86,14.0,14
+2022,6,Mato Grosso,cancelled,2750.8,1.0,1
+2022,6,Mato Grosso,paid,25823.08,27.0,25
+2022,6,Mato Grosso do Sul,paid,7414.82,10.0,10
+2022,6,Minas Gerais,cancelled,10903.47,6.0,6
+2022,6,Minas Gerais,paid,100669.85,102.0,98
+2022,6,Paraná,paid,50934.55,38.0,36
+2022,6,Paraíba,paid,3304.56,6.0,6
+2022,6,Pará,cancelled,2745.74,1.0,1
+2022,6,Pará,paid,12151.51,17.0,15
+2022,6,Pernambuco,cancelled,1448.0,2.0,2
+2022,6,Pernambuco,paid,6725.68,19.0,16
+2022,6,Piauí,cancelled,999.9,1.0,1
+2022,6,Piauí,paid,744.1,2.0,2
+2022,6,Rio Grande do Norte,paid,2282.9,7.0,5
+2022,6,Rio Grande do Sul,cancelled,2609.71,3.0,3
+2022,6,Rio Grande do Sul,paid,28297.16,31.0,30
+2022,6,Rio de Janeiro,cancelled,11722.25,9.0,9
+2022,6,Rio de Janeiro,paid,84846.2,90.0,88
+2022,6,Rondônia,paid,3292.4,3.0,3
+2022,6,Roraima,paid,4415.14,4.0,4
+2022,6,Santa Catarina,cancelled,2756.9,2.0,2
+2022,6,Santa Catarina,paid,50528.27,36.0,36
+2022,6,Sergipe,cancelled,698.0,1.0,1
+2022,6,Sergipe,paid,15135.69,16.0,16
+2022,6,São Paulo,cancelled,10080.8,16.0,16
+2022,6,São Paulo,paid,249704.69,197.0,194
+2022,6,Tocantins,cancelled,645.0,1.0,1
+2022,6,Tocantins,paid,18247.31,7.0,7
+2022,7,(sem estado),cancelled,2530.0,1.0,1
+2022,7,(sem estado),paid,2773.8,1.0,1
+2022,7,Acre,cancelled,929.9,1.0,1
+2022,7,Acre,paid,625.0,2.0,2
+2022,7,Alagoas,cancelled,739.9,1.0,1
+2022,7,Alagoas,paid,12659.38,13.0,13
+2022,7,Amapá,paid,1310.0,1.0,1
+2022,7,Amazonas,paid,5765.43,4.0,4
+2022,7,Bahia,cancelled,2699.46,5.0,5
+2022,7,Bahia,paid,39639.11,48.0,48
+2022,7,Ceará,paid,11296.7,21.0,19
+2022,7,Distrito Federal,paid,12714.01,15.0,15
+2022,7,Espírito Santo,cancelled,915.31,2.0,2
+2022,7,Espírito Santo,paid,24095.29,29.0,29
+2022,7,Goiás,cancelled,630.0,1.0,1
+2022,7,Goiás,paid,17358.59,26.0,20
+2022,7,Maranhão,cancelled,1479.8,2.0,2
+2022,7,Maranhão,paid,15875.62,12.0,12
+2022,7,Mato Grosso,cancelled,3295.9,1.0,1
+2022,7,Mato Grosso,paid,9220.77,18.0,16
+2022,7,Mato Grosso do Sul,paid,15103.98,20.0,20
+2022,7,Minas Gerais,cancelled,12223.08,12.0,11
+2022,7,Minas Gerais,paid,133075.72,152.0,136
+2022,7,Paraná,cancelled,3630.7,3.0,3
+2022,7,Paraná,paid,37433.8,50.0,50
+2022,7,Paraíba,paid,8037.43,10.0,10
+2022,7,Pará,cancelled,851.1,6.0,2
+2022,7,Pará,paid,10691.22,15.0,15
+2022,7,Pernambuco,paid,23290.74,35.0,35
+2022,7,Piauí,cancelled,126.96,1.0,1
+2022,7,Piauí,paid,6714.3,3.0,3
+2022,7,Rio Grande do Norte,cancelled,3110.84,3.0,3
+2022,7,Rio Grande do Norte,paid,10809.4,7.0,7
+2022,7,Rio Grande do Sul,cancelled,6950.0,2.0,2
+2022,7,Rio Grande do Sul,paid,41581.57,52.0,48
+2022,7,Rio de Janeiro,cancelled,19750.98,11.0,11
+2022,7,Rio de Janeiro,paid,111949.3,133.0,128
+2022,7,Rondônia,paid,8313.43,8.0,8
+2022,7,Roraima,paid,515.2,1.0,1
+2022,7,Santa Catarina,cancelled,1260.0,1.0,1
+2022,7,Santa Catarina,paid,34218.98,53.0,50
+2022,7,Sergipe,paid,18489.7,17.0,17
+2022,7,São Paulo,cancelled,25384.13,22.0,22
+2022,7,São Paulo,paid,229705.9,247.0,238
+2022,7,Tocantins,paid,2976.45,2.0,2
+2022,8,(sem estado),paid,2356.85,3.0,3
+2022,8,Acre,paid,742.5,1.0,1
+2022,8,Alagoas,cancelled,765.0,2.0,1
+2022,8,Alagoas,paid,22358.17,14.0,14
+2022,8,Amapá,cancelled,1348.2,1.0,1
+2022,8,Amazonas,paid,3024.3,6.0,6
+2022,8,Bahia,cancelled,1637.0,2.0,2
+2022,8,Bahia,paid,47750.69,54.0,48
+2022,8,Ceará,cancelled,2787.5,3.0,3
+2022,8,Ceará,paid,19282.33,42.0,24
+2022,8,Distrito Federal,cancelled,3430.81,3.0,3
+2022,8,Distrito Federal,paid,17821.81,21.0,19
+2022,8,Espírito Santo,cancelled,1186.0,3.0,3
+2022,8,Espírito Santo,paid,26483.64,40.0,34
+2022,8,Goiás,cancelled,2142.5,4.0,3
+2022,8,Goiás,paid,34668.87,40.0,33
+2022,8,Maranhão,cancelled,4352.81,4.0,4
+2022,8,Maranhão,paid,7021.09,15.0,13
+2022,8,Mato Grosso,cancelled,570.0,1.0,1
+2022,8,Mato Grosso,paid,24817.43,25.0,21
+2022,8,Mato Grosso do Sul,paid,11684.98,16.0,15
+2022,8,Minas Gerais,cancelled,10245.2,6.0,6
+2022,8,Minas Gerais,paid,115511.26,171.0,150
+2022,8,Paraná,cancelled,8219.1,7.0,7
+2022,8,Paraná,paid,50969.6,74.0,69
+2022,8,Paraíba,cancelled,1010.63,2.0,2
+2022,8,Paraíba,paid,15158.74,24.0,21
+2022,8,Pará,cancelled,1639.9,1.0,1
+2022,8,Pará,paid,20177.07,27.0,26
+2022,8,Pernambuco,cancelled,327.5,2.0,2
+2022,8,Pernambuco,paid,36721.43,44.0,39
+2022,8,Piauí,cancelled,260.0,1.0,1
+2022,8,Piauí,paid,12035.24,20.0,15
+2022,8,Rio Grande do Norte,paid,8122.24,7.0,7
+2022,8,Rio Grande do Sul,cancelled,14461.52,6.0,6
+2022,8,Rio Grande do Sul,paid,56322.4,68.0,64
+2022,8,Rio de Janeiro,cancelled,8039.0,11.0,10
+2022,8,Rio de Janeiro,paid,142551.0,147.0,132
+2022,8,Rondônia,paid,6719.9,8.0,8
+2022,8,Roraima,paid,9313.09,5.0,5
+2022,8,Santa Catarina,cancelled,1999.53,3.0,3
+2022,8,Santa Catarina,paid,51050.04,58.0,48
+2022,8,Sergipe,paid,18937.44,16.0,16
+2022,8,São Paulo,cancelled,21681.74,33.0,26
+2022,8,São Paulo,paid,323688.75,340.0,301
+2022,8,São Paulo,pending,709.8,1.0,1
+2022,8,Tocantins,paid,1449.99,3.0,3
+2022,9,(sem estado),paid,138.0,2.0,1
+2022,9,Acre,cancelled,1727.49,1.0,1
+2022,9,Acre,paid,2806.39,2.0,2
+2022,9,Alagoas,cancelled,540.0,1.0,1
+2022,9,Alagoas,paid,3918.89,7.0,6
+2022,9,Amazonas,paid,11165.95,9.0,9
+2022,9,Bahia,cancelled,1394.12,2.0,2
+2022,9,Bahia,paid,54231.11,45.0,44
+2022,9,Ceará,cancelled,280.35,1.0,1
+2022,9,Ceará,paid,20679.82,28.0,23
+2022,9,Distrito Federal,paid,16910.65,14.0,12
+2022,9,Espírito Santo,cancelled,2223.0,1.0,1
+2022,9,Espírito Santo,paid,27857.93,25.0,23
+2022,9,Goiás,cancelled,3122.4,3.0,3
+2022,9,Goiás,paid,25377.26,21.0,16
+2022,9,Maranhão,paid,14869.0,15.0,14
+2022,9,Mato Grosso,cancelled,5116.12,1.0,1
+2022,9,Mato Grosso,paid,12361.5,11.0,11
+2022,9,Mato Grosso do Sul,paid,15076.85,11.0,11
+2022,9,Minas Gerais,cancelled,10275.7,8.0,7
+2022,9,Minas Gerais,paid,129482.61,121.0,105
+2022,9,Paraná,cancelled,28404.67,9.0,9
+2022,9,Paraná,paid,49532.8,58.0,50
+2022,9,Paraíba,cancelled,731.0,1.0,1
+2022,9,Paraíba,paid,2097.9,4.0,4
+2022,9,Pará,paid,19729.52,18.0,16
+2022,9,Pernambuco,cancelled,6831.79,3.0,3
+2022,9,Pernambuco,paid,28375.74,34.0,30
+2022,9,Piauí,paid,4417.65,15.0,9
+2022,9,Rio Grande do Norte,cancelled,1233.1,3.0,2
+2022,9,Rio Grande do Norte,paid,9946.71,12.0,10
+2022,9,Rio Grande do Sul,cancelled,5274.4,5.0,5
+2022,9,Rio Grande do Sul,paid,54333.81,60.0,55
+2022,9,Rio de Janeiro,cancelled,9463.89,12.0,12
+2022,9,Rio de Janeiro,paid,100172.39,144.0,117
+2022,9,Rondônia,paid,4749.78,5.0,5
+2022,9,Roraima,paid,4896.0,1.0,1
+2022,9,Santa Catarina,cancelled,1048.5,1.0,1
+2022,9,Santa Catarina,paid,66057.68,57.0,49
+2022,9,Sergipe,cancelled,883.9,2.0,2
+2022,9,Sergipe,paid,7599.52,11.0,11
+2022,9,São Paulo,cancelled,23992.65,16.0,14
+2022,9,São Paulo,paid,262122.24,292.0,251
+2022,9,Tocantins,cancelled,985.0,1.0,1
+2022,9,Tocantins,paid,6255.12,3.0,3
+2022,10,(sem estado),cancelled,4438.99,2.0,2
+2022,10,(sem estado),paid,1819.38,2.0,2
+2022,10,Acre,paid,7985.0,13.0,4
+2022,10,Alagoas,paid,12519.11,17.0,12
+2022,10,Amazonas,cancelled,102.3,1.0,1
+2022,10,Amazonas,paid,2253.0,3.0,3
+2022,10,Bahia,cancelled,2992.8,3.0,3
+2022,10,Bahia,paid,58046.1,58.0,56
+2022,10,Ceará,cancelled,7449.5,5.0,5
+2022,10,Ceará,paid,22458.05,23.0,22
+2022,10,Distrito Federal,cancelled,543.78,2.0,2
+2022,10,Distrito Federal,paid,23128.71,18.0,17
+2022,10,Espírito Santo,cancelled,3180.1,2.0,2
+2022,10,Espírito Santo,paid,18740.98,20.0,19
+2022,10,Goiás,cancelled,2011.0,1.0,1
+2022,10,Goiás,paid,27108.1,25.0,24
+2022,10,Maranhão,cancelled,3897.94,8.0,2
+2022,10,Maranhão,paid,18371.16,18.0,16
+2022,10,Mato Grosso,paid,16688.98,19.0,17
+2022,10,Mato Grosso do Sul,cancelled,1343.88,5.0,3
+2022,10,Mato Grosso do Sul,paid,8444.79,20.0,15
+2022,10,Minas Gerais,cancelled,15711.92,14.0,12
+2022,10,Minas Gerais,paid,100935.66,113.0,105
+2022,10,Paraná,cancelled,13443.15,7.0,7
+2022,10,Paraná,paid,70914.73,72.0,59
+2022,10,Paraíba,cancelled,4990.9,1.0,1
+2022,10,Paraíba,paid,17474.86,12.0,11
+2022,10,Pará,cancelled,2242.66,5.0,4
+2022,10,Pará,paid,18350.39,19.0,18
+2022,10,Pernambuco,cancelled,13959.21,5.0,5
+2022,10,Pernambuco,paid,33882.27,34.0,34
+2022,10,Piauí,paid,17210.1,9.0,9
+2022,10,Rio Grande do Norte,cancelled,698.0,1.0,1
+2022,10,Rio Grande do Norte,paid,11676.97,8.0,7
+2022,10,Rio Grande do Sul,cancelled,390.0,1.0,1
+2022,10,Rio Grande do Sul,paid,47833.54,43.0,42
+2022,10,Rio de Janeiro,cancelled,10153.58,7.0,7
+2022,10,Rio de Janeiro,paid,119210.35,155.0,135
+2022,10,Roraima,paid,1894.91,3.0,3
+2022,10,Santa Catarina,cancelled,2269.03,3.0,3
+2022,10,Santa Catarina,paid,38572.42,49.0,46
+2022,10,Sergipe,paid,9419.6,15.0,14
+2022,10,São Paulo,cancelled,16258.51,21.0,21
+2022,10,São Paulo,paid,331439.24,296.0,263
+2022,10,Tocantins,paid,309.0,1.0,1
+2022,11,(sem estado),paid,3931.0,2.0,2
+2022,11,Acre,paid,3792.4,4.0,4
+2022,11,Alagoas,cancelled,3939.98,2.0,1
+2022,11,Alagoas,paid,9371.65,11.0,10
+2022,11,Amapá,paid,1377.2,3.0,2
+2022,11,Amazonas,cancelled,596.87,1.0,1
+2022,11,Amazonas,paid,7502.4,3.0,3
+2022,11,Bahia,cancelled,29282.96,10.0,10
+2022,11,Bahia,paid,51017.95,52.0,51
+2022,11,Ceará,cancelled,4286.9,2.0,2
+2022,11,Ceará,paid,25814.86,33.0,32
+2022,11,Distrito Federal,cancelled,3549.9,2.0,2
+2022,11,Distrito Federal,paid,12493.69,10.0,9
+2022,11,Espírito Santo,cancelled,3049.6,3.0,3
+2022,11,Espírito Santo,paid,25202.29,31.0,23
+2022,11,Goiás,cancelled,1063.52,1.0,1
+2022,11,Goiás,paid,23891.03,121.0,23
+2022,11,Maranhão,cancelled,665.0,1.0,1
+2022,11,Maranhão,paid,13226.67,24.0,20
+2022,11,Mato Grosso,cancelled,6480.52,5.0,5
+2022,11,Mato Grosso,paid,16392.7,11.0,10
+2022,11,Mato Grosso do Sul,paid,13897.15,26.0,21
+2022,11,Minas Gerais,cancelled,3909.8,7.0,6
+2022,11,Minas Gerais,paid,95647.08,155.0,137
+2022,11,Paraná,cancelled,7118.4,14.0,10
+2022,11,Paraná,paid,61808.49,57.0,54
+2022,11,Paraíba,cancelled,10614.67,5.0,5
+2022,11,Paraíba,paid,10024.86,19.0,11
+2022,11,Pará,paid,22000.36,36.0,24
+2022,11,Pernambuco,cancelled,7106.81,3.0,3
+2022,11,Pernambuco,paid,32161.1,32.0,31
+2022,11,Piauí,paid,1272.17,6.0,6
+2022,11,Rio Grande do Norte,cancelled,1940.0,1.0,1
+2022,11,Rio Grande do Norte,paid,14507.41,12.0,12
+2022,11,Rio Grande do Sul,cancelled,3292.9,3.0,3
+2022,11,Rio Grande do Sul,paid,41210.89,49.0,44
+2022,11,Rio de Janeiro,cancelled,909.42,5.0,5
+2022,11,Rio de Janeiro,paid,112245.95,120.0,108
+2022,11,Rondônia,paid,1019.36,3.0,2
+2022,11,Roraima,paid,565.9,1.0,1
+2022,11,Santa Catarina,cancelled,8374.7,4.0,4
+2022,11,Santa Catarina,paid,50612.36,67.0,55
+2022,11,Sergipe,paid,11554.74,14.0,14
+2022,11,São Paulo,cancelled,34067.96,17.0,16
+2022,11,São Paulo,paid,261484.8,305.0,263
+2022,11,Tocantins,cancelled,3009.9,1.0,1
+2022,12,(sem estado),cancelled,515.0,1.0,1
+2022,12,(sem estado),paid,10645.23,4.0,4
+2022,12,Alagoas,paid,8408.88,13.0,10
+2022,12,Amapá,paid,4320.8,2.0,2
+2022,12,Amazonas,paid,5404.14,6.0,6
+2022,12,Bahia,cancelled,2526.83,3.0,3
+2022,12,Bahia,paid,55150.09,58.0,54
+2022,12,Ceará,cancelled,3235.01,3.0,3
+2022,12,Ceará,paid,17560.56,30.0,26
+2022,12,Distrito Federal,paid,18960.16,20.0,18
+2022,12,Espírito Santo,cancelled,445.81,1.0,1
+2022,12,Espírito Santo,paid,32213.68,35.0,30
+2022,12,Goiás,cancelled,7114.12,6.0,6
+2022,12,Goiás,paid,28274.33,38.0,34
+2022,12,Maranhão,cancelled,256.53,1.0,1
+2022,12,Maranhão,paid,10682.64,16.0,11
+2022,12,Mato Grosso,cancelled,6058.31,2.0,2
+2022,12,Mato Grosso,paid,17497.66,30.0,25
+2022,12,Mato Grosso do Sul,paid,14323.53,12.0,12
+2022,12,Minas Gerais,cancelled,10928.1,8.0,7
+2022,12,Minas Gerais,paid,117420.71,134.0,117
+2022,12,Paraná,cancelled,5965.59,7.0,6
+2022,12,Paraná,paid,49777.12,51.0,46
+2022,12,Paraíba,paid,14796.06,16.0,13
+2022,12,Pará,cancelled,3279.08,2.0,2
+2022,12,Pará,paid,19472.67,21.0,21
+2022,12,Pernambuco,cancelled,1286.9,2.0,2
+2022,12,Pernambuco,paid,34716.54,39.0,35
+2022,12,Piauí,cancelled,3048.41,1.0,1
+2022,12,Piauí,paid,5134.96,12.0,9
+2022,12,Rio Grande do Norte,paid,10018.74,11.0,10
+2022,12,Rio Grande do Sul,cancelled,2190.52,2.0,2
+2022,12,Rio Grande do Sul,paid,38485.63,37.0,35
+2022,12,Rio de Janeiro,cancelled,4607.03,7.0,7
+2022,12,Rio de Janeiro,paid,100200.98,171.0,131
+2022,12,Rondônia,paid,5888.01,10.0,7
+2022,12,Roraima,paid,893.0,1.0,1
+2022,12,Santa Catarina,cancelled,1846.4,3.0,3
+2022,12,Santa Catarina,paid,41029.54,45.0,40
+2022,12,Sergipe,paid,5105.86,13.0,11
+2022,12,São Paulo,cancelled,15321.62,18.0,17
+2022,12,São Paulo,paid,252224.34,275.0,244
+2022,12,Tocantins,paid,2882.91,1.0,1
+2023,1,(sem estado),paid,4803.9,2.0,2
+2023,1,Alagoas,cancelled,298.95,1.0,1
+2023,1,Alagoas,paid,3637.9,6.0,6
+2023,1,Amazonas,cancelled,1111.0,1.0,1
+2023,1,Amazonas,paid,2426.71,3.0,3
+2023,1,Bahia,cancelled,4111.78,4.0,3
+2023,1,Bahia,paid,40318.2,51.0,48
+2023,1,Ceará,cancelled,2928.1,1.0,1
+2023,1,Ceará,paid,12138.44,21.0,12
+2023,1,Distrito Federal,cancelled,878.0,1.0,1
+2023,1,Distrito Federal,paid,13655.8,18.0,15
+2023,1,Espírito Santo,paid,21681.03,24.0,24
+2023,1,Goiás,cancelled,471.54,1.0,1
+2023,1,Goiás,paid,14661.89,19.0,17
+2023,1,Maranhão,paid,5731.26,6.0,6
+2023,1,Mato Grosso,paid,12282.11,12.0,12
+2023,1,Mato Grosso do Sul,paid,3408.6,8.0,7
+2023,1,Minas Gerais,cancelled,6027.24,3.0,3
+2023,1,Minas Gerais,paid,109062.81,80.0,73
+2023,1,Paraná,cancelled,5400.12,4.0,4
+2023,1,Paraná,paid,42615.9,40.0,36
+2023,1,Paraíba,paid,10555.23,12.0,10
+2023,1,Pará,paid,15408.49,15.0,15
+2023,1,Pernambuco,cancelled,6976.0,4.0,4
+2023,1,Pernambuco,paid,23797.91,23.0,21
+2023,1,Piauí,cancelled,1114.23,1.0,1
+2023,1,Piauí,paid,9937.12,9.0,8
+2023,1,Rio Grande do Norte,paid,9955.35,10.0,9
+2023,1,Rio Grande do Sul,cancelled,3836.95,5.0,5
+2023,1,Rio Grande do Sul,paid,33895.17,30.0,29
+2023,1,Rio de Janeiro,cancelled,3601.72,4.0,3
+2023,1,Rio de Janeiro,paid,91053.74,119.0,99
+2023,1,Rondônia,paid,7417.43,2.0,2
+2023,1,Roraima,paid,3004.13,4.0,4
+2023,1,Santa Catarina,cancelled,2669.46,4.0,3
+2023,1,Santa Catarina,paid,35508.11,27.0,27
+2023,1,Sergipe,paid,4753.33,5.0,5
+2023,1,São Paulo,cancelled,8369.19,16.0,11
+2023,1,São Paulo,paid,238092.35,225.0,199
+2023,1,Tocantins,paid,2085.96,3.0,3
+2023,2,(sem estado),cancelled,2483.91,1.0,1
+2023,2,(sem estado),paid,4628.0,2.0,2
+2023,2,Alagoas,cancelled,4792.06,1.0,1
+2023,2,Alagoas,paid,4898.74,9.0,8
+2023,2,Amazonas,cancelled,3398.0,1.0,1
+2023,2,Amazonas,paid,5299.99,3.0,3
+2023,2,Bahia,cancelled,1119.5,1.0,1
+2023,2,Bahia,paid,26687.51,39.0,32
+2023,2,Ceará,cancelled,2383.54,1.0,1
+2023,2,Ceará,paid,20045.4,22.0,22
+2023,2,Distrito Federal,cancelled,154.9,1.0,1
+2023,2,Distrito Federal,paid,20231.89,18.0,17
+2023,2,Espírito Santo,cancelled,3190.21,3.0,3
+2023,2,Espírito Santo,paid,10212.36,16.0,15
+2023,2,Goiás,cancelled,5572.3,3.0,3
+2023,2,Goiás,paid,13662.93,17.0,15
+2023,2,Maranhão,paid,9788.45,9.0,9
+2023,2,Mato Grosso,cancelled,1227.6,1.0,1
+2023,2,Mato Grosso,paid,11410.43,14.0,12
+2023,2,Mato Grosso do Sul,paid,11031.79,7.0,6
+2023,2,Minas Gerais,cancelled,8277.14,6.0,6
+2023,2,Minas Gerais,paid,94074.17,103.0,91
+2023,2,Paraná,cancelled,2965.24,2.0,2
+2023,2,Paraná,paid,22527.46,36.0,31
+2023,2,Paraíba,cancelled,1894.64,1.0,1
+2023,2,Paraíba,paid,11194.11,13.0,10
+2023,2,Pará,cancelled,6453.04,2.0,2
+2023,2,Pará,paid,7213.33,13.0,13
+2023,2,Pernambuco,cancelled,719.9,1.0,1
+2023,2,Pernambuco,paid,16572.3,15.0,15
+2023,2,Piauí,cancelled,1593.3,2.0,2
+2023,2,Piauí,paid,790.11,2.0,2
+2023,2,Rio Grande do Norte,cancelled,638.0,1.0,1
+2023,2,Rio Grande do Norte,paid,10414.7,16.0,12
+2023,2,Rio Grande do Sul,cancelled,3993.0,2.0,2
+2023,2,Rio Grande do Sul,paid,16811.58,17.0,17
+2023,2,Rio de Janeiro,cancelled,1687.51,2.0,2
+2023,2,Rio de Janeiro,paid,66053.99,53.0,51
+2023,2,Rondônia,paid,11063.0,5.0,5
+2023,2,Roraima,cancelled,5510.58,2.0,2
+2023,2,Santa Catarina,cancelled,73.0,1.0,1
+2023,2,Santa Catarina,paid,21179.92,17.0,16
+2023,2,Sergipe,cancelled,460.0,1.0,1
+2023,2,Sergipe,paid,6949.91,6.0,6
+2023,2,São Paulo,cancelled,18307.08,17.0,17
+2023,2,São Paulo,paid,145147.87,154.0,137
+2023,3,(sem estado),cancelled,1083.94,2.0,2
+2023,3,(sem estado),paid,2612.0,1.0,1
+2023,3,Acre,paid,408.71,1.0,1
+2023,3,Alagoas,cancelled,750.0,1.0,1
+2023,3,Alagoas,paid,6987.99,8.0,8
+2023,3,Amapá,paid,1959.58,2.0,2
+2023,3,Amazonas,paid,4388.6,4.0,3
+2023,3,Bahia,cancelled,171.12,1.0,1
+2023,3,Bahia,paid,50525.1,45.0,43
+2023,3,Ceará,cancelled,1709.47,4.0,4
+2023,3,Ceará,paid,10646.48,20.0,20
+2023,3,Distrito Federal,cancelled,1250.0,1.0,1
+2023,3,Distrito Federal,paid,27137.63,19.0,19
+2023,3,Espírito Santo,paid,8627.25,18.0,17
+2023,3,Goiás,cancelled,897.0,1.0,1
+2023,3,Goiás,paid,22302.5,22.0,21
+2023,3,Maranhão,paid,11103.92,20.0,14
+2023,3,Mato Grosso,paid,32480.14,20.0,17
+2023,3,Mato Grosso do Sul,cancelled,567.18,1.0,1
+2023,3,Mato Grosso do Sul,paid,7204.43,7.0,7
+2023,3,Minas Gerais,cancelled,10595.71,6.0,6
+2023,3,Minas Gerais,paid,119250.99,137.0,115
+2023,3,Paraná,cancelled,20359.03,4.0,4
+2023,3,Paraná,paid,33318.13,41.0,39
+2023,3,Paraíba,paid,12775.6,10.0,10
+2023,3,Pará,cancelled,1144.28,2.0,2
+2023,3,Pará,paid,15084.84,25.0,23
+2023,3,Pernambuco,cancelled,5462.03,3.0,3
+2023,3,Pernambuco,paid,19412.11,27.0,25
+2023,3,Piauí,paid,814.94,3.0,3
+2023,3,Rio Grande do Norte,cancelled,327.43,1.0,1
+2023,3,Rio Grande do Norte,paid,6193.22,9.0,9
+2023,3,Rio Grande do Sul,cancelled,9888.9,4.0,4
+2023,3,Rio Grande do Sul,paid,55567.67,52.0,43
+2023,3,Rio de Janeiro,cancelled,5713.09,6.0,6
+2023,3,Rio de Janeiro,paid,85647.74,97.0,94
+2023,3,Rondônia,paid,3849.91,5.0,5
+2023,3,Roraima,paid,1707.11,1.0,1
+2023,3,Santa Catarina,cancelled,2498.82,3.0,3
+2023,3,Santa Catarina,paid,27960.81,42.0,33
+2023,3,Sergipe,cancelled,10509.17,2.0,2
+2023,3,Sergipe,paid,4196.4,4.0,4
+2023,3,São Paulo,cancelled,15640.13,9.0,9
+2023,3,São Paulo,paid,211271.92,229.0,213
+2023,3,Tocantins,paid,11501.1,9.0,6
+2023,4,Alagoas,paid,13174.84,16.0,14
+2023,4,Amazonas,paid,4347.39,5.0,5
+2023,4,Bahia,cancelled,2705.12,6.0,5
+2023,4,Bahia,paid,45842.51,63.0,58
+2023,4,Ceará,cancelled,2642.83,2.0,2
+2023,4,Ceará,paid,33773.9,25.0,25
+2023,4,Distrito Federal,cancelled,2685.76,1.0,1
+2023,4,Distrito Federal,paid,21615.29,15.0,15
+2023,4,Espírito Santo,cancelled,477.84,1.0,1
+2023,4,Espírito Santo,paid,23975.54,30.0,26
+2023,4,Goiás,cancelled,134.55,1.0,1
+2023,4,Goiás,paid,19758.48,19.0,19
+2023,4,Maranhão,cancelled,2316.16,1.0,1
+2023,4,Maranhão,paid,9005.17,16.0,14
+2023,4,Mato Grosso,cancelled,3316.98,2.0,2
+2023,4,Mato Grosso,paid,22330.76,23.0,22
+2023,4,Mato Grosso do Sul,cancelled,3133.68,1.0,1
+2023,4,Mato Grosso do Sul,paid,9369.31,10.0,10
+2023,4,Minas Gerais,cancelled,12130.49,7.0,7
+2023,4,Minas Gerais,paid,104136.09,115.0,112
+2023,4,Paraná,cancelled,437.0,1.0,1
+2023,4,Paraná,paid,42632.57,50.0,48
+2023,4,Paraíba,paid,2882.07,6.0,6
+2023,4,Pará,cancelled,4391.2,1.0,1
+2023,4,Pará,paid,21364.56,24.0,22
+2023,4,Pernambuco,cancelled,4202.75,4.0,4
+2023,4,Pernambuco,paid,15865.97,31.0,27
+2023,4,Piauí,paid,5636.41,7.0,7
+2023,4,Rio Grande do Norte,paid,8587.97,18.0,16
+2023,4,Rio Grande do Sul,cancelled,3827.27,2.0,2
+2023,4,Rio Grande do Sul,paid,32488.34,41.0,38
+2023,4,Rio de Janeiro,cancelled,7399.01,7.0,7
+2023,4,Rio de Janeiro,paid,93272.82,119.0,108
+2023,4,Rondônia,paid,5657.57,5.0,5
+2023,4,Roraima,paid,407.44,1.0,1
+2023,4,Santa Catarina,cancelled,11906.1,4.0,3
+2023,4,Santa Catarina,paid,33779.56,39.0,34
+2023,4,Sergipe,paid,6898.87,4.0,4
+2023,4,São Paulo,cancelled,29171.6,20.0,20
+2023,4,São Paulo,paid,227892.79,232.0,217
+2023,4,Tocantins,paid,1013.98,2.0,2
+2023,5,Alagoas,cancelled,257.4,2.0,1
+2023,5,Alagoas,paid,14133.11,13.0,12
+2023,5,Amapá,paid,413.31,2.0,1
+2023,5,Amazonas,cancelled,1179.21,2.0,2
+2023,5,Amazonas,paid,3481.33,3.0,3
+2023,5,Bahia,cancelled,3358.08,1.0,1
+2023,5,Bahia,paid,48636.93,42.0,38
+2023,5,Ceará,cancelled,2503.14,3.0,3
+2023,5,Ceará,paid,26169.94,22.0,17
+2023,5,Distrito Federal,cancelled,328.24,1.0,1
+2023,5,Distrito Federal,paid,33122.47,28.0,27
+2023,5,Espírito Santo,cancelled,1677.16,1.0,1
+2023,5,Espírito Santo,paid,29281.73,19.0,19
+2023,5,Goiás,cancelled,994.02,2.0,2
+2023,5,Goiás,paid,35271.83,30.0,29
+2023,5,Maranhão,paid,1429.81,3.0,3
+2023,5,Mato Grosso,cancelled,676.2,1.0,1
+2023,5,Mato Grosso,paid,11368.36,7.0,7
+2023,5,Mato Grosso do Sul,paid,15930.38,13.0,13
+2023,5,Minas Gerais,cancelled,4287.99,4.0,4
+2023,5,Minas Gerais,paid,88516.73,95.0,86
+2023,5,Paraná,cancelled,1036.21,4.0,2
+2023,5,Paraná,paid,60744.57,57.0,51
+2023,5,Paraíba,paid,3738.22,5.0,5
+2023,5,Pará,cancelled,281.61,1.0,1
+2023,5,Pará,paid,16931.35,17.0,16
+2023,5,Pernambuco,paid,35866.05,29.0,25
+2023,5,Piauí,cancelled,4959.72,1.0,1
+2023,5,Piauí,paid,6830.25,11.0,7
+2023,5,Rio Grande do Norte,paid,10301.06,13.0,13
+2023,5,Rio Grande do Sul,cancelled,6770.53,6.0,6
+2023,5,Rio Grande do Sul,paid,34441.64,33.0,29
+2023,5,Rio de Janeiro,cancelled,8255.06,9.0,9
+2023,5,Rio de Janeiro,paid,92945.89,86.0,81
+2023,5,Rondônia,paid,7692.67,6.0,6
+2023,5,Roraima,paid,301.76,1.0,1
+2023,5,Santa Catarina,cancelled,4350.61,3.0,3
+2023,5,Santa Catarina,paid,56252.03,43.0,42
+2023,5,Sergipe,cancelled,1438.96,2.0,2
+2023,5,Sergipe,paid,8423.9,7.0,7
+2023,5,São Paulo,cancelled,16049.41,12.0,12
+2023,5,São Paulo,paid,272357.06,205.0,190
+2023,5,Tocantins,paid,9943.28,5.0,5
+2023,6,(sem estado),paid,4959.72,1.0,1
+2023,6,Acre,cancelled,4467.7,2.0,2
+2023,6,Acre,paid,1413.94,3.0,2
+2023,6,Alagoas,cancelled,489.9,2.0,1
+2023,6,Alagoas,paid,19240.11,12.0,11
+2023,6,Amapá,paid,2913.3,4.0,3
+2023,6,Amazonas,cancelled,124.2,1.0,1
+2023,6,Amazonas,paid,8457.01,8.0,8
+2023,6,Bahia,cancelled,2379.5,4.0,4
+2023,6,Bahia,paid,36312.93,58.0,49
+2023,6,Ceará,paid,40215.91,42.0,34
+2023,6,Distrito Federal,paid,5683.3,10.0,10
+2023,6,Espírito Santo,cancelled,3190.0,2.0,2
+2023,6,Espírito Santo,paid,30276.15,59.0,35
+2023,6,Goiás,cancelled,923.04,2.0,2
+2023,6,Goiás,paid,25968.87,34.0,29
+2023,6,Maranhão,cancelled,95.23,1.0,1
+2023,6,Maranhão,paid,14925.14,20.0,17
+2023,6,Mato Grosso,cancelled,5805.09,3.0,3
+2023,6,Mato Grosso,paid,20664.47,25.0,21
+2023,6,Mato Grosso do Sul,cancelled,243.99,2.0,1
+2023,6,Mato Grosso do Sul,paid,14662.65,15.0,15
+2023,6,Minas Gerais,cancelled,9059.07,15.0,10
+2023,6,Minas Gerais,paid,104632.51,170.0,130
+2023,6,Paraná,cancelled,2142.94,4.0,4
+2023,6,Paraná,paid,61110.44,71.0,59
+2023,6,Paraíba,cancelled,977.4,1.0,1
+2023,6,Paraíba,paid,13553.29,19.0,17
+2023,6,Pará,cancelled,3814.77,2.0,2
+2023,6,Pará,paid,32804.72,30.0,27
+2023,6,Pernambuco,cancelled,1917.11,3.0,3
+2023,6,Pernambuco,paid,27652.42,39.0,34
+2023,6,Piauí,cancelled,247.5,1.0,1
+2023,6,Piauí,paid,22727.86,17.0,17
+2023,6,Rio Grande do Norte,paid,9705.31,22.0,11
+2023,6,Rio Grande do Sul,cancelled,1208.39,3.0,3
+2023,6,Rio Grande do Sul,paid,28851.57,46.0,41
+2023,6,Rio de Janeiro,cancelled,6516.16,6.0,6
+2023,6,Rio de Janeiro,paid,131772.56,167.0,138
+2023,6,Rondônia,cancelled,1189.8,1.0,1
+2023,6,Rondônia,paid,8435.1,5.0,5
+2023,6,Roraima,paid,493.0,1.0,1
+2023,6,Santa Catarina,cancelled,1716.18,2.0,2
+2023,6,Santa Catarina,paid,39932.2,48.0,37
+2023,6,Sergipe,cancelled,136.08,1.0,1
+2023,6,Sergipe,paid,9652.42,10.0,7
+2023,6,São Paulo,cancelled,16039.07,20.0,16
+2023,6,São Paulo,paid,230100.95,290.0,241
+2023,6,Tocantins,paid,3563.7,6.0,4
+2023,7,(sem estado),cancelled,1064.44,2.0,2
+2023,7,Acre,paid,1786.92,2.0,2
+2023,7,Alagoas,paid,13020.9,9.0,9
+2023,7,Amapá,paid,3731.06,2.0,2
+2023,7,Amazonas,cancelled,2535.52,1.0,1
+2023,7,Amazonas,paid,1978.71,3.0,3
+2023,7,Bahia,cancelled,2108.3,3.0,3
+2023,7,Bahia,paid,59022.42,63.0,55
+2023,7,Ceará,cancelled,771.0,1.0,1
+2023,7,Ceará,paid,23569.35,31.0,25
+2023,7,Distrito Federal,cancelled,1854.9,1.0,1
+2023,7,Distrito Federal,paid,26890.65,22.0,21
+2023,7,Espírito Santo,cancelled,1619.99,2.0,2
+2023,7,Espírito Santo,paid,20695.14,23.0,20
+2023,7,Goiás,cancelled,2193.25,2.0,2
+2023,7,Goiás,paid,22243.61,30.0,24
+2023,7,Maranhão,paid,9198.63,9.0,8
+2023,7,Mato Grosso,paid,12241.32,17.0,14
+2023,7,Mato Grosso do Sul,paid,2731.33,10.0,10
+2023,7,Minas Gerais,cancelled,15628.83,9.0,8
+2023,7,Minas Gerais,paid,69169.33,102.0,93
+2023,7,Paraná,cancelled,1446.87,3.0,3
+2023,7,Paraná,paid,34145.72,54.0,46
+2023,7,Paraíba,cancelled,2601.28,2.0,2
+2023,7,Paraíba,paid,10497.71,19.0,16
+2023,7,Pará,cancelled,3578.8,1.0,1
+2023,7,Pará,paid,11063.3,20.0,16
+2023,7,Pernambuco,paid,15504.05,20.0,13
+2023,7,Piauí,paid,4208.21,4.0,4
+2023,7,Rio Grande do Norte,paid,9758.73,6.0,6
+2023,7,Rio Grande do Sul,cancelled,3252.66,3.0,3
+2023,7,Rio Grande do Sul,paid,36642.68,63.0,52
+2023,7,Rio de Janeiro,cancelled,7689.67,13.0,12
+2023,7,Rio de Janeiro,paid,103333.19,140.0,117
+2023,7,Rondônia,paid,2616.0,2.0,2
+2023,7,Roraima,paid,421.35,1.0,1
+2023,7,Santa Catarina,cancelled,3029.95,3.0,3
+2023,7,Santa Catarina,paid,27562.58,43.0,35
+2023,7,Sergipe,paid,3378.7,7.0,6
+2023,7,São Paulo,cancelled,18224.64,15.0,15
+2023,7,São Paulo,paid,178724.56,239.0,210
+2023,7,Tocantins,paid,484.2,1.0,1
+2023,8,(sem estado),cancelled,97.52,2.0,2
+2023,8,(sem estado),paid,795.76,2.0,2
+2023,8,Acre,cancelled,3094.2,1.0,1
+2023,8,Acre,paid,1243.62,2.0,2
+2023,8,Alagoas,cancelled,1460.0,1.0,1
+2023,8,Alagoas,paid,1866.07,8.0,3
+2023,8,Amazonas,paid,4583.35,5.0,4
+2023,8,Bahia,cancelled,11698.4,8.0,8
+2023,8,Bahia,paid,59513.67,73.0,58
+2023,8,Ceará,cancelled,2733.21,2.0,2
+2023,8,Ceará,paid,26488.64,20.0,20
+2023,8,Distrito Federal,cancelled,3208.5,3.0,3
+2023,8,Distrito Federal,paid,16597.24,20.0,16
+2023,8,Espírito Santo,paid,22965.86,35.0,24
+2023,8,Goiás,cancelled,2578.83,3.0,3
+2023,8,Goiás,paid,17166.64,29.0,21
+2023,8,Maranhão,cancelled,1210.5,1.0,1
+2023,8,Maranhão,paid,17546.32,15.0,15
+2023,8,Mato Grosso,cancelled,1022.28,1.0,1
+2023,8,Mato Grosso,paid,18877.29,16.0,14
+2023,8,Mato Grosso do Sul,paid,6268.3,5.0,5
+2023,8,Minas Gerais,cancelled,7827.31,7.0,7
+2023,8,Minas Gerais,paid,104048.02,139.0,118
+2023,8,Paraná,cancelled,1303.14,2.0,2
+2023,8,Paraná,paid,41412.1,39.0,36
+2023,8,Paraíba,cancelled,2988.87,4.0,4
+2023,8,Paraíba,paid,11702.53,12.0,11
+2023,8,Pará,cancelled,3439.26,2.0,2
+2023,8,Pará,paid,9734.68,17.0,14
+2023,8,Pernambuco,cancelled,3520.28,3.0,3
+2023,8,Pernambuco,paid,38972.95,49.0,37
+2023,8,Piauí,paid,6316.68,8.0,7
+2023,8,Rio Grande do Norte,paid,6609.98,11.0,7
+2023,8,Rio Grande do Sul,cancelled,1022.28,1.0,1
+2023,8,Rio Grande do Sul,paid,34037.29,51.0,43
+2023,8,Rio Grande do Sul,pending,0.0,2.0,2
+2023,8,Rio de Janeiro,cancelled,18613.14,12.0,11
+2023,8,Rio de Janeiro,paid,95192.23,159.0,119
+2023,8,Rondônia,paid,3095.01,4.0,4
+2023,8,Roraima,cancelled,965.0,1.0,1
+2023,8,Santa Catarina,cancelled,3717.54,3.0,3
+2023,8,Santa Catarina,paid,40201.07,50.0,41
+2023,8,Sergipe,paid,4893.69,8.0,7
+2023,8,São Paulo,cancelled,20947.81,18.0,18
+2023,8,São Paulo,paid,194412.74,245.0,208
+2023,8,São Paulo,pending,0.0,1.0,1
+2023,9,Acre,paid,3094.2,1.0,1
+2023,9,Alagoas,cancelled,1593.0,1.0,1
+2023,9,Alagoas,paid,8775.3,5.0,5
+2023,9,Amapá,paid,908.8,1.0,1
+2023,9,Amazonas,paid,333.9,1.0,1
+2023,9,Bahia,cancelled,1174.56,2.0,2
+2023,9,Bahia,paid,36741.28,47.0,36
+2023,9,Ceará,cancelled,1087.35,2.0,2
+2023,9,Ceará,paid,19991.82,22.0,21
+2023,9,Distrito Federal,cancelled,1685.25,3.0,2
+2023,9,Distrito Federal,paid,18841.0,13.0,11
+2023,9,Espírito Santo,cancelled,4229.9,2.0,2
+2023,9,Espírito Santo,paid,25149.97,21.0,20
+2023,9,Goiás,cancelled,4689.0,1.0,1
+2023,9,Goiás,paid,34570.11,23.0,22
+2023,9,Maranhão,cancelled,7554.8,4.0,4
+2023,9,Maranhão,paid,16721.09,19.0,14
+2023,9,Mato Grosso,cancelled,4689.0,1.0,1
+2023,9,Mato Grosso,paid,5494.82,9.0,8
+2023,9,Mato Grosso do Sul,paid,7110.3,7.0,6
+2023,9,Minas Gerais,cancelled,4505.4,2.0,2
+2023,9,Minas Gerais,paid,83068.88,112.0,79
+2023,9,Paraná,cancelled,2307.4,1.0,1
+2023,9,Paraná,paid,36766.6,50.0,37
+2023,9,Paraíba,cancelled,1399.93,2.0,2
+2023,9,Paraíba,paid,5342.87,8.0,8
+2023,9,Pará,paid,20024.43,17.0,16
+2023,9,Pernambuco,cancelled,4860.7,3.0,3
+2023,9,Pernambuco,paid,47741.28,33.0,32
+2023,9,Piauí,paid,3932.14,19.0,7
+2023,9,Rio Grande do Norte,cancelled,513.0,8.0,1
+2023,9,Rio Grande do Norte,paid,7633.07,14.0,9
+2023,9,Rio Grande do Sul,cancelled,1163.9,3.0,2
+2023,9,Rio Grande do Sul,paid,35494.59,46.0,37
+2023,9,Rio de Janeiro,cancelled,3862.0,1.0,1
+2023,9,Rio de Janeiro,paid,91226.22,118.0,96
+2023,9,Rondônia,paid,190.25,2.0,2
+2023,9,Roraima,paid,2615.55,3.0,2
+2023,9,Santa Catarina,cancelled,2255.6,5.0,4
+2023,9,Santa Catarina,paid,49940.16,64.0,42
+2023,9,Sergipe,cancelled,137.75,1.0,1
+2023,9,Sergipe,paid,14994.9,7.0,7
+2023,9,São Paulo,cancelled,8317.98,7.0,7
+2023,9,São Paulo,paid,234271.21,218.0,192
+2023,9,Tocantins,paid,12049.04,3.0,3
+2023,10,(sem estado),cancelled,528.71,1.0,1
+2023,10,(sem estado),paid,3862.0,1.0,1
+2023,10,Acre,paid,10649.5,6.0,6
+2023,10,Alagoas,cancelled,891.24,1.0,1
+2023,10,Alagoas,paid,21911.71,17.0,16
+2023,10,Amapá,paid,1013.31,2.0,2
+2023,10,Amazonas,cancelled,2325.0,1.0,1
+2023,10,Amazonas,paid,766.57,2.0,2
+2023,10,Bahia,cancelled,4050.7,4.0,4
+2023,10,Bahia,paid,44968.65,53.0,48
+2023,10,Ceará,cancelled,98.97,6.0,2
+2023,10,Ceará,paid,10756.11,24.0,19
+2023,10,Distrito Federal,cancelled,1156.5,2.0,2
+2023,10,Distrito Federal,paid,11336.57,46.0,15
+2023,10,Espírito Santo,cancelled,1881.9,1.0,1
+2023,10,Espírito Santo,paid,19459.94,26.0,25
+2023,10,Goiás,cancelled,1324.12,2.0,2
+2023,10,Goiás,paid,9830.07,22.0,15
+2023,10,Maranhão,cancelled,446.0,1.0,1
+2023,10,Maranhão,paid,16332.69,14.0,13
+2023,10,Mato Grosso,cancelled,1356.8,2.0,2
+2023,10,Mato Grosso,paid,17872.09,17.0,17
+2023,10,Mato Grosso do Sul,paid,6676.72,10.0,9
+2023,10,Minas Gerais,cancelled,422.52,1.0,1
+2023,10,Minas Gerais,paid,84037.09,91.0,81
+2023,10,Paraná,cancelled,2774.95,3.0,2
+2023,10,Paraná,paid,34130.06,53.0,45
+2023,10,Paraíba,paid,8534.77,8.0,8
+2023,10,Pará,cancelled,3891.0,1.0,1
+2023,10,Pará,paid,6329.19,11.0,9
+2023,10,Pernambuco,cancelled,2347.09,1.0,1
+2023,10,Pernambuco,paid,20738.35,20.0,18
+2023,10,Piauí,cancelled,1431.9,1.0,1
+2023,10,Piauí,paid,8050.8,7.0,7
+2023,10,Rio Grande do Norte,cancelled,320.4,1.0,1
+2023,10,Rio Grande do Norte,paid,4912.46,5.0,5
+2023,10,Rio Grande do Sul,cancelled,687.9,2.0,2
+2023,10,Rio Grande do Sul,paid,37832.27,64.0,49
+2023,10,Rio de Janeiro,cancelled,5878.9,4.0,4
+2023,10,Rio de Janeiro,paid,68901.97,101.0,83
+2023,10,Rondônia,paid,3048.79,6.0,5
+2023,10,Roraima,paid,188.9,1.0,1
+2023,10,Santa Catarina,cancelled,448.2,1.0,1
+2023,10,Santa Catarina,paid,29811.88,35.0,32
+2023,10,Sergipe,paid,2368.89,6.0,5
+2023,10,São Paulo,cancelled,13596.22,16.0,16
+2023,10,São Paulo,paid,162871.61,233.0,199
+2023,10,Tocantins,paid,3272.3,3.0,3
+2023,11,(sem estado),cancelled,643.95,1.0,1
+2023,11,Acre,paid,1367.1,2.0,2
+2023,11,Alagoas,paid,12507.0,13.0,11
+2023,11,Amapá,paid,247.09,1.0,1
+2023,11,Amazonas,cancelled,449.4,1.0,1
+2023,11,Amazonas,paid,3493.77,5.0,5
+2023,11,Bahia,cancelled,3288.6,4.0,3
+2023,11,Bahia,paid,69045.78,79.0,71
+2023,11,Ceará,cancelled,3276.6,3.0,3
+2023,11,Ceará,paid,47973.69,29.0,28
+2023,11,Distrito Federal,cancelled,3792.7,1.0,1
+2023,11,Distrito Federal,paid,17546.7,15.0,14
+2023,11,Espírito Santo,cancelled,735.3,1.0,1
+2023,11,Espírito Santo,paid,23439.13,34.0,27
+2023,11,Goiás,cancelled,10086.6,5.0,5
+2023,11,Goiás,paid,39133.48,28.0,28
+2023,11,Maranhão,paid,17172.79,22.0,22
+2023,11,Mato Grosso,paid,15321.85,22.0,18
+2023,11,Mato Grosso do Sul,paid,8617.25,19.0,14
+2023,11,Minas Gerais,cancelled,17785.49,8.0,8
+2023,11,Minas Gerais,paid,114241.4,146.0,128
+2023,11,Paraná,cancelled,13622.25,10.0,9
+2023,11,Paraná,paid,55562.02,76.0,66
+2023,11,Paraíba,cancelled,13234.4,4.0,4
+2023,11,Paraíba,paid,18211.8,19.0,17
+2023,11,Pará,paid,24306.63,20.0,20
+2023,11,Pernambuco,cancelled,5297.4,4.0,4
+2023,11,Pernambuco,paid,26976.13,29.0,24
+2023,11,Piauí,cancelled,365.5,1.0,1
+2023,11,Piauí,paid,4730.05,10.0,7
+2023,11,Rio Grande do Norte,paid,9426.18,11.0,11
+2023,11,Rio Grande do Sul,cancelled,1041.9,4.0,3
+2023,11,Rio Grande do Sul,paid,54543.79,71.0,60
+2023,11,Rio de Janeiro,cancelled,2466.87,13.0,8
+2023,11,Rio de Janeiro,paid,91313.05,143.0,110
+2023,11,Rondônia,cancelled,4261.7,3.0,2
+2023,11,Rondônia,paid,5041.49,7.0,6
+2023,11,Roraima,paid,573.53,1.0,1
+2023,11,Santa Catarina,cancelled,2537.4,4.0,4
+2023,11,Santa Catarina,paid,40102.45,67.0,60
+2023,11,Sergipe,paid,4370.55,7.0,6
+2023,11,São Paulo,cancelled,25426.85,20.0,19
+2023,11,São Paulo,paid,252766.22,314.0,269
+2023,11,Tocantins,paid,6299.86,4.0,4
+2023,12,(sem estado),cancelled,55.8,1.0,1
+2023,12,(sem estado),paid,2220.66,2.0,2
+2023,12,Alagoas,paid,3672.87,11.0,7
+2023,12,Amapá,paid,1099.4,1.0,1
+2023,12,Amazonas,paid,3570.42,5.0,4
+2023,12,Bahia,cancelled,789.37,4.0,3
+2023,12,Bahia,paid,29251.34,56.0,38
+2023,12,Ceará,cancelled,3129.45,2.0,2
+2023,12,Ceará,paid,21525.14,39.0,24
+2023,12,Distrito Federal,paid,25981.92,21.0,17
+2023,12,Espírito Santo,cancelled,3681.9,2.0,2
+2023,12,Espírito Santo,paid,22796.03,33.0,28
+2023,12,Goiás,cancelled,3226.3,4.0,4
+2023,12,Goiás,paid,14517.31,25.0,21
+2023,12,Maranhão,cancelled,1724.8,1.0,1
+2023,12,Maranhão,paid,9807.36,14.0,12
+2023,12,Mato Grosso,cancelled,10916.2,2.0,2
+2023,12,Mato Grosso,paid,13773.91,14.0,12
+2023,12,Mato Grosso do Sul,paid,3224.32,7.0,6
+2023,12,Minas Gerais,cancelled,1399.95,10.0,6
+2023,12,Minas Gerais,paid,94640.75,116.0,94
+2023,12,Paraná,cancelled,4002.61,3.0,3
+2023,12,Paraná,paid,23648.43,43.0,35
+2023,12,Paraíba,cancelled,815.4,1.0,1
+2023,12,Paraíba,paid,2802.28,4.0,2
+2023,12,Pará,paid,15684.31,11.0,10
+2023,12,Pernambuco,cancelled,70.2,1.0,1
+2023,12,Pernambuco,paid,14746.93,22.0,19
+2023,12,Piauí,cancelled,5955.18,3.0,3
+2023,12,Piauí,paid,8390.93,7.0,7
+2023,12,Rio Grande do Norte,paid,5453.7,22.0,13
+2023,12,Rio Grande do Sul,cancelled,2316.55,3.0,3
+2023,12,Rio Grande do Sul,paid,27555.84,27.0,26
+2023,12,Rio de Janeiro,cancelled,6011.2,7.0,6
+2023,12,Rio de Janeiro,paid,93400.7,103.0,91
+2023,12,Rondônia,paid,2552.48,4.0,4
+2023,12,Roraima,paid,2052.0,1.0,1
+2023,12,Santa Catarina,cancelled,2539.32,5.0,5
+2023,12,Santa Catarina,paid,25888.11,34.0,33
+2023,12,Sergipe,cancelled,27.5,1.0,1
+2023,12,Sergipe,paid,1798.3,5.0,5
+2023,12,São Paulo,cancelled,21005.04,15.0,15
+2023,12,São Paulo,paid,164270.04,222.0,187
+2023,12,Tocantins,paid,2482.5,4.0,3
+2024,1,(sem estado),paid,5630.23,3.0,3
+2024,1,Acre,paid,442.22,1.0,1
+2024,1,Alagoas,cancelled,186.0,1.0,1
+2024,1,Alagoas,paid,11751.56,14.0,10
+2024,1,Amapá,paid,893.93,3.0,3
+2024,1,Amazonas,paid,4636.89,7.0,7
+2024,1,Bahia,cancelled,5032.48,6.0,5
+2024,1,Bahia,paid,42311.95,68.0,53
+2024,1,Ceará,cancelled,1407.0,2.0,2
+2024,1,Ceará,paid,15872.79,26.0,25
+2024,1,Distrito Federal,cancelled,5989.0,1.0,1
+2024,1,Distrito Federal,paid,26741.37,23.0,20
+2024,1,Espírito Santo,cancelled,1822.8,1.0,1
+2024,1,Espírito Santo,paid,17823.58,27.0,18
+2024,1,Goiás,paid,23116.74,23.0,21
+2024,1,Maranhão,cancelled,315.9,1.0,1
+2024,1,Maranhão,paid,13871.35,16.0,14
+2024,1,Mato Grosso,cancelled,882.0,1.0,1
+2024,1,Mato Grosso,paid,18640.86,23.0,20
+2024,1,Mato Grosso do Sul,cancelled,177.0,1.0,1
+2024,1,Mato Grosso do Sul,paid,8752.81,16.0,15
+2024,1,Minas Gerais,cancelled,6164.35,8.0,8
+2024,1,Minas Gerais,paid,75129.02,126.0,111
+2024,1,Paraná,cancelled,7081.0,6.0,5
+2024,1,Paraná,paid,34904.49,62.0,50
+2024,1,Paraíba,paid,16409.74,17.0,17
+2024,1,Pará,cancelled,4068.0,1.0,1
+2024,1,Pará,paid,11203.43,17.0,16
+2024,1,Pernambuco,paid,19989.54,19.0,19
+2024,1,Piauí,cancelled,8348.0,3.0,2
+2024,1,Piauí,paid,5045.0,9.0,9
+2024,1,Rio Grande do Norte,paid,10414.29,10.0,9
+2024,1,Rio Grande do Sul,cancelled,499.5,2.0,2
+2024,1,Rio Grande do Sul,paid,16813.83,40.0,35
+2024,1,Rio de Janeiro,cancelled,2568.0,6.0,6
+2024,1,Rio de Janeiro,paid,72062.05,125.0,103
+2024,1,Rondônia,cancelled,1822.8,1.0,1
+2024,1,Rondônia,paid,2764.23,7.0,6
+2024,1,Roraima,paid,1174.4,2.0,2
+2024,1,Santa Catarina,cancelled,2372.4,4.0,4
+2024,1,Santa Catarina,paid,31380.3,45.0,41
+2024,1,Sergipe,cancelled,0.0,1.0,1
+2024,1,Sergipe,paid,4577.2,5.0,5
+2024,1,São Paulo,cancelled,10098.51,16.0,16
+2024,1,São Paulo,paid,163379.71,291.0,256
+2024,1,Tocantins,paid,58.05,2.0,2
+2024,2,(sem estado),paid,1854.0,1.0,1
+2024,2,Acre,cancelled,3769.2,1.0,1
+2024,2,Acre,paid,1510.2,2.0,2
+2024,2,Alagoas,paid,12856.73,9.0,9
+2024,2,Amazonas,cancelled,242.91,1.0,1
+2024,2,Amazonas,paid,1223.91,2.0,2
+2024,2,Bahia,cancelled,6102.91,3.0,3
+2024,2,Bahia,paid,17917.86,32.0,25
+2024,2,Ceará,cancelled,1157.9,2.0,2
+2024,2,Ceará,paid,20604.81,12.0,10
+2024,2,Distrito Federal,cancelled,428.4,1.0,1
+2024,2,Distrito Federal,paid,5561.5,5.0,5
+2024,2,Espírito Santo,paid,5612.78,11.0,11
+2024,2,Goiás,cancelled,534.6,2.0,2
+2024,2,Goiás,paid,18276.47,18.0,14
+2024,2,Maranhão,paid,9364.07,10.0,10
+2024,2,Mato Grosso,cancelled,2395.16,2.0,2
+2024,2,Mato Grosso,paid,7949.95,9.0,8
+2024,2,Mato Grosso do Sul,cancelled,404.98,1.0,1
+2024,2,Mato Grosso do Sul,paid,2918.21,5.0,4
+2024,2,Minas Gerais,cancelled,14509.84,7.0,7
+2024,2,Minas Gerais,paid,73340.28,76.0,69
+2024,2,Paraná,cancelled,1908.0,1.0,1
+2024,2,Paraná,paid,18403.2,31.0,27
+2024,2,Paraíba,paid,11124.1,9.0,9
+2024,2,Pará,paid,12092.82,9.0,9
+2024,2,Pernambuco,cancelled,2632.0,3.0,3
+2024,2,Pernambuco,paid,9022.31,15.0,12
+2024,2,Piauí,paid,2293.74,5.0,5
+2024,2,Rio Grande do Norte,paid,299.9,2.0,2
+2024,2,Rio Grande do Sul,cancelled,882.0,1.0,1
+2024,2,Rio Grande do Sul,paid,17269.5,17.0,17
+2024,2,Rio de Janeiro,cancelled,6291.5,4.0,4
+2024,2,Rio de Janeiro,paid,45355.78,55.0,49
+2024,2,Rondônia,cancelled,1944.9,1.0,1
+2024,2,Rondônia,paid,2508.55,5.0,5
+2024,2,Santa Catarina,cancelled,311.22,1.0,1
+2024,2,Santa Catarina,paid,28983.25,30.0,22
+2024,2,Sergipe,paid,3818.62,2.0,2
+2024,2,São Paulo,cancelled,11586.42,7.0,7
+2024,2,São Paulo,paid,147617.85,146.0,131
+2024,2,Tocantins,cancelled,1188.0,1.0,1
+2024,2,Tocantins,paid,2412.0,2.0,2
+2024,3,(sem estado),cancelled,913.5,1.0,1
+2024,3,(sem estado),paid,404.1,1.0,1
+2024,3,Alagoas,paid,15029.53,12.0,12
+2024,3,Amazonas,paid,8268.9,3.0,3
+2024,3,Bahia,cancelled,5820.9,3.0,3
+2024,3,Bahia,paid,58861.16,60.0,56
+2024,3,Ceará,cancelled,4537.05,1.0,1
+2024,3,Ceará,paid,18071.01,16.0,16
+2024,3,Distrito Federal,paid,15646.49,13.0,13
+2024,3,Espírito Santo,cancelled,3166.8,1.0,1
+2024,3,Espírito Santo,paid,24558.14,27.0,23
+2024,3,Goiás,cancelled,4199.0,1.0,1
+2024,3,Goiás,paid,19485.91,18.0,18
+2024,3,Maranhão,cancelled,1706.07,1.0,1
+2024,3,Maranhão,paid,10952.58,12.0,11
+2024,3,Mato Grosso,cancelled,2957.99,3.0,2
+2024,3,Mato Grosso,paid,8365.81,11.0,10
+2024,3,Mato Grosso do Sul,paid,6291.3,11.0,10
+2024,3,Minas Gerais,cancelled,13955.16,7.0,7
+2024,3,Minas Gerais,paid,101783.67,124.0,110
+2024,3,Paraná,cancelled,3459.12,3.0,3
+2024,3,Paraná,paid,59807.89,61.0,51
+2024,3,Paraíba,cancelled,1407.54,2.0,2
+2024,3,Paraíba,paid,5251.92,6.0,6
+2024,3,Pará,paid,25217.57,15.0,15
+2024,3,Pernambuco,cancelled,418.95,1.0,1
+2024,3,Pernambuco,paid,29194.05,27.0,26
+2024,3,Piauí,paid,6179.91,5.0,5
+2024,3,Rio Grande do Norte,cancelled,2425.5,1.0,1
+2024,3,Rio Grande do Norte,paid,3465.45,4.0,4
+2024,3,Rio Grande do Sul,cancelled,454.14,1.0,1
+2024,3,Rio Grande do Sul,paid,41861.68,43.0,42
+2024,3,Rio de Janeiro,cancelled,4923.87,7.0,7
+2024,3,Rio de Janeiro,paid,86885.18,96.0,92
+2024,3,Rondônia,paid,8111.91,8.0,7
+2024,3,Roraima,paid,2386.41,2.0,2
+2024,3,Santa Catarina,cancelled,3807.12,4.0,4
+2024,3,Santa Catarina,paid,45551.24,49.0,47
+2024,3,Sergipe,paid,8234.6,12.0,10
+2024,3,São Paulo,cancelled,16639.38,8.0,8
+2024,3,São Paulo,paid,207216.79,198.0,184
+2024,3,Tocantins,paid,1524.95,4.0,4
+2024,4,(sem estado),paid,40.94,1.0,1
+2024,4,Acre,paid,2554.3,1.0,1
+2024,4,Alagoas,cancelled,1623.36,2.0,2
+2024,4,Alagoas,paid,12072.59,7.0,7
+2024,4,Amazonas,cancelled,2536.5,1.0,1
+2024,4,Amazonas,paid,2739.42,4.0,4
+2024,4,Bahia,cancelled,6896.14,5.0,5
+2024,4,Bahia,paid,42143.91,31.0,31
+2024,4,Ceará,cancelled,4215.04,2.0,2
+2024,4,Ceará,paid,14656.47,9.0,9
+2024,4,Distrito Federal,cancelled,1406.2,1.0,1
+2024,4,Distrito Federal,paid,9074.16,8.0,8
+2024,4,Espírito Santo,cancelled,3976.67,3.0,3
+2024,4,Espírito Santo,paid,22063.9,21.0,18
+2024,4,Goiás,cancelled,1317.2,1.0,1
+2024,4,Goiás,paid,19949.05,16.0,16
+2024,4,Maranhão,cancelled,2612.15,1.0,1
+2024,4,Maranhão,paid,12618.64,9.0,9
+2024,4,Mato Grosso,paid,20135.62,17.0,15
+2024,4,Minas Gerais,cancelled,5573.82,5.0,5
+2024,4,Minas Gerais,paid,75753.45,56.0,55
+2024,4,Paraná,cancelled,952.3,1.0,1
+2024,4,Paraná,paid,38711.63,37.0,34
+2024,4,Paraíba,paid,12967.5,7.0,7
+2024,4,Pará,paid,23539.63,16.0,15
+2024,4,Pernambuco,cancelled,5573.18,3.0,3
+2024,4,Pernambuco,paid,9544.54,8.0,8
+2024,4,Piauí,paid,8628.93,4.0,4
+2024,4,Rio Grande do Norte,paid,8275.74,8.0,8
+2024,4,Rio Grande do Sul,cancelled,3181.34,4.0,4
+2024,4,Rio Grande do Sul,paid,35560.29,24.0,24
+2024,4,Rio de Janeiro,cancelled,9644.48,3.0,3
+2024,4,Rio de Janeiro,paid,90468.29,56.0,54
+2024,4,Rondônia,paid,7835.26,4.0,4
+2024,4,Santa Catarina,cancelled,1160.3,1.0,1
+2024,4,Santa Catarina,paid,23895.58,16.0,16
+2024,4,Sergipe,paid,6263.34,5.0,5
+2024,4,São Paulo,cancelled,10138.93,11.0,8
+2024,4,São Paulo,paid,197612.48,126.0,122
+2024,4,Tocantins,cancelled,2222.33,1.0,1
+2024,4,Tocantins,paid,5238.5,2.0,2
+2024,5,(sem estado),paid,6351.0,2.0,2
+2024,5,Alagoas,cancelled,98.1,1.0,1
+2024,5,Alagoas,paid,986.4,2.0,2
+2024,5,Amapá,paid,2693.25,1.0,1
+2024,5,Bahia,cancelled,4254.06,4.0,4
+2024,5,Bahia,paid,39468.73,31.0,29
+2024,5,Ceará,cancelled,163.62,1.0,1
+2024,5,Ceará,paid,14676.94,9.0,7
+2024,5,Distrito Federal,cancelled,7169.25,1.0,1
+2024,5,Distrito Federal,paid,16891.19,13.0,13
+2024,5,Espírito Santo,cancelled,456.0,1.0,1
+2024,5,Espírito Santo,paid,23211.89,15.0,14
+2024,5,Goiás,paid,12116.6,11.0,11
+2024,5,Maranhão,cancelled,868.5,1.0,1
+2024,5,Maranhão,paid,12666.5,9.0,9
+2024,5,Mato Grosso,cancelled,329.0,1.0,1
+2024,5,Mato Grosso,paid,20617.21,9.0,9
+2024,5,Mato Grosso do Sul,cancelled,1393.2,1.0,1
+2024,5,Mato Grosso do Sul,paid,6009.82,6.0,5
+2024,5,Minas Gerais,cancelled,2797.2,2.0,2
+2024,5,Minas Gerais,paid,66518.66,44.0,43
+2024,5,Paraná,cancelled,804.0,2.0,2
+2024,5,Paraná,paid,63418.57,27.0,26
+2024,5,Paraíba,paid,6296.86,4.0,4
+2024,5,Pará,paid,15298.05,5.0,5
+2024,5,Pernambuco,cancelled,2693.71,2.0,2
+2024,5,Pernambuco,paid,14577.75,13.0,13
+2024,5,Piauí,paid,13174.62,6.0,6
+2024,5,Rio Grande do Norte,paid,5114.35,4.0,4
+2024,5,Rio Grande do Sul,cancelled,7551.05,2.0,2
+2024,5,Rio Grande do Sul,paid,13590.32,24.0,15
+2024,5,Rio de Janeiro,cancelled,1553.4,1.0,1
+2024,5,Rio de Janeiro,paid,49943.66,42.0,40
+2024,5,Rondônia,paid,1854.9,2.0,2
+2024,5,Roraima,cancelled,53.1,1.0,1
+2024,5,Roraima,paid,3474.9,1.0,1
+2024,5,Santa Catarina,cancelled,13088.3,4.0,4
+2024,5,Santa Catarina,paid,30365.21,20.0,20
+2024,5,Sergipe,paid,9356.67,12.0,10
+2024,5,São Paulo,cancelled,14876.1,9.0,8
+2024,5,São Paulo,paid,151111.08,103.0,97
+2024,5,Tocantins,paid,3872.22,2.0,2
+2024,6,Acre,paid,7035.52,3.0,3
+2024,6,Alagoas,paid,3059.05,5.0,5
+2024,6,Bahia,cancelled,16699.35,4.0,4
+2024,6,Bahia,paid,48812.05,36.0,36
+2024,6,Ceará,cancelled,1778.4,2.0,2
+2024,6,Ceará,paid,9465.15,9.0,9
+2024,6,Distrito Federal,cancelled,3019.5,1.0,1
+2024,6,Distrito Federal,paid,16218.55,12.0,11
+2024,6,Espírito Santo,cancelled,2990.7,2.0,2
+2024,6,Espírito Santo,paid,12741.56,11.0,10
+2024,6,Goiás,paid,13715.99,10.0,10
+2024,6,Maranhão,cancelled,1885.5,1.0,1
+2024,6,Maranhão,paid,8218.9,5.0,5
+2024,6,Mato Grosso,paid,16710.51,14.0,13
+2024,6,Mato Grosso do Sul,paid,13205.94,7.0,7
+2024,6,Minas Gerais,cancelled,6868.9,5.0,5
+2024,6,Minas Gerais,paid,78799.23,65.0,65
+2024,6,Paraná,cancelled,3276.46,3.0,3
+2024,6,Paraná,paid,27762.8,25.0,25
+2024,6,Paraíba,cancelled,2142.0,1.0,1
+2024,6,Paraíba,paid,7655.42,9.0,9
+2024,6,Pará,cancelled,698.4,1.0,1
+2024,6,Pará,paid,22340.36,10.0,10
+2024,6,Pernambuco,cancelled,729.0,1.0,1
+2024,6,Pernambuco,paid,26607.96,19.0,18
+2024,6,Piauí,paid,5035.5,6.0,5
+2024,6,Rio Grande do Norte,cancelled,3641.35,2.0,2
+2024,6,Rio Grande do Norte,paid,9782.95,6.0,6
+2024,6,Rio Grande do Sul,cancelled,2406.46,2.0,2
+2024,6,Rio Grande do Sul,paid,26746.17,24.0,24
+2024,6,Rio de Janeiro,cancelled,3712.9,3.0,3
+2024,6,Rio de Janeiro,paid,59195.4,61.0,56
+2024,6,Rondônia,paid,8109.13,4.0,4
+2024,6,Santa Catarina,cancelled,3026.0,1.0,1
+2024,6,Santa Catarina,paid,20369.27,18.0,16
+2024,6,Sergipe,paid,5412.0,4.0,4
+2024,6,São Paulo,cancelled,13622.11,9.0,9
+2024,6,São Paulo,paid,163815.32,121.0,112
+2024,6,Tocantins,paid,8745.7,6.0,6
+2024,7,Acre,paid,2790.3,2.0,2
+2024,7,Alagoas,paid,8986.16,11.0,11
+2024,7,Amapá,paid,4084.64,2.0,2
+2024,7,Amazonas,paid,1731.8,4.0,4
+2024,7,Bahia,cancelled,2251.11,4.0,4
+2024,7,Bahia,paid,51622.66,49.0,49
+2024,7,Ceará,cancelled,5698.5,2.0,2
+2024,7,Ceará,paid,41195.44,25.0,25
+2024,7,Distrito Federal,cancelled,6088.8,1.0,1
+2024,7,Distrito Federal,paid,10927.49,12.0,11
+2024,7,Espírito Santo,paid,26356.74,32.0,24
+2024,7,Goiás,paid,26940.82,31.0,27
+2024,7,Maranhão,cancelled,2812.1,2.0,2
+2024,7,Maranhão,paid,19313.62,21.0,21
+2024,7,Mato Grosso,cancelled,552.5,1.0,1
+2024,7,Mato Grosso,paid,21820.93,27.0,21
+2024,7,Mato Grosso do Sul,paid,14063.59,9.0,9
+2024,7,Minas Gerais,cancelled,6243.28,11.0,6
+2024,7,Minas Gerais,paid,105162.59,98.0,85
+2024,7,Paraná,cancelled,1052.7,1.0,1
+2024,7,Paraná,paid,69853.96,45.0,38
+2024,7,Paraíba,cancelled,3955.2,3.0,3
+2024,7,Paraíba,paid,12863.54,11.0,11
+2024,7,Pará,cancelled,5478.3,2.0,2
+2024,7,Pará,paid,17186.14,15.0,14
+2024,7,Pernambuco,paid,26740.88,27.0,24
+2024,7,Piauí,cancelled,1409.1,2.0,2
+2024,7,Piauí,paid,5781.84,5.0,5
+2024,7,Rio Grande do Norte,cancelled,1052.7,1.0,1
+2024,7,Rio Grande do Norte,paid,5738.55,7.0,7
+2024,7,Rio Grande do Sul,cancelled,5595.62,5.0,5
+2024,7,Rio Grande do Sul,paid,37033.97,58.0,48
+2024,7,Rio de Janeiro,cancelled,4738.6,4.0,4
+2024,7,Rio de Janeiro,paid,85647.59,96.0,76
+2024,7,Rondônia,paid,5230.77,7.0,6
+2024,7,Santa Catarina,cancelled,7002.57,4.0,4
+2024,7,Santa Catarina,paid,46698.08,48.0,41
+2024,7,Sergipe,paid,2870.9,7.0,4
+2024,7,São Paulo,cancelled,12264.04,16.0,13
+2024,7,São Paulo,paid,236405.09,233.0,209
+2024,7,Tocantins,paid,6333.21,2.0,2
+2024,8,(sem estado),cancelled,386.4,1.0,1
+2024,8,(sem estado),paid,6687.25,4.0,4
+2024,8,Acre,paid,6113.7,2.0,2
+2024,8,Alagoas,paid,14113.9,8.0,8
+2024,8,Amazonas,paid,1321.85,3.0,3
+2024,8,Bahia,cancelled,6820.75,3.0,3
+2024,8,Bahia,paid,46523.2,50.0,38
+2024,8,Ceará,paid,11311.32,13.0,12
+2024,8,Distrito Federal,paid,28112.64,15.0,14
+2024,8,Espírito Santo,cancelled,7450.15,3.0,3
+2024,8,Espírito Santo,paid,29134.12,26.0,20
+2024,8,Goiás,cancelled,16159.67,4.0,4
+2024,8,Goiás,paid,24748.61,17.0,17
+2024,8,Maranhão,cancelled,429.0,1.0,1
+2024,8,Maranhão,paid,22765.3,12.0,12
+2024,8,Mato Grosso,cancelled,122.4,1.0,1
+2024,8,Mato Grosso,paid,18340.0,9.0,9
+2024,8,Mato Grosso do Sul,paid,7168.45,4.0,4
+2024,8,Minas Gerais,cancelled,12299.35,8.0,8
+2024,8,Minas Gerais,paid,72718.23,73.0,70
+2024,8,Paraná,cancelled,553.85,1.0,1
+2024,8,Paraná,paid,66120.1,42.0,39
+2024,8,Paraíba,cancelled,3508.35,1.0,1
+2024,8,Paraíba,paid,21360.03,10.0,10
+2024,8,Pará,paid,17843.29,10.0,10
+2024,8,Pernambuco,cancelled,2303.75,1.0,1
+2024,8,Pernambuco,paid,19414.53,9.0,9
+2024,8,Piauí,paid,13518.15,11.0,11
+2024,8,Rio Grande do Norte,paid,2194.4,4.0,4
+2024,8,Rio Grande do Sul,cancelled,716.05,2.0,2
+2024,8,Rio Grande do Sul,paid,24299.95,34.0,32
+2024,8,Rio de Janeiro,cancelled,5777.32,27.0,6
+2024,8,Rio de Janeiro,paid,93628.71,79.0,74
+2024,8,Rondônia,paid,4760.1,3.0,3
+2024,8,Roraima,paid,273.0,1.0,1
+2024,8,Santa Catarina,cancelled,3032.22,6.0,5
+2024,8,Santa Catarina,paid,40620.81,45.0,32
+2024,8,Sergipe,cancelled,1875.8,1.0,1
+2024,8,Sergipe,paid,6039.4,3.0,3
+2024,8,São Paulo,cancelled,31441.85,15.0,14
+2024,8,São Paulo,paid,200211.89,177.0,154
+2024,8,Tocantins,paid,8841.9,4.0,4
+2024,9,(sem estado),paid,2529.0,1.0,1
+2024,9,Acre,paid,1611.58,1.0,1
+2024,9,Alagoas,paid,8367.72,7.0,7
+2024,9,Amazonas,paid,2308.4,2.0,2
+2024,9,Bahia,paid,64088.23,46.0,43
+2024,9,Ceará,paid,24685.95,15.0,15
+2024,9,Distrito Federal,cancelled,3665.88,2.0,2
+2024,9,Distrito Federal,paid,14116.64,10.0,10
+2024,9,Espírito Santo,cancelled,9990.9,2.0,2
+2024,9,Espírito Santo,paid,18094.35,13.0,13
+2024,9,Goiás,paid,33233.22,14.0,14
+2024,9,Maranhão,cancelled,2397.0,1.0,1
+2024,9,Maranhão,paid,13850.29,10.0,10
+2024,9,Mato Grosso,paid,22038.51,16.0,15
+2024,9,Mato Grosso do Sul,paid,11177.4,8.0,8
+2024,9,Minas Gerais,cancelled,7228.0,3.0,3
+2024,9,Minas Gerais,paid,81579.63,56.0,56
+2024,9,Paraná,cancelled,13187.9,5.0,5
+2024,9,Paraná,paid,28311.55,18.0,18
+2024,9,Paraíba,paid,6430.65,7.0,7
+2024,9,Pará,paid,16263.19,8.0,8
+2024,9,Pernambuco,cancelled,1049.2,1.0,1
+2024,9,Pernambuco,paid,24114.29,20.0,20
+2024,9,Piauí,paid,5930.6,4.0,4
+2024,9,Rio Grande do Norte,paid,7355.85,4.0,4
+2024,9,Rio Grande do Sul,cancelled,4725.45,6.0,6
+2024,9,Rio Grande do Sul,paid,35224.26,24.0,24
+2024,9,Rio de Janeiro,cancelled,3112.2,3.0,3
+2024,9,Rio de Janeiro,paid,63357.63,50.0,49
+2024,9,Rondônia,cancelled,2107.0,1.0,1
+2024,9,Rondônia,paid,20004.98,8.0,8
+2024,9,Roraima,paid,918.4,1.0,1
+2024,9,Santa Catarina,cancelled,2837.97,1.0,1
+2024,9,Santa Catarina,paid,43268.4,26.0,23
+2024,9,Sergipe,paid,2636.6,3.0,3
+2024,9,São Paulo,cancelled,11631.0,9.0,8
+2024,9,São Paulo,paid,205576.33,136.0,131
+2024,9,Tocantins,paid,425.25,1.0,1
+2024,10,Acre,paid,1227.4,2.0,2
+2024,10,Alagoas,cancelled,1464.95,1.0,1
+2024,10,Alagoas,paid,11752.84,8.0,8
+2024,10,Bahia,paid,41077.44,28.0,28
+2024,10,Ceará,paid,18001.15,8.0,8
+2024,10,Distrito Federal,cancelled,5223.85,2.0,2
+2024,10,Distrito Federal,paid,21775.46,14.0,14
+2024,10,Espírito Santo,cancelled,4177.0,2.0,2
+2024,10,Espírito Santo,paid,21355.58,15.0,15
+2024,10,Goiás,cancelled,2911.0,1.0,1
+2024,10,Goiás,paid,20404.4,13.0,13
+2024,10,Maranhão,cancelled,1040.0,1.0,1
+2024,10,Maranhão,paid,6728.95,8.0,8
+2024,10,Mato Grosso,cancelled,3612.36,4.0,4
+2024,10,Mato Grosso,paid,12351.65,8.0,8
+2024,10,Mato Grosso do Sul,paid,8980.25,7.0,7
+2024,10,Minas Gerais,cancelled,5812.49,10.0,7
+2024,10,Minas Gerais,paid,82086.52,69.0,68
+2024,10,Paraná,paid,25910.53,21.0,19
+2024,10,Paraíba,paid,9887.59,10.0,10
+2024,10,Pará,cancelled,3844.2,3.0,3
+2024,10,Pará,paid,16286.37,13.0,11
+2024,10,Pernambuco,cancelled,204.45,1.0,1
+2024,10,Pernambuco,paid,27384.01,18.0,13
+2024,10,Piauí,cancelled,4354.2,2.0,2
+2024,10,Piauí,paid,5223.6,4.0,4
+2024,10,Rio Grande do Norte,paid,2219.5,3.0,3
+2024,10,Rio Grande do Sul,cancelled,2144.1,2.0,2
+2024,10,Rio Grande do Sul,paid,59481.3,32.0,31
+2024,10,Rio de Janeiro,cancelled,9086.68,5.0,4
+2024,10,Rio de Janeiro,paid,117150.83,80.0,76
+2024,10,Rondônia,paid,5952.98,4.0,4
+2024,10,Santa Catarina,cancelled,2222.2,2.0,2
+2024,10,Santa Catarina,paid,23513.71,18.0,18
+2024,10,Sergipe,paid,5187.0,4.0,4
+2024,10,São Paulo,cancelled,16180.15,7.0,7
+2024,10,São Paulo,paid,188728.08,142.0,134
+2024,10,Tocantins,paid,6291.12,4.0,4
+2024,11,(sem estado),cancelled,6081.75,1.0,1
+2024,11,(sem estado),paid,383.0,1.0,1
+2024,11,Acre,paid,4411.78,2.0,2
+2024,11,Alagoas,paid,8812.6,11.0,11
+2024,11,Amazonas,paid,2639.62,5.0,5
+2024,11,Bahia,cancelled,14849.29,5.0,5
+2024,11,Bahia,paid,63060.12,38.0,38
+2024,11,Ceará,cancelled,2945.3,2.0,2
+2024,11,Ceará,paid,32305.16,26.0,25
+2024,11,Distrito Federal,paid,26064.62,12.0,12
+2024,11,Espírito Santo,cancelled,2796.5,1.0,1
+2024,11,Espírito Santo,paid,36689.37,32.0,27
+2024,11,Goiás,cancelled,2935.2,4.0,4
+2024,11,Goiás,paid,23124.03,23.0,22
+2024,11,Maranhão,paid,18992.11,20.0,19
+2024,11,Mato Grosso,paid,21849.08,15.0,15
+2024,11,Mato Grosso do Sul,paid,20003.12,10.0,10
+2024,11,Minas Gerais,cancelled,2996.1,3.0,3
+2024,11,Minas Gerais,paid,106646.18,99.0,97
+2024,11,Paraná,cancelled,2932.25,2.0,2
+2024,11,Paraná,paid,38544.28,39.0,39
+2024,11,Paraíba,cancelled,219.45,1.0,1
+2024,11,Paraíba,paid,8878.52,13.0,13
+2024,11,Pará,paid,24784.25,14.0,14
+2024,11,Pernambuco,cancelled,15920.8,3.0,3
+2024,11,Pernambuco,paid,32068.81,22.0,22
+2024,11,Piauí,paid,11537.33,20.0,10
+2024,11,Rio Grande do Norte,cancelled,1105.65,1.0,1
+2024,11,Rio Grande do Norte,paid,10719.17,13.0,13
+2024,11,Rio Grande do Sul,cancelled,2349.9,1.0,1
+2024,11,Rio Grande do Sul,paid,27857.65,35.0,34
+2024,11,Rio de Janeiro,cancelled,18094.89,12.0,12
+2024,11,Rio de Janeiro,paid,122136.82,110.0,107
+2024,11,Rondônia,paid,3474.75,2.0,2
+2024,11,Santa Catarina,cancelled,4130.1,2.0,2
+2024,11,Santa Catarina,paid,20631.9,29.0,24
+2024,11,Sergipe,paid,9317.05,10.0,10
+2024,11,São Paulo,cancelled,22190.8,25.0,23
+2024,11,São Paulo,paid,240735.77,222.0,211
+2024,11,Tocantins,cancelled,1006.0,1.0,1
+2024,11,Tocantins,paid,1131.4,4.0,3
+2024,12,(sem estado),cancelled,511.1,1.0,1
+2024,12,(sem estado),paid,6144.0,1.0,1
+2024,12,Alagoas,paid,11241.58,12.0,11
+2024,12,Amapá,paid,1299.6,2.0,2
+2024,12,Amazonas,cancelled,3349.7,1.0,1
+2024,12,Amazonas,paid,4432.55,3.0,3
+2024,12,Bahia,cancelled,3800.0,2.0,2
+2024,12,Bahia,paid,59020.74,49.0,48
+2024,12,Ceará,cancelled,1680.0,1.0,1
+2024,12,Ceará,paid,25779.14,15.0,15
+2024,12,Distrito Federal,cancelled,1114.0,1.0,1
+2024,12,Distrito Federal,paid,40194.3,27.0,23
+2024,12,Espírito Santo,paid,23186.13,28.0,23
+2024,12,Goiás,paid,25449.2,22.0,22
+2024,12,Maranhão,cancelled,3004.18,3.0,3
+2024,12,Maranhão,paid,4105.45,5.0,4
+2024,12,Mato Grosso,paid,8203.55,7.0,7
+2024,12,Mato Grosso do Sul,paid,8487.7,8.0,8
+2024,12,Minas Gerais,cancelled,5580.5,4.0,4
+2024,12,Minas Gerais,paid,122211.11,92.0,91
+2024,12,Paraná,paid,45428.29,37.0,36
+2024,12,Paraíba,paid,3602.85,3.0,3
+2024,12,Pará,paid,9934.85,9.0,9
+2024,12,Pernambuco,paid,19713.8,15.0,15
+2024,12,Piauí,paid,6150.3,6.0,6
+2024,12,Rio Grande do Norte,paid,9678.46,8.0,7
+2024,12,Rio Grande do Sul,cancelled,260.0,1.0,1
+2024,12,Rio Grande do Sul,paid,32045.56,31.0,30
+2024,12,Rio de Janeiro,cancelled,1409.9,4.0,4
+2024,12,Rio de Janeiro,paid,88568.04,77.0,68
+2024,12,Rondônia,cancelled,1099.0,1.0,1
+2024,12,Rondônia,paid,1405.65,2.0,2
+2024,12,Roraima,paid,263.95,1.0,1
+2024,12,Santa Catarina,cancelled,1787.19,3.0,3
+2024,12,Santa Catarina,paid,25283.37,28.0,27
+2024,12,Sergipe,paid,10049.9,4.0,3
+2024,12,São Paulo,cancelled,7275.25,16.0,9
+2024,12,São Paulo,paid,237695.76,170.0,163
+2024,12,Tocantins,paid,11137.24,4.0,4
+2025,1,Acre,paid,833.15,2.0,2
+2025,1,Alagoas,paid,12853.55,10.0,10
+2025,1,Amazonas,paid,10743.9,11.0,7
+2025,1,Bahia,cancelled,2605.85,1.0,1
+2025,1,Bahia,paid,56747.86,46.0,42
+2025,1,Ceará,paid,15122.48,12.0,12
+2025,1,Distrito Federal,paid,14121.35,16.0,16
+2025,1,Espírito Santo,paid,9808.27,13.0,12
+2025,1,Goiás,cancelled,923.0,1.0,1
+2025,1,Goiás,paid,30944.1,29.0,26
+2025,1,Maranhão,cancelled,1763.0,1.0,1
+2025,1,Maranhão,paid,20922.12,7.0,7
+2025,1,Mato Grosso,cancelled,262.4,1.0,1
+2025,1,Mato Grosso,paid,12949.84,12.0,11
+2025,1,Mato Grosso do Sul,paid,7377.6,5.0,5
+2025,1,Minas Gerais,cancelled,3884.6,3.0,3
+2025,1,Minas Gerais,paid,84419.42,87.0,79
+2025,1,Paraná,cancelled,6858.6,3.0,3
+2025,1,Paraná,paid,62555.62,28.0,28
+2025,1,Paraíba,paid,1377.85,5.0,5
+2025,1,Pará,cancelled,2464.3,1.0,1
+2025,1,Pará,paid,4891.65,7.0,7
+2025,1,Pernambuco,paid,26486.52,17.0,17
+2025,1,Piauí,paid,13370.3,8.0,8
+2025,1,Rio Grande do Norte,cancelled,2276.9,2.0,2
+2025,1,Rio Grande do Norte,paid,11540.1,8.0,8
+2025,1,Rio Grande do Sul,paid,33989.61,31.0,28
+2025,1,Rio de Janeiro,cancelled,1835.4,2.0,2
+2025,1,Rio de Janeiro,paid,81622.37,66.0,64
+2025,1,Rondônia,cancelled,699.99,1.0,1
+2025,1,Rondônia,paid,2305.89,5.0,3
+2025,1,Santa Catarina,cancelled,4545.0,1.0,1
+2025,1,Santa Catarina,paid,39780.61,24.0,24
+2025,1,Sergipe,paid,6849.65,8.0,5
+2025,1,São Paulo,cancelled,5487.12,9.0,9
+2025,1,São Paulo,paid,180132.01,161.0,150
+2025,1,Tocantins,paid,2605.85,1.0,1
+2025,2,Acre,paid,901.64,2.0,2
+2025,2,Alagoas,paid,9597.95,13.0,9
+2025,2,Amazonas,paid,831.89,2.0,2
+2025,2,Bahia,cancelled,181.08,1.0,1
+2025,2,Bahia,paid,45807.59,49.0,47
+2025,2,Ceará,paid,7779.57,12.0,10
+2025,2,Distrito Federal,paid,20408.75,12.0,12
+2025,2,Espírito Santo,cancelled,1967.35,1.0,1
+2025,2,Espírito Santo,paid,25409.69,16.0,16
+2025,2,Goiás,cancelled,1046.0,1.0,1
+2025,2,Goiás,paid,15262.81,13.0,12
+2025,2,Maranhão,paid,12350.33,10.0,9
+2025,2,Mato Grosso,paid,2908.33,7.0,6
+2025,2,Mato Grosso do Sul,cancelled,2232.7,1.0,1
+2025,2,Mato Grosso do Sul,paid,3536.06,8.0,5
+2025,2,Minas Gerais,cancelled,299.9,1.0,1
+2025,2,Minas Gerais,paid,43189.73,84.0,65
+2025,2,Paraná,cancelled,2116.9,2.0,2
+2025,2,Paraná,paid,35793.82,45.0,37
+2025,2,Paraíba,paid,5079.63,6.0,6
+2025,2,Pará,paid,18869.33,23.0,17
+2025,2,Pernambuco,paid,20197.5,19.0,14
+2025,2,Piauí,paid,12071.49,7.0,7
+2025,2,Rio Grande do Norte,paid,3629.86,10.0,8
+2025,2,Rio Grande do Sul,paid,18476.44,22.0,18
+2025,2,Rio de Janeiro,cancelled,1091.56,3.0,3
+2025,2,Rio de Janeiro,paid,34589.31,51.0,41
+2025,2,Rondônia,paid,4913.1,7.0,7
+2025,2,Santa Catarina,paid,24862.91,39.0,30
+2025,2,Sergipe,paid,3136.04,5.0,3
+2025,2,São Paulo,cancelled,11559.65,9.0,9
+2025,2,São Paulo,paid,102699.42,130.0,121
+2025,2,Tocantins,paid,1981.77,6.0,5
+2025,3,(sem estado),paid,2895.93,2.0,2
+2025,3,Acre,cancelled,235.41,1.0,1
+2025,3,Acre,paid,2019.21,3.0,3
+2025,3,Alagoas,paid,6004.28,8.0,8
+2025,3,Amapá,paid,680.4,1.0,1
+2025,3,Amazonas,paid,6836.36,7.0,6
+2025,3,Bahia,cancelled,5987.27,4.0,4
+2025,3,Bahia,paid,37639.26,63.0,57
+2025,3,Ceará,cancelled,3188.87,4.0,3
+2025,3,Ceará,paid,10881.2,15.0,14
+2025,3,Distrito Federal,cancelled,7969.94,3.0,3
+2025,3,Distrito Federal,paid,16500.0,12.0,12
+2025,3,Espírito Santo,cancelled,4783.36,4.0,4
+2025,3,Espírito Santo,paid,51997.53,32.0,30
+2025,3,Goiás,paid,21586.01,33.0,28
+2025,3,Maranhão,cancelled,1487.2,1.0,1
+2025,3,Maranhão,paid,22577.91,21.0,21
+2025,3,Mato Grosso,cancelled,257.0,1.0,1
+2025,3,Mato Grosso,paid,2350.98,9.0,9
+2025,3,Mato Grosso do Sul,cancelled,958.35,2.0,2
+2025,3,Mato Grosso do Sul,paid,4802.9,11.0,9
+2025,3,Minas Gerais,cancelled,24857.52,14.0,10
+2025,3,Minas Gerais,paid,108030.57,135.0,116
+2025,3,Paraná,cancelled,7615.13,6.0,6
+2025,3,Paraná,paid,55596.63,69.0,64
+2025,3,Paraíba,paid,17830.96,14.0,12
+2025,3,Pará,cancelled,2440.0,2.0,2
+2025,3,Pará,paid,48947.71,27.0,25
+2025,3,Pernambuco,cancelled,984.92,5.0,4
+2025,3,Pernambuco,paid,16746.17,22.0,21
+2025,3,Piauí,paid,6243.43,7.0,7
+2025,3,Rio Grande do Norte,cancelled,527.0,1.0,1
+2025,3,Rio Grande do Norte,paid,4438.03,10.0,9
+2025,3,Rio Grande do Sul,cancelled,7482.36,8.0,7
+2025,3,Rio Grande do Sul,paid,38286.21,40.0,40
+2025,3,Rio de Janeiro,cancelled,9622.88,10.0,9
+2025,3,Rio de Janeiro,paid,71974.91,75.0,73
+2025,3,Rondônia,cancelled,117.41,1.0,1
+2025,3,Rondônia,paid,899.28,2.0,2
+2025,3,Roraima,paid,680.4,1.0,1
+2025,3,Santa Catarina,cancelled,3367.87,6.0,6
+2025,3,Santa Catarina,paid,38620.73,46.0,44
+2025,3,Sergipe,paid,8701.34,4.0,4
+2025,3,São Paulo,cancelled,23244.41,34.0,33
+2025,3,São Paulo,paid,182274.57,243.0,209
+2025,3,Tocantins,paid,4534.35,2.0,2
+2025,4,(sem estado),cancelled,595.13,1.0,1
+2025,4,Acre,paid,5359.58,3.0,3
+2025,4,Alagoas,paid,16690.86,9.0,9
+2025,4,Amazonas,cancelled,1082.12,2.0,2
+2025,4,Amazonas,paid,2146.48,3.0,3
+2025,4,Bahia,cancelled,6726.38,7.0,6
+2025,4,Bahia,paid,30866.26,38.0,32
+2025,4,Ceará,cancelled,499.5,1.0,1
+2025,4,Ceará,paid,25397.51,15.0,14
+2025,4,Distrito Federal,cancelled,7841.42,2.0,2
+2025,4,Distrito Federal,paid,10257.57,12.0,11
+2025,4,Espírito Santo,paid,25718.86,15.0,15
+2025,4,Goiás,cancelled,2937.0,1.0,1
+2025,4,Goiás,paid,27135.1,25.0,25
+2025,4,Maranhão,cancelled,2870.0,1.0,1
+2025,4,Maranhão,paid,16925.58,11.0,11
+2025,4,Mato Grosso,cancelled,899.79,1.0,1
+2025,4,Mato Grosso,paid,3339.87,6.0,6
+2025,4,Mato Grosso do Sul,cancelled,3829.15,4.0,4
+2025,4,Mato Grosso do Sul,paid,9988.68,14.0,10
+2025,4,Minas Gerais,cancelled,7308.9,9.0,8
+2025,4,Minas Gerais,paid,63431.2,74.0,67
+2025,4,Paraná,cancelled,4275.5,2.0,2
+2025,4,Paraná,paid,32874.31,35.0,31
+2025,4,Paraíba,paid,13502.35,7.0,7
+2025,4,Pará,cancelled,423.3,2.0,1
+2025,4,Pará,paid,21899.3,16.0,15
+2025,4,Pernambuco,cancelled,5746.5,2.0,2
+2025,4,Pernambuco,paid,23721.97,15.0,15
+2025,4,Piauí,cancelled,1263.19,1.0,1
+2025,4,Piauí,paid,1455.42,3.0,3
+2025,4,Rio Grande do Norte,paid,11384.58,4.0,4
+2025,4,Rio Grande do Sul,cancelled,2875.12,3.0,3
+2025,4,Rio Grande do Sul,paid,31002.59,42.0,42
+2025,4,Rio de Janeiro,cancelled,4339.88,7.0,7
+2025,4,Rio de Janeiro,paid,82047.82,61.0,58
+2025,4,Rondônia,paid,6100.12,4.0,4
+2025,4,Santa Catarina,cancelled,2544.24,5.0,5
+2025,4,Santa Catarina,paid,40256.65,35.0,33
+2025,4,Sergipe,cancelled,1944.8,1.0,1
+2025,4,Sergipe,paid,15887.63,7.0,7
+2025,4,São Paulo,cancelled,23942.73,22.0,19
+2025,4,São Paulo,paid,208119.41,222.0,189
+2025,4,Tocantins,paid,3354.45,4.0,4
+2025,5,(sem estado),paid,1386.0,2.0,2
+2025,5,Alagoas,cancelled,1071.0,1.0,1
+2025,5,Alagoas,paid,5511.48,8.0,8
+2025,5,Amazonas,paid,12920.21,9.0,7
+2025,5,Bahia,cancelled,1520.0,1.0,1
+2025,5,Bahia,paid,82996.61,61.0,57
+2025,5,Ceará,cancelled,1205.0,1.0,1
+2025,5,Ceará,paid,18528.17,27.0,23
+2025,5,Distrito Federal,paid,14798.43,15.0,14
+2025,5,Espírito Santo,cancelled,1239.0,1.0,1
+2025,5,Espírito Santo,paid,16225.05,10.0,10
+2025,5,Goiás,paid,30099.58,24.0,24
+2025,5,Maranhão,paid,20541.05,21.0,18
+2025,5,Mato Grosso,paid,14549.04,13.0,10
+2025,5,Mato Grosso do Sul,cancelled,596.4,1.0,1
+2025,5,Mato Grosso do Sul,paid,24443.77,17.0,14
+2025,5,Minas Gerais,cancelled,4805.5,5.0,5
+2025,5,Minas Gerais,paid,117013.54,121.0,112
+2025,5,Paraná,cancelled,849.35,3.0,3
+2025,5,Paraná,paid,41609.2,42.0,39
+2025,5,Paraíba,cancelled,642.0,1.0,1
+2025,5,Paraíba,paid,11991.96,8.0,8
+2025,5,Pará,cancelled,2669.86,1.0,1
+2025,5,Pará,paid,13886.4,17.0,17
+2025,5,Pernambuco,cancelled,2452.3,4.0,4
+2025,5,Pernambuco,paid,23528.24,19.0,18
+2025,5,Piauí,paid,10608.0,4.0,4
+2025,5,Rio Grande do Norte,paid,7313.42,5.0,5
+2025,5,Rio Grande do Sul,cancelled,2527.43,3.0,3
+2025,5,Rio Grande do Sul,paid,34360.34,35.0,34
+2025,5,Rio de Janeiro,cancelled,7587.42,8.0,8
+2025,5,Rio de Janeiro,paid,99245.36,100.0,94
+2025,5,Rondônia,paid,9991.67,5.0,5
+2025,5,Santa Catarina,cancelled,3411.65,3.0,3
+2025,5,Santa Catarina,paid,49892.62,44.0,42
+2025,5,Sergipe,cancelled,166.92,1.0,1
+2025,5,Sergipe,paid,18920.49,9.0,9
+2025,5,São Paulo,cancelled,19832.38,15.0,15
+2025,5,São Paulo,paid,228198.04,257.0,226
+2025,5,Tocantins,paid,3350.21,6.0,5
+2025,6,(sem estado),paid,59.98,1.0,1
+2025,6,Alagoas,paid,12013.4,9.0,9
+2025,6,Amapá,paid,3369.65,2.0,2
+2025,6,Amazonas,cancelled,2988.0,1.0,1
+2025,6,Amazonas,paid,9666.57,6.0,6
+2025,6,Bahia,cancelled,5790.93,3.0,3
+2025,6,Bahia,paid,38249.48,49.0,48
+2025,6,Ceará,cancelled,950.0,1.0,1
+2025,6,Ceará,paid,46392.24,27.0,27
+2025,6,Distrito Federal,paid,13283.3,15.0,14
+2025,6,Espírito Santo,cancelled,1654.26,1.0,1
+2025,6,Espírito Santo,paid,22438.73,20.0,20
+2025,6,Goiás,cancelled,5874.32,2.0,2
+2025,6,Goiás,paid,23110.51,22.0,22
+2025,6,Maranhão,cancelled,1093.93,2.0,2
+2025,6,Maranhão,paid,28427.44,17.0,16
+2025,6,Mato Grosso,paid,5615.84,9.0,8
+2025,6,Mato Grosso do Sul,cancelled,1310.0,1.0,1
+2025,6,Mato Grosso do Sul,paid,7104.36,6.0,6
+2025,6,Minas Gerais,cancelled,10745.46,11.0,11
+2025,6,Minas Gerais,paid,111384.47,95.0,91
+2025,6,Paraná,cancelled,3671.0,4.0,4
+2025,6,Paraná,paid,41646.02,33.0,30
+2025,6,Paraíba,cancelled,2347.0,2.0,2
+2025,6,Paraíba,paid,7606.15,7.0,7
+2025,6,Pará,cancelled,1294.39,2.0,2
+2025,6,Pará,paid,31582.15,12.0,12
+2025,6,Pernambuco,cancelled,2998.8,2.0,2
+2025,6,Pernambuco,paid,46406.77,28.0,28
+2025,6,Piauí,paid,5051.96,4.0,4
+2025,6,Rio Grande do Norte,paid,8189.56,14.0,12
+2025,6,Rio Grande do Sul,cancelled,855.0,1.0,1
+2025,6,Rio Grande do Sul,paid,45022.66,48.0,46
+2025,6,Rio de Janeiro,cancelled,7955.32,9.0,8
+2025,6,Rio de Janeiro,paid,94713.72,90.0,87
+2025,6,Rondônia,paid,10139.29,9.0,8
+2025,6,Roraima,paid,3498.0,1.0,1
+2025,6,Santa Catarina,cancelled,2210.6,2.0,2
+2025,6,Santa Catarina,paid,50496.94,37.0,36
+2025,6,Sergipe,paid,8715.59,8.0,8
+2025,6,São Paulo,cancelled,25004.94,23.0,22
+2025,6,São Paulo,paid,339117.02,270.0,252
+2025,6,Tocantins,paid,11132.24,9.0,9
