@@ -15,7 +15,7 @@ import requests
 from supabase import create_client
 
 # quantas chamadas ao ML em paralelo no enriquecimento (frete/repasse/estado)
-WORKERS = int(os.environ.get("ENRIQ_WORKERS", "8"))
+WORKERS = int(os.environ.get("ENRIQ_WORKERS", "6"))
 
 # ---- Configuracao (vem dos secrets do GitHub) ----
 CLIENT_ID = os.environ["ML_CLIENT_ID"]
@@ -275,10 +275,18 @@ def _distintos_envios(pend):
 
 
 def _frete_de_envio(ship_id, access, seller_id):
-    """Calcula e grava o frete rateado de um envio. Retorna True se preencheu."""
-    itens = (sb.table("vendas").select("id, valor_unitario, quantidade")
+    """Calcula e grava o frete rateado de um envio. Retorna True se preencheu.
+    Blindado: qualquer erro (conexão etc.) vira False, sem derrubar a rodada."""
+    try:
+        return _frete_de_envio_inner(ship_id, access, seller_id)
+    except Exception:
+        return False
+
+
+def _frete_de_envio_inner(ship_id, access, seller_id):
+    itens = (_retry(lambda: sb.table("vendas").select("id, valor_unitario, quantidade")
              .eq("seller_id", seller_id).eq("shipping_id", ship_id)
-             .eq("status", "paid").execute().data) or []
+             .eq("status", "paid").execute()).data) or []
     if not itens:
         return False
     try:
@@ -295,11 +303,8 @@ def _frete_de_envio(ship_id, access, seller_id):
     for it in itens:
         val = (it["valor_unitario"] or 0) * (it["quantidade"] or 1)
         frete_item = round(frete_env * (val / total_val), 2)
-        try:
-            sb.table("vendas").update({"frete": frete_item}).eq("id", it["id"]).execute()
-            ok = True
-        except Exception:
-            pass
+        _retry(lambda it=it, fr=frete_item: sb.table("vendas").update({"frete": fr}).eq("id", it["id"]).execute())
+        ok = True
     return ok
 
 
@@ -334,8 +339,8 @@ def _local_de_envio(ship_id, access, seller_id):
     uf = (st.get("id") or "").replace("BR-", "").strip() or "ND"  # 'ND' evita reprocessar sem fim
     dados = {"uf": uf, "estado": st.get("name"), "cidade": ci.get("name")}
     try:
-        sb.table("vendas").update(dados).eq("seller_id", seller_id) \
-            .eq("shipping_id", ship_id).eq("status", "paid").execute()
+        _retry(lambda: sb.table("vendas").update(dados).eq("seller_id", seller_id)
+               .eq("shipping_id", ship_id).eq("status", "paid").execute())
         return True
     except Exception:
         return False
