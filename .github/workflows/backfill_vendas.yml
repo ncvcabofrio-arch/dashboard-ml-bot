@@ -1,0 +1,44 @@
+name: Backfill de vendas (1 conta, historico)
+
+# Puxa o histórico de pedidos de UMA conta só (padrão: MG), pra dentro da 'vendas'
+# e da 'ordem_pagamentos'. Roda manual, quando precisar completar uma conta.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dias:
+        description: 'Quantos dias pra trás puxar (padrão 365 = 1 ano)'
+        required: false
+        default: '365'
+      so_seller:
+        description: 'seller_id da conta (padrão = PONTOMUSICAL_MG)'
+        required: false
+        default: '3244206480'
+
+# mesma trava do robô rápido: nunca rodam ao mesmo tempo (token é de uso único)
+concurrency:
+  group: ml-puxador
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Instalar dependencias
+        run: pip install requests supabase
+      - name: Rodar backfill (so a conta escolhida)
+        env:
+          ML_CLIENT_ID:     ${{ secrets.ML_CLIENT_ID }}
+          ML_CLIENT_SECRET: ${{ secrets.ML_CLIENT_SECRET }}
+          ML_REFRESH_TOKEN: ${{ secrets.ML_REFRESH_TOKEN }}
+          SUPABASE_URL:     ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY:     ${{ secrets.SUPABASE_KEY }}
+          DIAS:          ${{ github.event.inputs.dias || '365' }}
+          SO_SELLER:     ${{ github.event.inputs.so_seller || '3244206480' }}
+          ENRICH_LIMITE: '400'    # pega o frete de todos os pedidos numa rodada só
+          NOTIFICAR:     '0'      # sem spam no Telegram durante o backfill
+        run: python -u puxador.py
