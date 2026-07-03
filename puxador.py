@@ -27,6 +27,8 @@ SEED_REFRESH = os.environ.get("ML_REFRESH_TOKEN", "")
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 DIAS = int(os.environ.get("DIAS", "7"))
+SO_SELLER = os.environ.get("SO_SELLER", "").strip()   # se preenchido, processa SÓ essa conta (backfill)
+LIMITE_ENRICH = int(os.environ.get("ENRICH_LIMITE", "80"))   # frete/local/repasse por rodada (backfill sobe isso)
 
 # Telegram (opcional)
 TG_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
@@ -198,6 +200,35 @@ def cadastrar_skus_novos(linhas):
             print("Aviso: falha ao cadastrar SKUs novos:", e)
 
 
+def pagamentos_do_pedido(o, seller_id):
+    """TODOS os pagamentos de um pedido (meios combinados: saldo + cartão, etc.).
+    Vira linhas pra tabela 'ordem_pagamentos', pra a conciliação somar tudo."""
+    oid = str(o.get("id"))
+    out = []
+    for p in (o.get("payments") or []):
+        pid = p.get("id")
+        if pid:
+            out.append({"order_id": oid, "payment_id": str(pid), "seller_id": seller_id})
+    return out
+
+
+def gravar_pagamentos(pags):
+    """Grava os pagamentos por pedido em 'ordem_pagamentos' (sem duplicar)."""
+    if not pags:
+        return
+    vistos, uniq = set(), []
+    for p in pags:
+        k = (p["order_id"], p["payment_id"])
+        if k not in vistos:
+            vistos.add(k); uniq.append(p)
+    for i in range(0, len(uniq), 200):
+        try:
+            sb.table("ordem_pagamentos").upsert(
+                uniq[i:i + 200], on_conflict="order_id,payment_id").execute()
+        except Exception as e:
+            print("Aviso: falha ao gravar ordem_pagamentos:", str(e)[:120])
+
+
 def puxar_conta(access, seller_id):
     u = ml_get("/users/" + seller_id, access)
     sb.table("contas").upsert(
@@ -226,7 +257,7 @@ def puxar_conta(access, seller_id):
 
     desde = (datetime.now(timezone.utc) - timedelta(days=DIAS)) \
         .strftime("%Y-%m-%dT%H:%M:%S.000-03:00")
-    linhas, offset, total = [], 0, 1
+    linhas, pags, offset, total = [], [], 0, 1
     while offset < total and offset < 2000:
         path = ("/orders/search?seller=" + seller_id +
                 "&order.date_created.from=" + urllib.parse.quote(desde) +
@@ -235,6 +266,7 @@ def puxar_conta(access, seller_id):
         total = (data.get("paging") or {}).get("total", 0)
         for o in data.get("results", []):
             linhas.extend(linhas_do_pedido(o, seller_id))
+            pags.extend(pagamentos_do_pedido(o, seller_id))
         offset += 50
         time.sleep(0.3)
 
@@ -243,6 +275,7 @@ def puxar_conta(access, seller_id):
             linhas[i:i + 200],
             on_conflict="order_id,item_id,seller_id").execute()
 
+    gravar_pagamentos(pags)
     cadastrar_skus_novos(linhas)
     return len(linhas)
 
@@ -321,7 +354,7 @@ def _frete_de_envio_inner(ship_id, access, seller_id):
     return ok
 
 
-def enriquecer_frete(access, seller_id, limite=80):
+def enriquecer_frete(access, seller_id, limite=LIMITE_ENRICH):
     """Frete rateado por envio (paralelo). Só preenche o que está vazio."""
     pend = _select_all("vendas", "shipping_id",
                        {"seller_id": seller_id, "status": "paid"}, is_null="frete")
@@ -359,7 +392,7 @@ def _local_de_envio(ship_id, access, seller_id):
         return False
 
 
-def enriquecer_local(access, seller_id, limite=80):
+def enriquecer_local(access, seller_id, limite=LIMITE_ENRICH):
     """Preenche UF/estado/cidade do comprador (/shipments/{id}) — paralelo."""
     pend = _select_all("vendas", "shipping_id",
                        {"seller_id": seller_id, "status": "paid"}, is_null="uf")
@@ -411,7 +444,7 @@ def _repasse_de_pedido(oid, pid, access, seller_id):
     }
 
 
-def enriquecer_repasse(access, seller_id, limite=80):
+def enriquecer_repasse(access, seller_id, limite=LIMITE_ENRICH):
     """Repasse + rebate por pedido (paralelo). Grava em lote na tabela 'repasses'."""
     vds = _select_all("vendas", "order_id, payment_id",
                       {"seller_id": seller_id, "status": "paid"})
@@ -470,12 +503,13 @@ def processar_fila():
             {"seller_id": sid, "refresh_token": d.get("refresh_token", refresh)},
             on_conflict="seller_id").execute()
 
-        linhas = []
+        linhas, pags = [], []
         for oid in order_ids:
             try:
                 o = ml_get(f"/orders/{oid}", access)
                 if isinstance(o, dict) and o.get("id"):
                     linhas.extend(linhas_do_pedido(o, sid))
+                    pags.extend(pagamentos_do_pedido(o, sid))
             except Exception as e:
                 print(f"  erro ao puxar pedido {oid}: {str(e)[:80]}")
 
@@ -485,6 +519,7 @@ def processar_fila():
                     l, on_conflict="order_id,item_id,seller_id").execute())
             cadastrar_skus_novos(linhas)
             total += len(linhas)
+        gravar_pagamentos(pags)
 
         # enriquece (pega os pendentes, inclui os que acabaram de entrar)
         for fn, nome in ((enriquecer_frete, "frete"),
@@ -516,6 +551,8 @@ def main():
         raise SystemExit("Nenhum refresh_token. Configure o secret ML_REFRESH_TOKEN.")
 
     for seller_id, refresh in tokens:
+        if SO_SELLER and str(seller_id) != SO_SELLER:
+            continue                      # backfill de uma conta só: pula as outras (nem renova o token delas)
         d = renovar_token(refresh)
         access = d["access_token"]
         novo_refresh = d.get("refresh_token", refresh)
