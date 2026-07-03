@@ -167,6 +167,11 @@ def linhas_do_pedido(o, seller_id):
     linhas = []
     for it in o.get("order_items", []):
         item = it.get("item") or {}
+        # O ML manda a tarifa (sale_fee) POR UNIDADE. A comissão da linha é
+        # sale_fee × quantidade (igual o preço, que também é por unidade).
+        sale_fee = it.get("sale_fee")
+        qtd = it.get("quantity") or 1
+        comissao_linha = round((sale_fee or 0) * qtd, 2) if sale_fee is not None else None
         linhas.append({
             "seller_id": seller_id,
             "order_id": str(o.get("id")),
@@ -176,7 +181,9 @@ def linhas_do_pedido(o, seller_id):
             "forma_pagamento": pay.get("payment_method_id"),
             "tipo_pagamento": pay.get("payment_type"),
             "payment_id": str(pay.get("id")) if pay.get("id") else None,
-            "comissao": it.get("sale_fee"),
+            "comissao": comissao_linha,                 # já × quantidade
+            "comissao_original": sale_fee,              # tarifa por unidade (backup)
+            "comissao_corrigida": True,                 # trava: já entra certo
             "tipo_anuncio": tipo_anuncio(it.get("listing_type_id")),
             "shipping_id": str(ship) if ship else None,
             "item_id": item.get("id"),
