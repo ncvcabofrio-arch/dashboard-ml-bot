@@ -31,7 +31,13 @@ DIAS = int(os.environ.get("DIAS", "30"))                       # hold mínimo pr
 ORDERS_TESTE = [o.strip() for o in os.environ.get("ORDERS_TESTE", "").split(",") if o.strip()]
 
 API = "https://api.mercadolibre.com"
-sb = create_client(SUPABASE_URL, SUPABASE_KEY)
+# timeout do cliente do Supabase mais folgado (evita ReadTimeout em consulta pesada)
+try:
+    from supabase.lib.client_options import ClientOptions
+    sb = create_client(SUPABASE_URL, SUPABASE_KEY,
+                       options=ClientOptions(postgrest_client_timeout=120))
+except Exception:
+    sb = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 
 def renovar_token(refresh_token):
@@ -115,9 +121,17 @@ def obter_lista_pedidos():
         print(f"MODO TESTE — {len(ORDERS_TESTE)} pedido(s): {ORDERS_TESTE}")
         mapa = seller_dos_pedidos(ORDERS_TESTE)
         return [{"order_id": oid, "seller_id": mapa.get(oid, "")} for oid in ORDERS_TESTE]
-    res = sb.rpc("pedidos_sem_repasse", {"p_dias": DIAS}).execute()
-    lst = res.data or []
-    print(f"MODO CHEIO — pedidos sem repasse a re-checar: {len(lst)}")
+    # MODO CHEIO: lê a fila já pronta (tabela fila_sem_repasse, montada pelo SQL).
+    lst, desde, passo = [], 0, 1000
+    while True:
+        res = sb.table("fila_sem_repasse").select("order_id, seller_id") \
+                .range(desde, desde + passo - 1).execute()
+        d = res.data or []
+        lst.extend(d)
+        if len(d) < passo:
+            break
+        desde += passo
+    print(f"MODO CHEIO — pedidos na fila_sem_repasse: {len(lst)}")
     return lst
 
 
