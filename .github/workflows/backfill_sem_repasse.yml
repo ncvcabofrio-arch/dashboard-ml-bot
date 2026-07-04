@@ -1,0 +1,42 @@
+name: Backfill pedidos sem repasse (teste e cheio)
+
+# Busca no ML os pagamentos dos pedidos que nao casam com repasse e grava na
+# ordem_pagamentos. TESTE: preencha 'orders' com 1 ou mais order_ids (virgula).
+# CHEIO: deixe 'orders' vazio (usa a funcao pedidos_sem_repasse no banco).
+
+on:
+  workflow_dispatch:
+    inputs:
+      orders:
+        description: 'Order_ids p/ TESTE (separados por virgula). Vazio = roda em todos.'
+        required: false
+        default: ''
+      dias:
+        description: 'Hold minimo em dias (modo cheio)'
+        required: false
+        default: '30'
+
+concurrency:
+  group: ml-puxador
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Instalar dependencias
+        run: pip install requests supabase
+      - name: Rodar backfill sem repasse
+        env:
+          ML_CLIENT_ID:     ${{ secrets.ML_CLIENT_ID }}
+          ML_CLIENT_SECRET: ${{ secrets.ML_CLIENT_SECRET }}
+          ML_REFRESH_TOKEN: ${{ secrets.ML_REFRESH_TOKEN }}
+          SUPABASE_URL:     ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY:     ${{ secrets.SUPABASE_KEY }}
+          ORDERS_TESTE:     ${{ github.event.inputs.orders }}
+          DIAS:             ${{ github.event.inputs.dias || '30' }}
+        run: python -u backfill_sem_repasse.py
