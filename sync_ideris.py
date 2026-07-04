@@ -52,19 +52,72 @@ def extrair_nome(item):
     return None
 
 
+def _buscar(H, offset, limit):
+    """Uma chamada à busca de modelos. Devolve o objeto Response."""
+    return requests.get(
+        BASE + f"/listingModel/search?limit={limit}&offset={offset}",
+        headers=H, timeout=60)
+
+
+def _processar(batch, custos, nomes, modelos):
+    """Extrai custo/nome/modelo de cada item e guarda por sku."""
+    for item in batch:
+        sku = item.get("sku")
+        if not sku:
+            continue
+        if item.get("cost") is not None:
+            custos[sku] = item.get("cost")
+        nome = extrair_nome(item)
+        if nome:
+            nomes[sku] = nome
+        modelo = item.get("model")
+        if isinstance(modelo, str) and modelo.strip():
+            modelos[sku] = modelo.strip()
+        # guarda o último sku lido OK, pra servir de "vizinho" quando algo falhar
+        _processar.ultimo_sku_ok = sku
+
+
+_processar.ultimo_sku_ok = None
+
+
 def coletar(token):
-    """Retorna dicts: custos, nomes e modelos (todos {sku: valor})."""
+    """Retorna dicts: custos, nomes e modelos (todos {sku: valor}).
+
+    Se uma página der erro (algum registro do Ideris com valor inválido, ex.: '300O'),
+    NÃO aborta tudo: varre aquele trecho de 1 em 1 e pula só o registro ruim,
+    coletando todo o resto.
+    """
     H = {"Authorization": "Bearer " + token}
     custos, nomes, modelos = {}, {}, {}
     offset, total, limit = 0, None, 100
     mostrou_campos = False
+    puladas = []                      # info dos registros que o Ideris não consegue devolver
     while total is None or offset < total:
-        resp = requests.get(
-            BASE + f"/listingModel/search?limit={limit}&offset={offset}",
-            headers=H, timeout=60)
+        resp = _buscar(H, offset, limit)
+
         if resp.status_code != 200:
-            print("Aviso: busca falhou:", resp.status_code, resp.text[:200])
-            break
+            # a página inteira falhou por causa de UM registro quebrado.
+            # varre o trecho de 1 em 1 pra pular só o ruim e salvar o resto.
+            print(f"Aviso: pagina falhou em offset={offset} (status {resp.status_code}). "
+                  f"Varrendo 1 a 1 pra pular so o registro ruim...")
+            fim = (offset + limit) if total is None else min(offset + limit, total)
+            for off1 in range(offset, fim):
+                sku_antes = _processar.ultimo_sku_ok
+                r1 = _buscar(H, off1, 1)
+                time.sleep(1.3)
+                if r1.status_code != 200:
+                    detalhe = r1.text[:200]
+                    puladas.append({"offset": off1, "sku_anterior": sku_antes, "detalhe": detalhe})
+                    print(f"  ⚠️ registro invalido no Ideris (offset {off1}, "
+                          f"logo depois do sku '{sku_antes}'): {detalhe}")
+                    continue
+                d1 = r1.json()
+                if total is None:
+                    total = d1.get("total", 0)
+                _processar(d1.get("obj", []) or [], custos, nomes, modelos)
+            offset = fim
+            continue
+
         data = resp.json()
         total = data.get("total", 0)
         batch = data.get("obj", []) or []
@@ -74,20 +127,14 @@ def coletar(token):
             # debug (1x): mostra os campos disponíveis para confirmarmos o nome
             print("Campos do modelo Ideris:", sorted(batch[0].keys()))
             mostrou_campos = True
-        for item in batch:
-            sku = item.get("sku")
-            if not sku:
-                continue
-            if item.get("cost") is not None:
-                custos[sku] = item.get("cost")
-            nome = extrair_nome(item)
-            if nome:
-                nomes[sku] = nome
-            modelo = item.get("model")
-            if isinstance(modelo, str) and modelo.strip():
-                modelos[sku] = modelo.strip()
+        _processar(batch, custos, nomes, modelos)
         offset += len(batch)
         time.sleep(1.3)               # respeita o limite (50 chamadas/min)
+
+    if puladas:
+        print(f"⚠️ {len(puladas)} registro(s) pulado(s) por erro no Ideris — CORRIJA no Ideris:")
+        for p in puladas:
+            print(f"   - offset {p['offset']}, logo depois do sku '{p['sku_anterior']}' | {p['detalhe']}")
     print(f"Coletado: {len(custos)} custos, "
           f"{len(nomes)} nomes e {len(modelos)} modelos (de {total} modelos)")
     return custos, nomes, modelos
