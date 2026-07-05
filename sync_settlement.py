@@ -41,11 +41,13 @@ SEED_REFRESH  = os.environ.get("ML_REFRESH_TOKEN", "")
 SUPABASE_URL  = os.environ["SUPABASE_URL"]
 SUPABASE_KEY  = os.environ["SUPABASE_KEY"]
 
-MODO        = os.environ.get("MODO", "sonda").strip().lower()
-DIAS        = int(os.environ.get("DIAS", "45"))
-BEGIN_FIX   = os.environ.get("BEGIN", "").strip()
-END_FIX     = os.environ.get("END", "").strip()
-ONLY_SELLER = os.environ.get("ONLY_SELLER", "").strip()
+MODO          = os.environ.get("MODO", "sonda").strip().lower()
+DIAS          = int(os.environ.get("DIAS", "45"))
+BEGIN_FIX     = os.environ.get("BEGIN", "").strip()
+END_FIX       = os.environ.get("END", "").strip()
+ONLY_SELLER   = os.environ.get("ONLY_SELLER", "").strip()
+BLOCO         = int(os.environ.get("BLOCO", "90"))          # tamanho do bloco (dias) no backfill
+DIAS_BACKFILL = int(os.environ.get("DIAS_BACKFILL", "365")) # quanto puxar pra trás no backfill
 
 ML     = "https://api.mercadolibre.com"
 MP     = "https://api.mercadopago.com"
@@ -320,6 +322,55 @@ def modo_baixar(access, seller_id, gravar_db=True):
         print(f"  gravadas/atualizadas: {n} linhas em settlement_mp.")
 
 
+def _blocos(begin_d, end_d, tam):
+    """Fatia [begin_d, end_d] em blocos de 'tam' dias (datas YYYY-MM-DD)."""
+    b = datetime.strptime(begin_d, "%Y-%m-%d")
+    e = datetime.strptime(end_d, "%Y-%m-%d")
+    out = []
+    while b < e:
+        f = min(b + timedelta(days=tam), e)
+        out.append((b.strftime("%Y-%m-%d"), f.strftime("%Y-%m-%d")))
+        b = f
+    return out
+
+
+def processar_janela(sess, ini_s, fim_s):
+    """Gera p/ todas as contas, espera ~30 min, baixa e grava. (mesmo molde do robô de repasses)"""
+    for sid, apelido, access in sess:
+        print(f"[gerar] {apelido or sid}")
+        garantir_config(access, sid)
+        gerar(access, ini_s, fim_s)
+    ini_d, fim_d = ini_s[:10], fim_s[:10]
+    corte    = (datetime.strptime(fim_d, "%Y-%m-%d") - timedelta(days=2)).strftime("%Y-%m-%d")
+    alvo_ini = (datetime.strptime(ini_d, "%Y-%m-%d") + timedelta(days=3)).strftime("%Y-%m-%d")
+    prontos = {}
+    print(f"Aguardando os relatórios da faixa {ini_d}..{fim_d} (até ~30 min)...")
+    for volta in range(90):                            # 90 x 20s = ~30 min
+        se_faltam = [s for s in sess if s[0] not in prontos]
+        if not se_faltam:
+            break
+        time.sleep(20)
+        for sid, apelido, access in se_faltam:
+            rel = achar_pronto(access, corte, alvo_ini)
+            if rel:
+                prontos[sid] = rel
+                print(f"  pronto: {apelido or sid} -> {rel.get('file_name')}")
+    print("-" * 55)
+    for sid, apelido, access in sess:
+        print(f"CONTA {apelido or sid} ({sid})")
+        rel = prontos.get(sid)
+        if rel:
+            conteudo = baixar(access, rel["file_name"])
+            if conteudo:
+                regs = ler_registros(rel["file_name"], conteudo)
+                linhas = montar_linhas(regs, sid)
+                mostrar(regs, linhas)
+                n = gravar(linhas)
+                print(f"  gravadas/atualizadas: {n} linhas.")
+        else:
+            print("  relatório não ficou pronto a tempo (rode de novo mais tarde).")
+
+
 def main():
     contas = lista_contas()
     if not contas:
@@ -345,46 +396,29 @@ def main():
             pass
         sess.append((sid_real, apelido, access))
 
-    # MODO CHEIO = igual ao robô de repasses: gera TODAS, espera ~30 min, baixa e grava
+    # MODO CHEIO / BACKFILL usam a MESMA mecânica por janela
     if MODO == "cheio":
         ini_s, fim_s = janela()
-        for sid, apelido, access in sess:
-            print(f"\n[gerar] {apelido or sid}")
-            garantir_config(access, sid)
-            gerar(access, ini_s, fim_s)
-        # faixa alvo pra reconhecer o relatório certo
-        ini_d = ini_s[:10]
-        fim_d = fim_s[:10]
-        corte    = (datetime.strptime(fim_d, "%Y-%m-%d") - timedelta(days=2)).strftime("%Y-%m-%d")
-        alvo_ini = (datetime.strptime(ini_d, "%Y-%m-%d") + timedelta(days=3)).strftime("%Y-%m-%d")
-        prontos = {}
-        print(f"\nAguardando os relatórios da faixa {ini_d}..{fim_d} (até ~30 min)...")
-        for volta in range(90):                       # 90 x 20s = ~30 min
-            se_faltam = [s for s in sess if s[0] not in prontos]
-            if not se_faltam:
-                break
-            time.sleep(20)
-            for sid, apelido, access in se_faltam:
-                rel = achar_pronto(access, corte, alvo_ini)
-                if rel:
-                    prontos[sid] = (access, rel)
-                    print(f"  pronto: {apelido or sid} -> {rel.get('file_name')}")
-        print("=" * 55)
-        for sid, apelido, access in sess:
-            print(f"CONTA {apelido or sid} ({sid})")
-            if sid in prontos:
-                _, rel = prontos[sid]
-                conteudo = baixar(access, rel["file_name"])
-                if conteudo:
-                    regs = ler_registros(rel["file_name"], conteudo)
-                    linhas = montar_linhas(regs, sid)
-                    mostrar(regs, linhas)
-                    n = gravar(linhas)
-                    print(f"  gravadas/atualizadas: {n} linhas.")
-            else:
-                print("  relatório não ficou pronto a tempo (rode de novo mais tarde).")
-        print("=" * 55)
+        processar_janela(sess, ini_s, fim_s)
         print("✅ Fim. settlement_mp atualizada.")
+        return
+
+    if MODO == "backfill":
+        # 1 ano pra trás por padrão, em blocos de BLOCO dias (padrão 90).
+        if BEGIN_FIX and END_FIX:
+            b0, e0 = BEGIN_FIX, END_FIX
+        else:
+            hoje = datetime.now(timezone.utc).date()
+            e0 = hoje.strftime("%Y-%m-%d")
+            b0 = (hoje - timedelta(days=DIAS_BACKFILL)).strftime("%Y-%m-%d")
+        blocos = _blocos(b0, e0, BLOCO)
+        print(f"BACKFILL {b0}..{e0} em {len(blocos)} bloco(s) de {BLOCO} dias.")
+        for n, (bi, bf) in enumerate(blocos, 1):
+            print(f"\n########## BLOCO {n}/{len(blocos)}: {bi} .. {bf} ##########")
+            ini_s = bi + "T00:00:00Z"
+            fim_s = bf + "T23:59:59Z"
+            processar_janela(sess, ini_s, fim_s)
+        print("\n✅ Fim do backfill. settlement_mp atualizada.")
         return
 
     # modos por conta
