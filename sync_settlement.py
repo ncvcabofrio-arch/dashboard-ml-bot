@@ -1,33 +1,28 @@
 """
-Sincronizador do relatório "dinheiro em conta" (SETTLEMENT) do Mercado Pago
--> tabela settlement_mp no Supabase.
+Robô — baixa o relatório "dinheiro em conta" (SETTLEMENT) do Mercado Pago e
+guarda em 'settlement_mp'. É o relatório que TEM o EXTERNAL_REFERENCE (order_id
++ shipping_id), o elo que faltava pra casar o recebido com as vendas.
 
-IMPORTANTE — autenticação:
-  ML e MP compartilham o MESMO OAuth. O robô mint o access_token a partir do
-  refresh_token de CADA conta (tabela `contas`), igual aos outros robôs, e usa
-  esse MESMO token contra api.mercadopago.com. NÃO precisa de secret novo.
+Feito no MESMO molde do sync_repasses_mp.py (que já funciona):
+  1) renova o token do ML (que também acessa o Mercado Pago)
+  2) padroniza as colunas da conta (config) — inclui EXTERNAL_REFERENCE e o cupom
+  3) manda GERAR o relatório do período (POST) — assíncrono, entra "DELAYED"
+  4) espera ficar pronto (o relatório fica pronto quando o file_name aparece)
+  5) baixa o CSV e lê pelo CABEÇALHO (colunas por nome)
+  6) grava em 'settlement_mp' sem duplicar (hash + upsert)
 
-Fonte da API (família settlement_report):
-  POST /v1/account/settlement_report/config   -> escolhe as colunas
-  POST /v1/account/settlement_report          -> manda gerar (begin_date/end_date)
-  GET  /v1/account/settlement_report          -> lista os relatórios gerados
-  GET  /v1/account/settlement_report/{file}   -> baixa o CSV
+Família da API: /v1/account/settlement_report (diferente do release_report).
+Lista pelo /search (retorna {"results":[...]}).
 
 MODOS (env MODO):
-  sonda  (padrão) -> só TESTA: mint token de cada conta, chama a API do MP e
-                     imprime o status + a resposta crua. NÃO gera, NÃO grava.
-                     É o "testar antes" — confirma que o token abre a API do MP
-                     e nos mostra o formato real das respostas.
-  cheio           -> pipeline completo: garante config, gera a janela, baixa,
-                     e carrega na settlement_mp (apaga a janela e reinsere).
+  sonda  -> só diagnóstico (mostra config e /search). Não gera, não grava.
+  gerar  -> só dispara o pedido do relatório e sai (não espera).
+  baixar -> recolhe o relatório pronto mais recente, mostra amostra e GRAVA.
+  cheio  -> dispara todas as contas, espera até ~30 min, baixa e GRAVA. (produção/backfill)
 
-Env:
-  ML_CLIENT_ID, ML_CLIENT_SECRET  (mesmos secrets dos outros robôs)
-  SUPABASE_URL, SUPABASE_KEY
-  MODO         = sonda | cheio         (padrão: sonda)
-  DIAS         = janela p/ trás em dias (padrão: 45)
-  BEGIN, END   = datas ISO fixas (opcional; sobrepõem DIAS) ex.: 2026-05-01
-  ONLY_SELLER  = roda só uma conta (seller_id) — bom pro 1º teste
+Env: ML_CLIENT_ID, ML_CLIENT_SECRET, SUPABASE_URL, SUPABASE_KEY
+     MODO (padrão sonda) | DIAS (padrão 45) | BEGIN/END (ISO fixo, p/ backfill)
+     ONLY_SELLER (roda só 1 conta)
 """
 
 import os
@@ -35,12 +30,14 @@ import io
 import csv
 import json
 import time
+import hashlib
 import requests
 from datetime import datetime, timedelta, timezone
 from supabase import create_client
 
 CLIENT_ID     = os.environ["ML_CLIENT_ID"]
 CLIENT_SECRET = os.environ["ML_CLIENT_SECRET"]
+SEED_REFRESH  = os.environ.get("ML_REFRESH_TOKEN", "")
 SUPABASE_URL  = os.environ["SUPABASE_URL"]
 SUPABASE_KEY  = os.environ["SUPABASE_KEY"]
 
@@ -50,113 +47,66 @@ BEGIN_FIX   = os.environ.get("BEGIN", "").strip()
 END_FIX     = os.environ.get("END", "").strip()
 ONLY_SELLER = os.environ.get("ONLY_SELLER", "").strip()
 
-OAUTH = "https://api.mercadolibre.com/oauth/token"   # servidor de OAuth (ML=MP)
-MP    = "https://api.mercadopago.com"                 # onde estão os relatórios
+ML     = "https://api.mercadolibre.com"
+MP     = "https://api.mercadopago.com"
 REPORT = "/v1/account/settlement_report"
 
-# colunas EXATAMENTE como no arquivo da CF que validamos (o cupom vem em OPERATION_TAGS).
-# O robô POSTa essa mesma config nas 3 contas, pra todas saírem iguais — a CABOFRIO
-# hoje está sem EXTERNAL_REFERENCE e a MG está sem config nenhuma.
+# colunas EXATAMENTE como no arquivo da CF que validamos (cupom vem em OPERATION_TAGS).
 COLUNAS = ["EXTERNAL_REFERENCE", "SOURCE_ID", "TRANSACTION_AMOUNT", "TRANSACTION_DATE",
            "FEE_AMOUNT", "SETTLEMENT_NET_AMOUNT", "SETTLEMENT_DATE",
            "TAXES_AMOUNT", "TAX_DETAIL", "TAXES_DISAGGREGATED", "DESCRIPTION",
            "OPERATION_TAGS", "SUB_UNIT", "PRODUCT_SKU", "SALE_DETAIL"]
 
-# como os cabeçalhos do CSV mapeiam pras colunas da tabela
+# cabeçalho do CSV -> coluna da tabela
 MAPA = {
-    "EXTERNAL_REFERENCE":   "external_reference",
-    "SOURCE_ID":            "source_id",
-    "TRANSACTION_AMOUNT":   "transaction_amount",
-    "TRANSACTION_DATE":     "transaction_date",
-    "FEE_AMOUNT":           "fee_amount",
-    "SETTLEMENT_NET_AMOUNT":"net_amount",
-    "SETTLEMENT_DATE":      "settlement_date",
-    "PRODUCT_SKU":          "sku",
-    "SALE_DETAIL":          "sale_detail",
-    "OPERATION_TAGS":       "operation_tags",
+    "EXTERNAL_REFERENCE":    "external_reference",
+    "SOURCE_ID":             "source_id",
+    "TRANSACTION_AMOUNT":    "transaction_amount",
+    "TRANSACTION_DATE":      "transaction_date",
+    "FEE_AMOUNT":            "fee_amount",
+    "SETTLEMENT_NET_AMOUNT": "net_amount",
+    "SETTLEMENT_DATE":       "settlement_date",
+    "PRODUCT_SKU":           "sku",
+    "SALE_DETAIL":           "sale_detail",
+    "OPERATION_TAGS":        "operation_tags",
 }
 NUMERICAS = {"transaction_amount", "fee_amount", "net_amount"}
 DATAS     = {"transaction_date", "settlement_date"}
 
-try:
-    from supabase.lib.client_options import ClientOptions
-    sb = create_client(SUPABASE_URL, SUPABASE_KEY,
-                       options=ClientOptions(postgrest_client_timeout=120))
-except Exception:
-    sb = create_client(SUPABASE_URL, SUPABASE_KEY)
+sb = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 
-def renovar_token(refresh_token):
-    r = requests.post(OAUTH, data={
-        "grant_type": "refresh_token",
-        "client_id": CLIENT_ID,
-        "client_secret": CLIENT_SECRET,
-        "refresh_token": refresh_token,
-    }, timeout=30)
+def renovar_token(refresh):
+    r = requests.post(ML + "/oauth/token", data={
+        "grant_type": "refresh_token", "client_id": CLIENT_ID,
+        "client_secret": CLIENT_SECRET, "refresh_token": refresh}, timeout=30)
     d = r.json()
     if "access_token" not in d:
         raise RuntimeError("Falha ao renovar token: " + str(d)[:200])
     return d
 
 
-def contas():
-    res = sb.table("contas").select("seller_id, refresh_token").execute()
-    out = {str(c["seller_id"]): c["refresh_token"]
-           for c in (res.data or []) if c.get("refresh_token")}
+def lista_contas():
+    res = sb.table("contas").select("seller_id, apelido, refresh_token").execute()
+    tk = [(str(c["seller_id"]), c.get("apelido"), c["refresh_token"])
+          for c in (res.data or []) if c.get("refresh_token")]
+    if not tk and SEED_REFRESH:
+        tk = [(None, "(seed)", SEED_REFRESH)]
     if ONLY_SELLER:
-        out = {k: v for k, v in out.items() if k == ONLY_SELLER}
-    return out
+        tk = [t for t in tk if t[0] == ONLY_SELLER]
+    return tk
 
 
-def mp_headers(access):
+def H(access):
+    return {"Authorization": "Bearer " + access}
+
+
+def Hj(access):
     return {"Authorization": "Bearer " + access, "Content-Type": "application/json"}
 
 
-# ----------------------------------------------------------------------
-#  MODO SONDA — só testa e mostra o formato real (não altera nada)
-# ----------------------------------------------------------------------
-def sonda(seller_id, access):
-    print(f"\n=== [{seller_id}] SONDA ===")
-    # 1) o token abre a API do MP? (quem sou eu)
-    r = requests.get(MP + "/users/me", headers=mp_headers(access), timeout=20)
-    print(f"  GET /users/me -> {r.status_code}")
-    if r.status_code == 200:
-        me = r.json()
-        print(f"    id={me.get('id')} nickname={me.get('nickname')} site={me.get('site_id')}")
-    else:
-        print("    corpo:", r.text[:300])
-
-    # 2) consigo listar relatórios de settlement? (endpoint /search)
-    r = requests.get(MP + REPORT + "/search", headers=mp_headers(access), timeout=30)
-    print(f"  GET {REPORT}/search (lista) -> {r.status_code}")
-    print("    corpo (cru, 800 chars):", r.text[:800])
-
-    # 3) config atual das colunas (completa)
-    r = requests.get(MP + REPORT + "/config", headers=mp_headers(access), timeout=30)
-    print(f"  GET {REPORT}/config -> {r.status_code}")
-    print("    corpo COMPLETO:", r.text)
-
-
-# ----------------------------------------------------------------------
-#  MODO CHEIO — gera, baixa e carrega
-# ----------------------------------------------------------------------
-def janela():
-    if BEGIN_FIX and END_FIX:
-        b = BEGIN_FIX + "T00:00:00Z"
-        e = END_FIX + "T00:00:00Z"
-        b_date = BEGIN_FIX
-    else:
-        hoje = datetime.now(timezone.utc)
-        ini  = hoje - timedelta(days=DIAS)
-        b = ini.strftime("%Y-%m-%dT00:00:00Z")
-        e = (hoje + timedelta(days=1)).strftime("%Y-%m-%dT00:00:00Z")
-        b_date = ini.strftime("%Y-%m-%d")
-    return b, e, b_date
-
-
+# ---------- config das colunas ----------
 def garantir_config(access, seller_id):
-    """Padroniza as colunas da conta pelas que validamos (idempotente).
-    O MP exige o corpo completo (file_name_prefix, frequency, etc.)."""
     body = {
         "file_name_prefix": f"settlement-report-{seller_id}",
         "include_withdraw": False,
@@ -166,62 +116,60 @@ def garantir_config(access, seller_id):
         "separator": ",",
         "columns": [{"key": k} for k in COLUNAS],
     }
-    r = requests.post(MP + REPORT + "/config", headers=mp_headers(access),
+    r = requests.post(MP + REPORT + "/config", headers=Hj(access),
                       data=json.dumps(body), timeout=30)
     if r.status_code not in (200, 201):
-        # se POST não criar, tenta PUT (algumas contas já têm config e só atualizam)
-        r = requests.put(MP + REPORT + "/config", headers=mp_headers(access),
+        r = requests.put(MP + REPORT + "/config", headers=Hj(access),
                          data=json.dumps(body), timeout=30)
-    print(f"  config colunas -> {r.status_code} {r.text[:400]}")
+    print(f"  config -> {r.status_code}")
     return r.status_code in (200, 201)
 
 
-PRONTO = ("processed", "ready", "finished", "completed")
+# ---------- gerar / listar / achar ----------
+def gerar(access, ini_s, fim_s):
+    corpo = json.dumps({"begin_date": ini_s, "end_date": fim_s})
+    g = requests.post(MP + REPORT, headers=Hj(access), data=corpo, timeout=30)
+    ok = g.status_code in (200, 202)
+    print(f"  gerar {ini_s[:10]}..{fim_s[:10]} -> {g.status_code} {g.text[:120]}")
+    return ok
 
 
-def gerar(access, begin, end):
-    body = {"begin_date": begin, "end_date": end}
-    r = requests.post(MP + REPORT, headers=mp_headers(access),
-                      data=json.dumps(body), timeout=60)
-    print(f"  gerar {begin}..{end} -> {r.status_code} {r.text[:250]}")
+def lista_relatorios(access):
+    r = requests.get(MP + REPORT + "/search?limit=100", headers=H(access), timeout=30)
+    if r.status_code != 200:
+        return []
     try:
-        d = r.json()
+        return (r.json() or {}).get("results") or []
     except Exception:
-        d = {}
-    return d.get("id")                                 # id da tarefa do relatório
+        return []
 
 
-def achar_arquivo(access, report_id):
-    """Acompanha via /search até o nosso relatório virar 'processed'; devolve file_name."""
-    ultimo = ""
-    for tentativa in range(45):                        # ~6 min
-        r = requests.get(MP + REPORT + "/search", headers=mp_headers(access), timeout=30)
-        if tentativa == 0:
-            print(f"    /search -> {r.status_code} corpo: {r.text[:500]}")
-        if r.status_code == 200:
-            try:
-                res = (r.json() or {}).get("results") or []
-            except Exception:
-                res = []
-            # acha o NOSSO relatório pelo id; se não achar, usa o mais recente
-            it = next((x for x in res if str(x.get("id")) == str(report_id)), None)
-            if it is None and res:
-                it = res[0]
-            if it:
-                st = str(it.get("status", "")).lower()
-                fn = it.get("file_name") or it.get("filename")
-                if st != ultimo:
-                    print(f"    status: {st or '(vazio)'}  file: {fn or '-'}")
-                    ultimo = st
-                if st in PRONTO and fn:
-                    return fn
-        time.sleep(8)
-    print(f"    (relatório {report_id} não ficou pronto a tempo; último status: {ultimo or '?'})")
-    return None
+def achar_pronto(access, corte, alvo_ini):
+    """Pronto = file_name preenchido. Escolhe o que COBRE a faixa pedida:
+       termina recente (end_date >= corte) e começa lá atrás (begin_date <= alvo_ini)."""
+    cand = [x for x in lista_relatorios(access)
+            if x.get("file_name")
+            and (str(x.get("end_date", ""))[:10]  >= corte)
+            and (str(x.get("begin_date", ""))[:10] <= alvo_ini)]
+    if not cand:
+        return None
+    cand.sort(key=lambda x: x.get("date_created", ""), reverse=True)
+    cand.sort(key=lambda x: x.get("begin_date", ""))
+    return cand[0]
 
 
+def achar_mais_recente(access):
+    """Pra modo 'baixar': o relatório pronto mais novo, sem exigir faixa."""
+    cand = [x for x in lista_relatorios(access) if x.get("file_name")]
+    if not cand:
+        return None
+    cand.sort(key=lambda x: x.get("date_created", ""), reverse=True)
+    return cand[0]
+
+
+# ---------- baixar / parsear / gravar ----------
 def baixar(access, file_name):
-    r = requests.get(MP + REPORT + "/" + file_name, headers=mp_headers(access), timeout=120)
+    r = requests.get(MP + REPORT + "/" + file_name, headers=H(access), timeout=120)
     if r.status_code != 200:
         print(f"  download {file_name} -> {r.status_code} {r.text[:150]}")
         return None
@@ -234,7 +182,6 @@ def num(v):
     s = str(v).strip().replace("R$", "").replace(" ", "")
     if s == "":
         return None
-    # trata "1.234,56" (pt) e "1234.56" (en)
     if "," in s and "." in s:
         s = s.replace(".", "").replace(",", ".")
     elif "," in s:
@@ -253,17 +200,14 @@ def data(v):
 
 
 def parse_csv(texto, seller_id):
-    # detecta o separador (MP costuma usar ; ou ,)
     amostra = texto[:2000]
     try:
-        dialect = csv.Sniffer().sniff(amostra, delimiters=";,")
-        sep = dialect.delimiter
+        sep = csv.Sniffer().sniff(amostra, delimiters=";,").delimiter
     except Exception:
         sep = ";" if amostra.count(";") >= amostra.count(",") else ","
     rd = csv.DictReader(io.StringIO(texto), delimiter=sep)
     linhas = []
     for row in rd:
-        # normaliza cabeçalho (maiúsculo, sem espaços)
         rr = {(k or "").strip().upper(): v for k, v in row.items()}
         out = {"seller_id": seller_id}
         for col_csv, col_tab in MAPA.items():
@@ -274,94 +218,164 @@ def parse_csv(texto, seller_id):
                 out[col_tab] = data(val)
             else:
                 out[col_tab] = (val or None)
-        # só guarda o que assentou de fato (tem data de liberação e valor líquido)
-        if out.get("settlement_date") and out.get("net_amount") is not None:
-            linhas.append(out)
+        # só o que assentou de fato (tem data de liberação e valor líquido)
+        if not (out.get("settlement_date") and out.get("net_amount") is not None):
+            continue
+        base = "|".join(str(out.get(c) or "") for c in
+                        ("seller_id", "source_id", "external_reference",
+                         "settlement_date", "net_amount", "transaction_amount", "fee_amount"))
+        out["hash"] = hashlib.md5(base.encode()).hexdigest()
+        linhas.append(out)
     return linhas
 
 
-def carregar(seller_id, linhas, begin_date):
-    if not linhas:
-        print(f"  [{seller_id}] nada a carregar.")
-        return
-    # apaga a janela (settlement_date >= inicio) só dessa conta e reinsere
-    sb.table("settlement_mp").delete() \
-        .eq("seller_id", seller_id).gte("settlement_date", begin_date).execute()
-    for i in range(0, len(linhas), 500):
-        sb.table("settlement_mp").insert(linhas[i:i + 500]).execute()
-    print(f"  [{seller_id}] carregado: {len(linhas)} linhas (janela desde {begin_date}).")
+def gravar(linhas):
+    n = 0
+    for i in range(0, len(linhas), 200):
+        lote = linhas[i:i + 200]
+        try:
+            sb.table("settlement_mp").upsert(lote, on_conflict="hash").execute()
+            n += len(lote)
+        except Exception as e:
+            print("  erro ao gravar lote:", str(e)[:120])
+    return n
 
 
-def _gerar_baixar(seller_id, access):
-    """Config + gerar + achar + baixar. Devolve (texto_csv, begin_date) ou (None,None)."""
-    begin, end, begin_date = janela()
-    print(f"  janela: {begin} .. {end}")
-    garantir_config(access, seller_id)
-    report_id = gerar(access, begin, end)
-    file_name = achar_arquivo(access, report_id)
-    if not file_name:
-        print(f"  [{seller_id}] relatório não ficou pronto a tempo. Tente de novo mais tarde.")
-        return None, None
-    print(f"  arquivo: {file_name}")
-    texto = baixar(access, file_name)
-    return texto, begin_date
-
-
-def cheio(seller_id, access):
-    print(f"\n=== [{seller_id}] CHEIO ===")
-    texto, begin_date = _gerar_baixar(seller_id, access)
-    if not texto:
-        return
-    linhas = parse_csv(texto, seller_id)
-    carregar(seller_id, linhas, begin_date)
-
-
-def ensaio(seller_id, access):
-    """Fluxo COMPLETO da API, mas SEM gravar no banco. Mostra o CSV real."""
-    print(f"\n=== [{seller_id}] ENSAIO (não grava no banco) ===")
-    texto, _ = _gerar_baixar(seller_id, access)
-    if not texto:
-        return
+def mostrar(texto, linhas):
     linhas_csv = texto.splitlines()
-    print(f"  CSV: {len(linhas_csv)} linhas (com cabeçalho).")
-    print("  CABEÇALHO:", linhas_csv[0][:400] if linhas_csv else "(vazio)")
+    print(f"  CSV: {len(linhas_csv)} linhas (c/ cabeçalho).")
+    if linhas_csv:
+        print("  CABEÇALHO:", linhas_csv[0][:400])
     for i in range(1, min(4, len(linhas_csv))):
-        print(f"  amostra {i}:", linhas_csv[i][:400])
-    linhas = parse_csv(texto, seller_id)
-    print(f"  PARSEADAS (settled): {len(linhas)} linhas prontas pra tabela.")
+        print(f"  amostra {i}:", linhas_csv[i][:300])
+    print(f"  PARSEADAS (settled): {len(linhas)}")
     for r in linhas[:3]:
         print("    ->", {k: r.get(k) for k in
               ("external_reference", "source_id", "transaction_amount",
                "fee_amount", "net_amount", "settlement_date", "operation_tags")})
 
 
+# ---------- janela ----------
+def janela():
+    if BEGIN_FIX and END_FIX:
+        return BEGIN_FIX + "T00:00:00Z", END_FIX + "T23:59:59Z"
+    fim = datetime.now(timezone.utc)
+    ini = fim - timedelta(days=DIAS)
+    return ini.strftime("%Y-%m-%dT%H:%M:%SZ"), fim.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# ---------- modos ----------
+def sonda(access, seller_id):
+    print(f"\n=== [{seller_id}] SONDA ===")
+    r = requests.get(MP + "/users/me", headers=H(access), timeout=20)
+    print(f"  /users/me -> {r.status_code} {r.json().get('nickname') if r.status_code==200 else r.text[:120]}")
+    rels = lista_relatorios(access)
+    print(f"  /search -> {len(rels)} relatório(s). Últimos:")
+    for x in rels[:5]:
+        print(f"    id={x.get('id')} status={x.get('status')} file={x.get('file_name') or '-'} "
+              f"faixa={str(x.get('begin_date',''))[:10]}..{str(x.get('end_date',''))[:10]}")
+
+
+def modo_gerar(access, seller_id):
+    print(f"\n=== [{seller_id}] GERAR ===")
+    garantir_config(access, seller_id)
+    ini_s, fim_s = janela()
+    gerar(access, ini_s, fim_s)
+    print("  pedido enviado. Recolha depois com MODO=baixar (ou cheio).")
+
+
+def modo_baixar(access, seller_id, gravar_db=True):
+    print(f"\n=== [{seller_id}] BAIXAR ===")
+    rel = achar_mais_recente(access)
+    if not rel:
+        print("  nenhum relatório pronto ainda (file_name vazio). Rode MODO=gerar e espere uns minutos.")
+        return
+    print(f"  pronto: id={rel.get('id')} file={rel.get('file_name')} "
+          f"faixa={str(rel.get('begin_date',''))[:10]}..{str(rel.get('end_date',''))[:10]}")
+    texto = baixar(access, rel["file_name"])
+    if not texto:
+        return
+    linhas = parse_csv(texto, seller_id)
+    mostrar(texto, linhas)
+    if gravar_db:
+        n = gravar(linhas)
+        print(f"  gravadas/atualizadas: {n} linhas em settlement_mp.")
+
+
 def main():
-    cs = contas()
-    if not cs:
+    contas = lista_contas()
+    if not contas:
         print("Nenhuma conta com refresh_token em `contas`.")
         return
-    print(f"MODO={MODO} | contas={list(cs.keys())} | DIAS={DIAS}")
-    for seller_id, refresh in cs.items():
+    print(f"MODO={MODO} | contas={[c[0] for c in contas]} | DIAS={DIAS}")
+
+    # autentica todas as contas
+    sess = []
+    for sid, apelido, refresh in contas:
         try:
             d = renovar_token(refresh)
         except Exception as e:
-            print(f"[{seller_id}] falha ao renovar token: {e}")
+            print(f"[{sid}] falha ao renovar token: {e}")
             continue
         access = d["access_token"]
-        # salva o refresh rotacionado (bom hábito, igual aos outros robôs)
+        sid_real = str(d.get("user_id") or sid or "")
         try:
-            sb.table("contas").update({"refresh_token": d.get("refresh_token", refresh)}) \
-              .eq("seller_id", int(seller_id)).execute()
+            sb.table("contas").upsert(
+                {"seller_id": sid_real, "refresh_token": d.get("refresh_token", refresh)},
+                on_conflict="seller_id").execute()
         except Exception:
             pass
+        sess.append((sid_real, apelido, access))
 
-        if MODO == "cheio":
-            cheio(seller_id, access)
-        elif MODO == "ensaio":
-            ensaio(seller_id, access)
+    # MODO CHEIO = igual ao robô de repasses: gera TODAS, espera ~30 min, baixa e grava
+    if MODO == "cheio":
+        ini_s, fim_s = janela()
+        for sid, apelido, access in sess:
+            print(f"\n[gerar] {apelido or sid}")
+            garantir_config(access, sid)
+            gerar(access, ini_s, fim_s)
+        # faixa alvo pra reconhecer o relatório certo
+        ini_d = ini_s[:10]
+        fim_d = fim_s[:10]
+        corte    = (datetime.strptime(fim_d, "%Y-%m-%d") - timedelta(days=2)).strftime("%Y-%m-%d")
+        alvo_ini = (datetime.strptime(ini_d, "%Y-%m-%d") + timedelta(days=3)).strftime("%Y-%m-%d")
+        prontos = {}
+        print(f"\nAguardando os relatórios da faixa {ini_d}..{fim_d} (até ~30 min)...")
+        for volta in range(90):                       # 90 x 20s = ~30 min
+            se_faltam = [s for s in sess if s[0] not in prontos]
+            if not se_faltam:
+                break
+            time.sleep(20)
+            for sid, apelido, access in se_faltam:
+                rel = achar_pronto(access, corte, alvo_ini)
+                if rel:
+                    prontos[sid] = (access, rel)
+                    print(f"  pronto: {apelido or sid} -> {rel.get('file_name')}")
+        print("=" * 55)
+        for sid, apelido, access in sess:
+            print(f"CONTA {apelido or sid} ({sid})")
+            if sid in prontos:
+                _, rel = prontos[sid]
+                texto = baixar(access, rel["file_name"])
+                if texto:
+                    linhas = parse_csv(texto, sid)
+                    mostrar(texto, linhas)
+                    n = gravar(linhas)
+                    print(f"  gravadas/atualizadas: {n} linhas.")
+            else:
+                print("  relatório não ficou pronto a tempo (rode de novo mais tarde).")
+        print("=" * 55)
+        print("✅ Fim. settlement_mp atualizada.")
+        return
+
+    # modos por conta
+    for sid, apelido, access in sess:
+        if MODO == "gerar":
+            modo_gerar(access, sid)
+        elif MODO == "baixar":
+            modo_baixar(access, sid, gravar_db=True)
         else:
-            sonda(seller_id, access)
-
+            sonda(access, sid)
     print("\n✅ Concluído.")
 
 
