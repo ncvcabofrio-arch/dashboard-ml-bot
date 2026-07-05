@@ -192,25 +192,31 @@ def gerar(access, begin, end):
 
 
 def achar_arquivo(access, report_id):
-    """Acompanha o relatório pelo id até virar 'processed', e devolve o file_name."""
-    if not report_id:
-        return None
+    """Acompanha via /search até o nosso relatório virar 'processed'; devolve file_name."""
+    ultimo = ""
     for tentativa in range(45):                        # ~6 min
-        r = requests.get(MP + REPORT + "/" + str(report_id),
-                         headers=mp_headers(access), timeout=30)
+        r = requests.get(MP + REPORT + "/search", headers=mp_headers(access), timeout=30)
+        if tentativa == 0:
+            print(f"    /search -> {r.status_code} corpo: {r.text[:500]}")
         if r.status_code == 200:
             try:
-                it = r.json() or {}
+                res = (r.json() or {}).get("results") or []
             except Exception:
-                it = {}
-            st = str(it.get("status", "")).lower()
-            fn = it.get("file_name") or it.get("filename")
-            if tentativa == 0:
-                print(f"    status inicial: {st or '(vazio)'}")
-            if st in PRONTO and fn:
-                return fn
+                res = []
+            # acha o NOSSO relatório pelo id; se não achar, usa o mais recente
+            it = next((x for x in res if str(x.get("id")) == str(report_id)), None)
+            if it is None and res:
+                it = res[0]
+            if it:
+                st = str(it.get("status", "")).lower()
+                fn = it.get("file_name") or it.get("filename")
+                if st != ultimo:
+                    print(f"    status: {st or '(vazio)'}  file: {fn or '-'}")
+                    ultimo = st
+                if st in PRONTO and fn:
+                    return fn
         time.sleep(8)
-    print(f"    (id {report_id} não ficou 'processed' a tempo)")
+    print(f"    (relatório {report_id} não ficou pronto a tempo; último status: {ultimo or '?'})")
     return None
 
 
