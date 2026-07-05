@@ -241,18 +241,23 @@ def montar_linhas(regs, seller_id):
         # só o que assentou de fato (tem data de liberação e valor líquido)
         if not (out.get("settlement_date") and out.get("net_amount") is not None):
             continue
-        base = "|".join(str(out.get(c) or "") for c in
-                        ("seller_id", "source_id", "external_reference",
-                         "settlement_date", "net_amount", "transaction_amount", "fee_amount"))
+        # hash a partir de TODAS as colunas cruas (+ seller) — linhas distintas ficam
+        # distintas (inclui horário exato, sub_unit, taxes, etc.); linhas idênticas colapsam.
+        base = seller_id + "||" + "|".join(f"{k}={rr.get(k)}" for k in sorted(rr.keys()))
         out["hash"] = hashlib.md5(base.encode()).hexdigest()
         linhas.append(out)
     return linhas
 
 
 def gravar(linhas):
+    # de-duplica por hash ANTES de gravar (evita "ON CONFLICT ... affect row a second time")
+    uniq = {}
+    for r in linhas:
+        uniq[r["hash"]] = r
+    lst = list(uniq.values())
     n = 0
-    for i in range(0, len(linhas), 200):
-        lote = linhas[i:i + 200]
+    for i in range(0, len(lst), 200):
+        lote = lst[i:i + 200]
         try:
             sb.table("settlement_mp").upsert(lote, on_conflict="hash").execute()
             n += len(lote)
