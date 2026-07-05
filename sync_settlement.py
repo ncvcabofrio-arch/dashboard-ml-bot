@@ -173,7 +173,7 @@ def baixar(access, file_name):
     if r.status_code != 200:
         print(f"  download {file_name} -> {r.status_code} {r.text[:150]}")
         return None
-    return r.content.decode("utf-8", errors="replace")
+    return r.content                                   # bytes (pode ser CSV ou XLSX)
 
 
 def num(v):
@@ -199,16 +199,34 @@ def data(v):
     return s[:10] if len(s) >= 10 else None
 
 
-def parse_csv(texto, seller_id):
+def ler_registros(file_name, conteudo):
+    """Lê o arquivo (CSV OU XLSX) e devolve dicts com cabeçalho em MAIÚSCULO."""
+    if (file_name or "").lower().endswith(".xlsx"):
+        from openpyxl import load_workbook
+        wb = load_workbook(io.BytesIO(conteudo), read_only=True, data_only=True)
+        ws = wb.active
+        rows = list(ws.iter_rows(values_only=True))
+        if not rows:
+            return []
+        header = [str(h or "").strip().upper() for h in rows[0]]
+        regs = []
+        for r in rows[1:]:
+            regs.append({header[i]: (r[i] if i < len(r) else None) for i in range(len(header))})
+        return regs
+    # CSV
+    texto = conteudo.decode("utf-8", errors="replace")
     amostra = texto[:2000]
     try:
         sep = csv.Sniffer().sniff(amostra, delimiters=";,").delimiter
     except Exception:
         sep = ";" if amostra.count(";") >= amostra.count(",") else ","
     rd = csv.DictReader(io.StringIO(texto), delimiter=sep)
+    return [{(k or "").strip().upper(): v for k, v in row.items()} for row in rd]
+
+
+def montar_linhas(regs, seller_id):
     linhas = []
-    for row in rd:
-        rr = {(k or "").strip().upper(): v for k, v in row.items()}
+    for rr in regs:
         out = {"seller_id": seller_id}
         for col_csv, col_tab in MAPA.items():
             val = rr.get(col_csv)
@@ -217,7 +235,7 @@ def parse_csv(texto, seller_id):
             elif col_tab in DATAS:
                 out[col_tab] = data(val)
             else:
-                out[col_tab] = (val or None)
+                out[col_tab] = (str(val).strip() if val not in (None, "") else None)
         # só o que assentou de fato (tem data de liberação e valor líquido)
         if not (out.get("settlement_date") and out.get("net_amount") is not None):
             continue
@@ -241,13 +259,12 @@ def gravar(linhas):
     return n
 
 
-def mostrar(texto, linhas):
-    linhas_csv = texto.splitlines()
-    print(f"  CSV: {len(linhas_csv)} linhas (c/ cabeçalho).")
-    if linhas_csv:
-        print("  CABEÇALHO:", linhas_csv[0][:400])
-    for i in range(1, min(4, len(linhas_csv))):
-        print(f"  amostra {i}:", linhas_csv[i][:300])
+def mostrar(regs, linhas):
+    print(f"  registros no arquivo: {len(regs)}")
+    if regs:
+        print("  COLUNAS:", list(regs[0].keys()))
+        cab = list(regs[0].keys())[:12]
+        print("  1ª linha crua:", {k: regs[0].get(k) for k in cab})
     print(f"  PARSEADAS (settled): {len(linhas)}")
     for r in linhas[:3]:
         print("    ->", {k: r.get(k) for k in
@@ -292,11 +309,12 @@ def modo_baixar(access, seller_id, gravar_db=True):
         return
     print(f"  pronto: id={rel.get('id')} file={rel.get('file_name')} "
           f"faixa={str(rel.get('begin_date',''))[:10]}..{str(rel.get('end_date',''))[:10]}")
-    texto = baixar(access, rel["file_name"])
-    if not texto:
+    conteudo = baixar(access, rel["file_name"])
+    if not conteudo:
         return
-    linhas = parse_csv(texto, seller_id)
-    mostrar(texto, linhas)
+    regs = ler_registros(rel["file_name"], conteudo)
+    linhas = montar_linhas(regs, seller_id)
+    mostrar(regs, linhas)
     if gravar_db:
         n = gravar(linhas)
         print(f"  gravadas/atualizadas: {n} linhas em settlement_mp.")
@@ -356,10 +374,11 @@ def main():
             print(f"CONTA {apelido or sid} ({sid})")
             if sid in prontos:
                 _, rel = prontos[sid]
-                texto = baixar(access, rel["file_name"])
-                if texto:
-                    linhas = parse_csv(texto, sid)
-                    mostrar(texto, linhas)
+                conteudo = baixar(access, rel["file_name"])
+                if conteudo:
+                    regs = ler_registros(rel["file_name"], conteudo)
+                    linhas = montar_linhas(regs, sid)
+                    mostrar(regs, linhas)
                     n = gravar(linhas)
                     print(f"  gravadas/atualizadas: {n} linhas.")
             else:
