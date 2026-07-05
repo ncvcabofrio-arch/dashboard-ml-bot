@@ -154,12 +154,17 @@ def janela():
     return b, e, b_date
 
 
-def garantir_config(access):
-    """Padroniza as colunas da conta pelas que validamos (idempotente)."""
+def garantir_config(access, seller_id):
+    """Padroniza as colunas da conta pelas que validamos (idempotente).
+    O MP exige o corpo completo (file_name_prefix, frequency, etc.)."""
     body = {
-        "columns": [{"key": k} for k in COLUNAS],
+        "file_name_prefix": f"settlement-report-{seller_id}",
         "include_withdraw": False,
         "show_chargeback_cancel": True,
+        "scheduled": False,
+        "frequency": {"hour": 0, "type": "daily", "value": 1},
+        "separator": ",",
+        "columns": [{"key": k} for k in COLUNAS],
     }
     r = requests.post(MP + REPORT + "/config", headers=mp_headers(access),
                       data=json.dumps(body), timeout=30)
@@ -167,7 +172,11 @@ def garantir_config(access):
         # se POST não criar, tenta PUT (algumas contas já têm config e só atualizam)
         r = requests.put(MP + REPORT + "/config", headers=mp_headers(access),
                          data=json.dumps(body), timeout=30)
-    print(f"  config colunas -> {r.status_code} {r.text[:150]}")
+    print(f"  config colunas -> {r.status_code} {r.text[:400]}")
+    return r.status_code in (200, 201)
+
+
+PRONTO = ("processed", "ready", "finished", "completed")
 
 
 def gerar(access, begin, end):
@@ -176,39 +185,32 @@ def gerar(access, begin, end):
                       data=json.dumps(body), timeout=60)
     print(f"  gerar {begin}..{end} -> {r.status_code} {r.text[:250]}")
     try:
-        return r.json()
+        d = r.json()
     except Exception:
-        return {}
+        d = {}
+    return d.get("id")                                 # id da tarefa do relatório
 
 
-def _dt(s):
-    try:
-        return datetime.fromisoformat(str(s).replace("Z", "+00:00"))
-    except Exception:
+def achar_arquivo(access, report_id):
+    """Acompanha o relatório pelo id até virar 'processed', e devolve o file_name."""
+    if not report_id:
         return None
-
-
-def achar_arquivo(access, desde_ts):
-    """Olha /search até aparecer um relatório 'processed' criado depois que pedimos."""
     for tentativa in range(45):                        # ~6 min
-        r = requests.get(MP + REPORT + "/search", headers=mp_headers(access), timeout=30)
+        r = requests.get(MP + REPORT + "/" + str(report_id),
+                         headers=mp_headers(access), timeout=30)
         if r.status_code == 200:
             try:
-                res = (r.json() or {}).get("results") or []
+                it = r.json() or {}
             except Exception:
-                res = []
-            prontos = [it for it in res
-                       if str(it.get("status", "")).lower() in ("processed", "ready", "finished", "completed")
-                       and (it.get("file_name") or it.get("filename"))]
-            # o mais recente criado a partir do nosso pedido
-            def dc(it):
-                d = _dt(it.get("date_created"))
-                return d.timestamp() if d else 0
-            prontos.sort(key=dc, reverse=True)
-            for it in prontos:
-                if dc(it) >= desde_ts - 90:            # criado após dispararmos (folga 90s)
-                    return it.get("file_name") or it.get("filename")
+                it = {}
+            st = str(it.get("status", "")).lower()
+            fn = it.get("file_name") or it.get("filename")
+            if tentativa == 0:
+                print(f"    status inicial: {st or '(vazio)'}")
+            if st in PRONTO and fn:
+                return fn
         time.sleep(8)
+    print(f"    (id {report_id} não ficou 'processed' a tempo)")
     return None
 
 
@@ -288,10 +290,9 @@ def _gerar_baixar(seller_id, access):
     """Config + gerar + achar + baixar. Devolve (texto_csv, begin_date) ou (None,None)."""
     begin, end, begin_date = janela()
     print(f"  janela: {begin} .. {end}")
-    garantir_config(access)
-    inicio = time.time()
-    gerar(access, begin, end)
-    file_name = achar_arquivo(access, inicio)
+    garantir_config(access, seller_id)
+    report_id = gerar(access, begin, end)
+    file_name = achar_arquivo(access, report_id)
     if not file_name:
         print(f"  [{seller_id}] relatório não ficou pronto a tempo. Tente de novo mais tarde.")
         return None, None
