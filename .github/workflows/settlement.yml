@@ -6,10 +6,10 @@ on:
   workflow_dispatch:
     inputs:
       modo:
-        description: "sonda (só testa) | ensaio (gera/baixa sem gravar) | cheio (grava)"
+        description: "sonda (diag) | gerar (só pede) | baixar (recolhe pronto) | cheio (gera+espera+grava)"
         default: "sonda"
         type: choice
-        options: [sonda, ensaio, cheio]
+        options: [sonda, gerar, baixar, cheio]
       dias:
         description: "janela pra trás (dias)"
         default: "45"
