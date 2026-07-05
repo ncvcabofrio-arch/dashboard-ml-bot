@@ -54,10 +54,13 @@ OAUTH = "https://api.mercadolibre.com/oauth/token"   # servidor de OAuth (ML=MP)
 MP    = "https://api.mercadopago.com"                 # onde estão os relatórios
 REPORT = "/v1/account/settlement_report"
 
-# colunas que validamos no arquivo que você baixou (o cupom vem em OPERATION_TAGS)
+# colunas EXATAMENTE como no arquivo da CF que validamos (o cupom vem em OPERATION_TAGS).
+# O robô POSTa essa mesma config nas 3 contas, pra todas saírem iguais — a CABOFRIO
+# hoje está sem EXTERNAL_REFERENCE e a MG está sem config nenhuma.
 COLUNAS = ["EXTERNAL_REFERENCE", "SOURCE_ID", "TRANSACTION_AMOUNT", "TRANSACTION_DATE",
            "FEE_AMOUNT", "SETTLEMENT_NET_AMOUNT", "SETTLEMENT_DATE",
-           "PRODUCT_SKU", "SALE_DETAIL", "OPERATION_TAGS"]
+           "TAXES_AMOUNT", "TAX_DETAIL", "TAXES_DISAGGREGATED", "DESCRIPTION",
+           "OPERATION_TAGS", "SUB_UNIT", "PRODUCT_SKU", "SALE_DETAIL"]
 
 # como os cabeçalhos do CSV mapeiam pras colunas da tabela
 MAPA = {
@@ -123,15 +126,15 @@ def sonda(seller_id, access):
     else:
         print("    corpo:", r.text[:300])
 
-    # 2) consigo listar relatórios de settlement? (é o que precisamos)
-    r = requests.get(MP + REPORT, headers=mp_headers(access), timeout=30)
-    print(f"  GET {REPORT} (lista) -> {r.status_code}")
+    # 2) consigo listar relatórios de settlement? (endpoint /search)
+    r = requests.get(MP + REPORT + "/search", headers=mp_headers(access), timeout=30)
+    print(f"  GET {REPORT}/search (lista) -> {r.status_code}")
     print("    corpo (cru, 800 chars):", r.text[:800])
 
-    # 3) config atual das colunas
+    # 3) config atual das colunas (completa)
     r = requests.get(MP + REPORT + "/config", headers=mp_headers(access), timeout=30)
     print(f"  GET {REPORT}/config -> {r.status_code}")
-    print("    corpo (cru, 500 chars):", r.text[:500])
+    print("    corpo COMPLETO:", r.text)
 
 
 # ----------------------------------------------------------------------
@@ -152,9 +155,18 @@ def janela():
 
 
 def garantir_config(access):
-    body = {"columns": [{"key": k} for k in COLUNAS]}
+    """Padroniza as colunas da conta pelas que validamos (idempotente)."""
+    body = {
+        "columns": [{"key": k} for k in COLUNAS],
+        "include_withdraw": False,
+        "show_chargeback_cancel": True,
+    }
     r = requests.post(MP + REPORT + "/config", headers=mp_headers(access),
                       data=json.dumps(body), timeout=30)
+    if r.status_code not in (200, 201):
+        # se POST não criar, tenta PUT (algumas contas já têm config e só atualizam)
+        r = requests.put(MP + REPORT + "/config", headers=mp_headers(access),
+                         data=json.dumps(body), timeout=30)
     print(f"  config colunas -> {r.status_code} {r.text[:150]}")
 
 
@@ -162,35 +174,40 @@ def gerar(access, begin, end):
     body = {"begin_date": begin, "end_date": end}
     r = requests.post(MP + REPORT, headers=mp_headers(access),
                       data=json.dumps(body), timeout=60)
-    print(f"  gerar {begin}..{end} -> {r.status_code} {r.text[:200]}")
-    # a resposta costuma trazer um id/file da tarefa; devolvemos o que vier
+    print(f"  gerar {begin}..{end} -> {r.status_code} {r.text[:250]}")
     try:
         return r.json()
     except Exception:
         return {}
 
 
+def _dt(s):
+    try:
+        return datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
 def achar_arquivo(access, desde_ts):
-    """Fica olhando a lista até aparecer um relatório novo pronto pra baixar."""
-    for tentativa in range(40):                       # ~5 min
-        r = requests.get(MP + REPORT, headers=mp_headers(access), timeout=30)
+    """Olha /search até aparecer um relatório 'processed' criado depois que pedimos."""
+    for tentativa in range(45):                        # ~6 min
+        r = requests.get(MP + REPORT + "/search", headers=mp_headers(access), timeout=30)
         if r.status_code == 200:
             try:
-                lista = r.json()
+                res = (r.json() or {}).get("results") or []
             except Exception:
-                lista = []
-            # a lista pode vir como array ou dentro de uma chave
-            if isinstance(lista, dict):
-                lista = lista.get("results") or lista.get("reports") or []
-            # pega o mais recente que tenha nome de arquivo
-            cand = None
-            for it in lista:
-                fn = it.get("file_name") or it.get("filename") or it.get("name")
-                if fn:
-                    cand = fn                          # lista costuma vir do mais novo
-                    break
-            if cand:
-                return cand
+                res = []
+            prontos = [it for it in res
+                       if str(it.get("status", "")).lower() in ("processed", "ready", "finished", "completed")
+                       and (it.get("file_name") or it.get("filename"))]
+            # o mais recente criado a partir do nosso pedido
+            def dc(it):
+                d = _dt(it.get("date_created"))
+                return d.timestamp() if d else 0
+            prontos.sort(key=dc, reverse=True)
+            for it in prontos:
+                if dc(it) >= desde_ts - 90:            # criado após dispararmos (folga 90s)
+                    return it.get("file_name") or it.get("filename")
         time.sleep(8)
     return None
 
@@ -267,22 +284,48 @@ def carregar(seller_id, linhas, begin_date):
     print(f"  [{seller_id}] carregado: {len(linhas)} linhas (janela desde {begin_date}).")
 
 
-def cheio(seller_id, access):
-    print(f"\n=== [{seller_id}] CHEIO ===")
+def _gerar_baixar(seller_id, access):
+    """Config + gerar + achar + baixar. Devolve (texto_csv, begin_date) ou (None,None)."""
     begin, end, begin_date = janela()
+    print(f"  janela: {begin} .. {end}")
     garantir_config(access)
     inicio = time.time()
     gerar(access, begin, end)
     file_name = achar_arquivo(access, inicio)
     if not file_name:
         print(f"  [{seller_id}] relatório não ficou pronto a tempo. Tente de novo mais tarde.")
-        return
+        return None, None
     print(f"  arquivo: {file_name}")
     texto = baixar(access, file_name)
+    return texto, begin_date
+
+
+def cheio(seller_id, access):
+    print(f"\n=== [{seller_id}] CHEIO ===")
+    texto, begin_date = _gerar_baixar(seller_id, access)
     if not texto:
         return
     linhas = parse_csv(texto, seller_id)
     carregar(seller_id, linhas, begin_date)
+
+
+def ensaio(seller_id, access):
+    """Fluxo COMPLETO da API, mas SEM gravar no banco. Mostra o CSV real."""
+    print(f"\n=== [{seller_id}] ENSAIO (não grava no banco) ===")
+    texto, _ = _gerar_baixar(seller_id, access)
+    if not texto:
+        return
+    linhas_csv = texto.splitlines()
+    print(f"  CSV: {len(linhas_csv)} linhas (com cabeçalho).")
+    print("  CABEÇALHO:", linhas_csv[0][:400] if linhas_csv else "(vazio)")
+    for i in range(1, min(4, len(linhas_csv))):
+        print(f"  amostra {i}:", linhas_csv[i][:400])
+    linhas = parse_csv(texto, seller_id)
+    print(f"  PARSEADAS (settled): {len(linhas)} linhas prontas pra tabela.")
+    for r in linhas[:3]:
+        print("    ->", {k: r.get(k) for k in
+              ("external_reference", "source_id", "transaction_amount",
+               "fee_amount", "net_amount", "settlement_date", "operation_tags")})
 
 
 def main():
@@ -307,6 +350,8 @@ def main():
 
         if MODO == "cheio":
             cheio(seller_id, access)
+        elif MODO == "ensaio":
+            ensaio(seller_id, access)
         else:
             sonda(seller_id, access)
 
