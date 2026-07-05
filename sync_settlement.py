@@ -131,9 +131,22 @@ def garantir_config(access, seller_id):
 def gerar(access, ini_s, fim_s):
     corpo = json.dumps({"begin_date": ini_s, "end_date": fim_s})
     g = requests.post(MP + REPORT, headers=Hj(access), data=corpo, timeout=30)
-    ok = g.status_code in (200, 202)
-    print(f"  gerar {ini_s[:10]}..{fim_s[:10]} -> {g.status_code} {g.text[:120]}")
-    return ok
+    try:
+        rid = (g.json() or {}).get("id")
+    except Exception:
+        rid = None
+    print(f"  gerar {ini_s[:10]}..{fim_s[:10]} -> {g.status_code} id={rid}")
+    return rid                                          # id do relatório recém-pedido
+
+
+def achar_por_id(access, report_id):
+    """Acha no /search EXATAMENTE o relatório que geramos (por id), já com file_name."""
+    if not report_id:
+        return None
+    for x in lista_relatorios(access):
+        if str(x.get("id")) == str(report_id) and x.get("file_name"):
+            return x
+    return None
 
 
 def lista_relatorios(access):
@@ -340,26 +353,25 @@ def _blocos(begin_d, end_d, tam):
 
 
 def processar_janela(sess, ini_s, fim_s):
-    """Gera p/ todas as contas, espera ~30 min, baixa e grava. (mesmo molde do robô de repasses)"""
+    """Gera p/ todas as contas e baixa EXATAMENTE o relatório gerado (pelo id).
+    Assim nunca pega um relatório antigo da mesma faixa."""
+    ids = {}
     for sid, apelido, access in sess:
         print(f"[gerar] {apelido or sid}")
         garantir_config(access, sid)
-        gerar(access, ini_s, fim_s)
-    ini_d, fim_d = ini_s[:10], fim_s[:10]
-    corte    = (datetime.strptime(fim_d, "%Y-%m-%d") - timedelta(days=2)).strftime("%Y-%m-%d")
-    alvo_ini = (datetime.strptime(ini_d, "%Y-%m-%d") + timedelta(days=3)).strftime("%Y-%m-%d")
+        ids[sid] = gerar(access, ini_s, fim_s)
     prontos = {}
-    print(f"Aguardando os relatórios da faixa {ini_d}..{fim_d} (até ~30 min)...")
+    print(f"Aguardando os relatórios {ini_s[:10]}..{fim_s[:10]} (até ~30 min)...")
     for volta in range(90):                            # 90 x 20s = ~30 min
-        se_faltam = [s for s in sess if s[0] not in prontos]
+        se_faltam = [s for s in sess if s[0] not in prontos and ids.get(s[0])]
         if not se_faltam:
             break
         time.sleep(20)
         for sid, apelido, access in se_faltam:
-            rel = achar_pronto(access, corte, alvo_ini)
+            rel = achar_por_id(access, ids[sid])
             if rel:
                 prontos[sid] = rel
-                print(f"  pronto: {apelido or sid} -> {rel.get('file_name')}")
+                print(f"  pronto: {apelido or sid} -> {rel.get('file_name')} (id {ids[sid]})")
     print("-" * 55)
     for sid, apelido, access in sess:
         print(f"CONTA {apelido or sid} ({sid})")
