@@ -115,7 +115,7 @@ def garantir_config(access, seller_id):
         "show_chargeback_cancel": True,
         "scheduled": False,
         "frequency": {"hour": 0, "type": "daily", "value": 1},
-        "separator": ",",
+        "separator": ";",   # ; e não , : o cupom (operation_tags) tem vírgula dentro do JSON
         "columns": [{"key": k} for k in COLUNAS],
     }
     r = requests.post(MP + REPORT + "/config", headers=Hj(access),
