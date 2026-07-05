@@ -6,10 +6,10 @@ on:
   workflow_dispatch:
     inputs:
       modo:
-        description: "sonda (diag) | gerar (só pede) | baixar (recolhe pronto) | cheio (gera+espera+grava)"
+        description: "sonda | gerar | baixar | cheio | backfill (1 ano em blocos de 90d)"
         default: "sonda"
         type: choice
-        options: [sonda, gerar, baixar, cheio]
+        options: [sonda, gerar, baixar, cheio, backfill]
       dias:
         description: "janela pra trás (dias)"
         default: "45"
@@ -29,6 +29,7 @@ on:
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 350          # backfill de 1 ano em blocos pode levar ~2h
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
