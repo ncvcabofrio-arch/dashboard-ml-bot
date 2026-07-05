@@ -1,0 +1,49 @@
+name: settlement (dinheiro em conta)
+
+# Roda manualmente (botão "Run workflow") escolhendo o modo, e também
+# todo dia de madrugada no modo cheio quando você ligar o agendamento.
+on:
+  workflow_dispatch:
+    inputs:
+      modo:
+        description: "sonda (só testa) ou cheio (gera e grava)"
+        default: "sonda"
+        type: choice
+        options: [sonda, cheio]
+      dias:
+        description: "janela pra trás (dias)"
+        default: "45"
+      only_seller:
+        description: "rodar só 1 conta (seller_id) — vazio = todas"
+        default: ""
+      begin:
+        description: "data inicial fixa YYYY-MM-DD (opcional, p/ backfill)"
+        default: ""
+      end:
+        description: "data final fixa YYYY-MM-DD (opcional, p/ backfill)"
+        default: ""
+  # Quando estiver validado, é só tirar o comentário abaixo pra rodar diário 07:10 UTC (~04:10 BRT):
+  # schedule:
+  #   - cron: "10 7 * * *"
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install requests supabase
+      - name: Rodar settlement
+        env:
+          ML_CLIENT_ID:     ${{ secrets.ML_CLIENT_ID }}
+          ML_CLIENT_SECRET: ${{ secrets.ML_CLIENT_SECRET }}
+          SUPABASE_URL:     ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY:     ${{ secrets.SUPABASE_KEY }}
+          MODO:        ${{ github.event.inputs.modo || 'cheio' }}
+          DIAS:        ${{ github.event.inputs.dias || '45' }}
+          ONLY_SELLER: ${{ github.event.inputs.only_seller }}
+          BEGIN:       ${{ github.event.inputs.begin }}
+          END:         ${{ github.event.inputs.end }}
+        run: python sync_settlement.py
