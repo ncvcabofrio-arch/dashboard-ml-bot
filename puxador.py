@@ -65,6 +65,27 @@ def estoque_atual_de(sku):
     return None
 
 
+def pct_br(v):
+    """17.58 -> '17,58%'"""
+    return f"{v:.2f}".replace(".", ",") + "%"
+
+
+def margem_do_mes():
+    """Margem % acumulada do mês (America/Sao_Paulo), via bot_sql. None se falhar."""
+    try:
+        q = ("select round((sum(margem_liquida)/nullif(sum(receita),0)*100)::numeric,2) as pct "
+             "from vendas_margem where status='paid' "
+             "and (data_aprovacao at time zone 'America/Sao_Paulo')::date >= "
+             "date_trunc('month', now() at time zone 'America/Sao_Paulo')::date")
+        res = sb.rpc("bot_sql", {"q": q}).execute()
+        d = res.data or []
+        if d and d[0].get("pct") is not None:
+            return float(d[0]["pct"])
+    except Exception:
+        pass
+    return None
+
+
 def notificar_vendas_novas():
     if not TG_TOKEN or not TG_CHAT:
         return
@@ -77,9 +98,11 @@ def notificar_vendas_novas():
     pedidos = defaultdict(list)
     for r in novas:
         pedidos[r["order_id"]].append(r)
+    margem_mes = margem_do_mes()   # calcula 1x por rodada
+    linha_mes = (f"\n📅 Margem do mês: {pct_br(margem_mes)}" if margem_mes is not None else "")
     if len(pedidos) > 20:
         total = sum((its[0].get("total") or 0) for its in pedidos.values())
-        tg_send(f"🛒 <b>{len(pedidos)} vendas novas!</b>\nTotal: R$ {total:,.2f}")
+        tg_send(f"🛒 <b>{len(pedidos)} vendas novas!</b>\nTotal: R$ {total:,.2f}{linha_mes}")
     else:
         for oid, itens in pedidos.items():
             it0 = itens[0]
@@ -99,11 +122,11 @@ def notificar_vendas_novas():
                 margem = receita - custo - comissao - frete
                 pct = margem / receita * 100
                 alerta = pct < 17                      # margem abaixo de 17%
-                linha_margem = f"💰 Margem: R$ {margem:,.2f} ({pct:.1f}%)"
+                linha_margem = f"💰 Margem da venda: R$ {margem:,.2f} ({pct_br(pct)})"
                 if alerta:
                     linha_margem += " 🚨"
             else:
-                linha_margem = "💰 Margem: aguardando custo do produto"
+                linha_margem = "💰 Margem da venda: aguardando custo do produto"
 
             # estoque atual do produto principal
             est = estoque_atual_de(it0.get("sku"))
@@ -113,7 +136,7 @@ def notificar_vendas_novas():
                          else "🛒 <b>Nova venda!</b>")
             tg_send(f"{cabecalho}\nConta: {conta}\n"
                     f"Valor: R$ {total:,.2f}\nProduto: {titulo}{extra}\n"
-                    f"{linha_margem}{linha_estoque}")
+                    f"{linha_margem}{linha_mes}{linha_estoque}")
     for oid in pedidos:
         sb.table("vendas").update({"notificado": True}).eq("order_id", oid).execute()
 
