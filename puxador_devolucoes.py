@@ -494,29 +494,33 @@ def main():
                 retornos.append(ret)
             time.sleep(0.2)
 
-        # auto-avanco das etapas INICIAIS a partir do ML.
-        # So mexe se ainda esta em 'aberto'/'em_transito' -> nao passa por cima
-        # de quem ja foi movido pra triagem/assistencia/etc. na mao.
+        # decide os avancos ANTES de gravar e REMOVE o campo temporario das linhas,
+        # pra ele nao ir pro upsert em lote (senao o Postgres zera a etapa das
+        # outras linhas, e ate as edicoes manuais da equipe).
         atuais = etapas_atuais([l["claim_id"] for l in linhas])
-        hist_et = []
+        avancos = []
         for l in linhas:
             ml_et = l.pop("_etapa_ml", None)
             if not ml_et:
                 continue
             cur = atuais.get(l["claim_id"]) or "aberto"
             if cur in ("aberto", "em_transito") and ETAPA_IDX.get(ml_et, 9) > ETAPA_IDX.get(cur, 0):
-                l["etapa_interna"] = ml_et
-                hist_et.append({"claim_id": l["claim_id"], "campo": "etapa_interna",
-                                "de_valor": cur, "para_valor": ml_et, "por": "ml"})
+                avancos.append((l["claim_id"], cur, ml_et))
 
+        # o upsert em lote leva SO colunas do ML -> nunca toca etapa/laudo/custos
         n = gravar_devolucoes(linhas)
         gravar_retornos(retornos)
-        if hist_et:
-            for i in range(0, len(hist_et), 200):
-                try:
-                    sb.table("devolucoes_historico").insert(hist_et[i:i + 200]).execute()
-                except Exception:
-                    pass
+
+        # aplica o auto-avanco um a um (update individual, nao sobrescreve nada)
+        for cid, cur, ml_et in avancos:
+            try:
+                sb.table("devolucoes").update({"etapa_interna": ml_et}) \
+                    .eq("claim_id", cid).execute()
+                sb.table("devolucoes_historico").insert({
+                    "claim_id": cid, "campo": "etapa_interna",
+                    "de_valor": cur, "para_valor": ml_et, "por": "ml"}).execute()
+            except Exception:
+                pass
         total += n
         print(f"[{sid}] {n} devolucoes atualizadas em {datetime.now()}")
 
