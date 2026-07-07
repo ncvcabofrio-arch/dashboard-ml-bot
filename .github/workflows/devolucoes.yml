@@ -13,6 +13,10 @@ on:
         description: "Quantos dias para tras buscar (padrao 30)"
         required: false
         default: "30"
+      pedido:
+        description: "Order_id para debug de um caso (use com modo=caso)"
+        required: false
+        default: ""
 
 jobs:
   puxar:
@@ -34,4 +38,5 @@ jobs:
           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
           MODO:              ${{ github.event.inputs.modo }}
           DIAS_DEVOLUCAO:    ${{ github.event.inputs.dias }}
+          PEDIDO_DEBUG:      ${{ github.event.inputs.pedido }}
         run: python puxador_devolucoes.py
