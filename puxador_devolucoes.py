@@ -247,22 +247,6 @@ def retorno_do_claim(claim_id, access):
             break
     if not shp and d.get("shipments"):
         shp = d["shipments"][0] if isinstance(d["shipments"][0], dict) else {}
-    # custo do frete do envio de retorno (mesmo endpoint /costs do puxador de vendas)
-    frete = None
-    sid_ship = shp.get("shipment_id")
-    if sid_ship:
-        try:
-            cst = ml_get(f"/shipments/{sid_ship}/costs", access)
-            if isinstance(cst, dict):
-                frete = cst.get("gross_amount")
-                if frete is None:
-                    for grp in ("senders", "receivers"):
-                        arr = cst.get(grp) or []
-                        if arr and isinstance(arr[0], dict) and arr[0].get("cost") is not None:
-                            frete = arr[0]["cost"]
-                            break
-        except Exception:
-            frete = None
     return {
         "claim_id": str(claim_id),
         "return_status": d.get("status"),            # delivered / expired / shipped...
@@ -270,7 +254,6 @@ def retorno_do_claim(claim_id, access):
         "shipment_id": str(shp.get("shipment_id")) if shp.get("shipment_id") else None,
         "tracking": shp.get("tracking_number"),
         "tracking_status": shp.get("status"),        # delivered / shipped / cancelled...
-        "frete": frete,                              # custo do frete reverso, se houver
         "review_status": d.get("status_money"),      # refunded / retained (status do dinheiro)
         "ml_atualizado_em": d.get("last_updated") or d.get("date_created"),
     }
