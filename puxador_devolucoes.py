@@ -18,6 +18,7 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 from supabase import create_client
+from ml_auth import obter_access
 
 CLIENT_ID     = os.environ["ML_CLIENT_ID"]
 CLIENT_SECRET = os.environ["ML_CLIENT_SECRET"]
@@ -375,6 +376,40 @@ def rodar_debug():
         print("\n>>> Nenhum claim no periodo/filtro em nenhuma conta.")
 
 
+# ---------------- DEBUG RETORNO: acha um retorno real e imprime o JSON ----------------
+def rodar_debug_retorno():
+    tokens = lista_refresh_tokens()
+    if not tokens:
+        raise SystemExit("Nenhum refresh_token em 'contas'.")
+    achados = 0
+    for seller_id, refresh in tokens:
+        try:
+            access, sid, refresh = obter_access(sb, seller_id, refresh)
+        except Exception as e:
+            print(f"[{seller_id}] token: {e}"); continue
+        claims = buscar_claims(access, sid)
+        print(f"[{sid}] {len(claims)} claims; procurando algum com retorno fisico...", flush=True)
+        for i, c in enumerate(claims):
+            if i >= 120:  # cap por conta pra nao demorar
+                break
+            cid = c.get("id")
+            d = ml_get(f"/post-purchase/v2/claims/{cid}/returns", access)
+            http = d.get("_http") if isinstance(d, dict) else None
+            tem = isinstance(d, dict) and http not in (403, 404) and (
+                d.get("data") or d.get("status") or d.get("shipping") or d.get("id") or d.get("subtype"))
+            if tem:
+                print(f"\n===== RETORNO REAL - claim {cid} (tipo={c.get('type')}, status={c.get('status')}, stage={c.get('stage')}) =====", flush=True)
+                print(json.dumps(d, indent=2, ensure_ascii=False)[:4000], flush=True)
+                achados += 1
+                if achados >= 2:
+                    return
+            time.sleep(0.15)
+    if not achados:
+        print("\n>>> Nenhum claim retornou dados no endpoint de returns.", flush=True)
+        print(">>> Pode ser que as devolucoes com produto de volta usem outro recurso,", flush=True)
+        print(">>> ou nao houve retorno fisico no periodo. Aumente DIAS_DEVOLUCAO e tente.", flush=True)
+
+
 # ---------------- Principal ----------------
 def main():
     tokens = lista_refresh_tokens()
@@ -384,12 +419,7 @@ def main():
     for seller_id, refresh in tokens:
         if SO_SELLER and str(seller_id) != SO_SELLER:
             continue
-        d = renovar_token(refresh)
-        access = d["access_token"]
-        sid = str(d.get("user_id") or seller_id)
-        sb.table("contas").upsert(
-            {"seller_id": sid, "refresh_token": d.get("refresh_token", refresh)},
-            on_conflict="seller_id").execute()
+        access, sid, refresh = obter_access(sb, seller_id, refresh)
 
         claims = buscar_claims(access, sid)
         if not claims:
@@ -424,7 +454,10 @@ def main():
 
 
 if __name__ == "__main__":
-    if DEBUG:
+    _modo = os.environ.get("MODO", "")
+    if _modo == "debug":
         rodar_debug()
+    elif _modo == "retorno":
+        rodar_debug_retorno()
     else:
         main()
