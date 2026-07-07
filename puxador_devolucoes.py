@@ -3,20 +3,9 @@ Puxador de DEVOLUCOES / RMA  Mercado Livre -> Supabase
 (mesmo estilo do seu puxador de vendas: refresh token por conta,
  Supabase, Telegram, roda no GitHub Actions)
 
-O que faz:
-  - Para cada conta (tabela 'contas'), busca as reclamacoes/devolucoes
-    dos ultimos DIAS dias na API do ML (post-purchase/v1/claims/search).
-  - Enriquece com o pedido (/orders/{id}) para trazer produto/sku/valor.
-  - Busca o retorno (frete reverso) em /post-purchase/v2/claims/{id}/returns.
-  - Grava em 'devolucoes' e 'devolucoes_retornos' SEM sobrescrever os
-    campos internos da sua esteira (etapa_interna, laudo, custos, desfecho...).
-  - Registra mudanca de status do ML em 'devolucoes_historico'.
-  - Avisa no Telegram quando entra devolucao nova.
-
 Modos:
-  (sem MODO)      -> rodada normal (ultimos DIAS dias, todas as contas)
-  MODO=debug      -> NAO grava nada; imprime o JSON cru do 1o claim e do
-                     1o return, pra calibrarmos o mapeamento de campos.
+  (sem MODO)  -> rodada normal (ultimos DIAS dias, todas as contas)
+  MODO=debug  -> NAO grava nada; imprime a resposta CRUA da API pra calibrar.
 """
 import os
 import time
@@ -27,7 +16,6 @@ from datetime import datetime, timedelta, timezone
 import requests
 from supabase import create_client
 
-# ---- Configuracao (vem dos secrets do GitHub, iguais aos do puxador de vendas) ----
 CLIENT_ID     = os.environ["ML_CLIENT_ID"]
 CLIENT_SECRET = os.environ["ML_CLIENT_SECRET"]
 SEED_REFRESH  = os.environ.get("ML_REFRESH_TOKEN", "")
@@ -43,8 +31,6 @@ DEBUG     = os.environ.get("MODO", "") == "debug"
 
 API = "https://api.mercadolibre.com"
 sb = create_client(SUPABASE_URL, SUPABASE_KEY)
-
-# etapa interna sugerida a partir do status do ML (so no INSERT; nao mexe depois)
 MOTIVO_CACHE = {}
 
 
@@ -60,7 +46,7 @@ def tg_send(text):
         print("Aviso: falha ao enviar Telegram:", e)
 
 
-# ---------------- Mercado Livre (igual ao puxador de vendas) ----------------
+# ---------------- Mercado Livre ----------------
 def renovar_token(refresh_token):
     r = requests.post(API + "/oauth/token", data={
         "grant_type": "refresh_token",
@@ -84,9 +70,12 @@ def ml_get(path, access, tentativas=3):
             continue
         break
     try:
-        return r.json()
+        j = r.json()
+        if isinstance(j, dict):
+            j.setdefault("_http", r.status_code)
+        return j
     except Exception:
-        return {"_status": r.status_code, "_text": r.text[:300]}
+        return {"_http": r.status_code, "_text": r.text[:300]}
 
 
 def lista_refresh_tokens():
@@ -100,7 +89,6 @@ def lista_refresh_tokens():
 
 # ---------------- Busca de claims/devolucoes ----------------
 def buscar_claims(access, seller_id):
-    """Lista as reclamacoes/devolucoes dos ultimos DIAS dias da conta."""
     desde = (datetime.now(timezone.utc) - timedelta(days=DIAS)) \
         .strftime("%Y-%m-%dT%H:%M:%S.000-03:00")
     ate = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000-03:00")
@@ -111,7 +99,6 @@ def buscar_claims(access, seller_id):
         path = ("/post-purchase/v1/claims/search"
                 f"?range={rng}&sort=date_created:desc&limit=50&offset={offset}")
         data = ml_get(path, access)
-        # a API pode devolver em 'data' ou 'results'
         lote = data.get("data") or data.get("results") or []
         pag = data.get("paging") or {}
         total = pag.get("total", len(lote))
@@ -124,7 +111,6 @@ def buscar_claims(access, seller_id):
 
 
 def detalhe_motivo(reason_id, access):
-    """Traduz o codigo do motivo para texto (com cache)."""
     if not reason_id:
         return None
     if reason_id in MOTIVO_CACHE:
@@ -138,7 +124,6 @@ def detalhe_motivo(reason_id, access):
 
 
 def dados_do_pedido(order_id, access):
-    """Reaproveita /orders/{id} pra trazer produto/sku/valor/comprador."""
     if not order_id:
         return {}
     o = ml_get(f"/orders/{order_id}", access)
@@ -158,12 +143,9 @@ def dados_do_pedido(order_id, access):
 
 
 def claim_para_linha(c, access, seller_id):
-    """Monta a linha de 'devolucoes' SO com colunas do ML (nao toca no interno)."""
-    # resource e resource_id: relaciona ao pedido/envio
     resource = c.get("resource")
     resource_id = c.get("resource_id")
     order_id = str(resource_id) if resource == "order" and resource_id else None
-    # alguns claims trazem related_entities/order dentro de estruturas variadas
     if not order_id:
         for ent in (c.get("related_entities") or []):
             if isinstance(ent, dict) and ent.get("type") == "order":
@@ -186,7 +168,6 @@ def claim_para_linha(c, access, seller_id):
         "data_abertura": c.get("date_created"),
         "ml_atualizado_em": c.get("last_updated"),
     }
-    # enriquece com o pedido, se der
     if order_id:
         try:
             linha.update({k: v for k, v in dados_do_pedido(order_id, access).items()
@@ -197,11 +178,9 @@ def claim_para_linha(c, access, seller_id):
 
 
 def retorno_do_claim(claim_id, access):
-    """Busca o return (frete reverso) do claim. Retorna linha ou None."""
     d = ml_get(f"/post-purchase/v2/claims/{claim_id}/returns", access)
-    if not isinstance(d, dict) or d.get("_status") in (403, 404):
+    if not isinstance(d, dict) or d.get("_http") in (403, 404):
         return None
-    # a estrutura pode vir como objeto unico ou lista; tratamos defensivo
     ret = d
     if isinstance(d.get("data"), list) and d["data"]:
         ret = d["data"][0]
@@ -223,7 +202,6 @@ def retorno_do_claim(claim_id, access):
 
 # ---------------- Gravacao (preserva campos internos) ----------------
 def status_atuais(claim_ids):
-    """Le o status_ml atual das devolucoes ja gravadas (pra detectar mudanca)."""
     if not claim_ids:
         return {}
     out = {}
@@ -237,11 +215,9 @@ def status_atuais(claim_ids):
 
 
 def gravar_devolucoes(linhas):
-    """Upsert SO das colunas do ML -> nao sobrescreve etapa_interna, laudo, etc."""
     if not linhas:
         return 0
     antes = status_atuais([l["claim_id"] for l in linhas])
-    # historico de mudanca de status do ML
     hist = []
     for l in linhas:
         old = antes.get(l["claim_id"])
@@ -296,33 +272,66 @@ def notificar_novas():
             .in_("claim_id", ids[i:i + 200]).execute()
 
 
-# ---------------- DEBUG: imprime JSON cru pra calibrar ----------------
+# ---------------- DEBUG: imprime resposta CRUA pra calibrar ----------------
+def _dump(rotulo, obj):
+    print(f"\n--- {rotulo} ---")
+    print(json.dumps(obj, indent=2, ensure_ascii=False)[:3000])
+
+
 def rodar_debug():
     tokens = lista_refresh_tokens()
     if not tokens:
         raise SystemExit("Nenhum refresh_token em 'contas'.")
-    seller_id, refresh = tokens[0]
-    d = renovar_token(refresh)
-    access = d["access_token"]
-    sid = str(d.get("user_id") or seller_id)
-    print(f"== DEBUG conta {sid} ==")
-    claims = buscar_claims(access, sid)
-    print(f"Claims encontrados nos ultimos {DIAS} dias:", len(claims))
-    if not claims:
-        print("Nenhum claim no periodo. Aumente DIAS_DEVOLUCAO e rode de novo.")
+    print(f"Contas a testar: {len(tokens)}")
+    achou = None
+    for seller_id, refresh in tokens:
+        try:
+            d = renovar_token(refresh)
+        except Exception as e:
+            print(f"[{seller_id}] falha ao renovar token: {e}")
+            continue
+        access = d["access_token"]
+        sid = str(d.get("user_id") or seller_id)
+        print(f"\n================ CONTA {sid} ================")
+
+        desde = (datetime.now(timezone.utc) - timedelta(days=DIAS)) \
+            .strftime("%Y-%m-%dT%H:%M:%S.000-03:00")
+        ate = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000-03:00")
+        rng = urllib.parse.quote(f"date_created:after:{desde},before:{ate}")
+        rA = ml_get(f"/post-purchase/v1/claims/search?range={rng}&limit=5", access)
+        _dump(f"[A] busca ultimos {DIAS} dias (resposta crua)", rA)
+
+        rB = ml_get("/post-purchase/v1/claims/search?limit=5", access)
+        _dump("[B] busca SEM filtro, limit 5 (resposta crua)", rB)
+
+        rC = ml_get(f"/marketplace/v2/claims/search?limit=5&user_id={sid}", access)
+        _dump("[C] variante /marketplace/v2/claims/search (resposta crua)", rC)
+
+        for r in (rB, rA, rC):
+            lote = (r.get("data") or r.get("results") or []) if isinstance(r, dict) else []
+            if lote:
+                achou = (sid, access, lote[0])
+                break
+        if achou:
+            break
+
+    if not achou:
+        print("\n>>> Nenhum claim retornado em nenhuma conta.")
+        print(">>> Se [A]/[B]/[C] mostram erro (403 / 401 / forbidden / invalid_token),")
+        print(">>> o problema e PERMISSAO/ESCOPO do app no ML (nao 'sem devolucao').")
+        print(">>> Se mostram paging.total = 0 sem erro, ai sim nao houve devolucao.")
         return
-    c0 = claims[0]
-    print("\n--- JSON CRU DO 1o CLAIM (search) ---")
-    print(json.dumps(c0, indent=2, ensure_ascii=False)[:3500])
+
+    sid, access, c0 = achou
     cid = c0.get("id")
-    print("\n--- DETALHE /post-purchase/v1/claims/{id} ---")
-    print(json.dumps(ml_get(f"/post-purchase/v1/claims/{cid}", access),
-                     indent=2, ensure_ascii=False)[:3500])
-    print("\n--- RETURN /post-purchase/v2/claims/{id}/returns ---")
-    print(json.dumps(ml_get(f"/post-purchase/v2/claims/{cid}/returns", access),
-                     indent=2, ensure_ascii=False)[:3500])
-    print("\n--- LINHA que seria gravada em 'devolucoes' ---")
-    print(json.dumps(claim_para_linha(c0, access, sid), indent=2, ensure_ascii=False))
+    print(f"\n>>> Achei o claim {cid} na conta {sid}. Detalhando:")
+    _dump("JSON CRU DO CLAIM (search)", c0)
+    _dump("DETALHE /post-purchase/v1/claims/{id}",
+          ml_get(f"/post-purchase/v1/claims/{cid}", access))
+    _dump("RETURN /post-purchase/v2/claims/{id}/returns",
+          ml_get(f"/post-purchase/v2/claims/{cid}/returns", access))
+    _dump("LINHA que seria gravada em 'devolucoes'",
+          claim_para_linha(c0, access, sid))
 
 
 # ---------------- Principal ----------------
@@ -337,7 +346,6 @@ def main():
         d = renovar_token(refresh)
         access = d["access_token"]
         sid = str(d.get("user_id") or seller_id)
-        # mantem o refresh_token novo (rotativo), igual ao puxador de vendas
         sb.table("contas").upsert(
             {"seller_id": sid, "refresh_token": d.get("refresh_token", refresh)},
             on_conflict="seller_id").execute()
