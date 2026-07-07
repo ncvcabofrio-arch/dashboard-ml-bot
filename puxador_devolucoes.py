@@ -467,6 +467,39 @@ def rodar_debug_retorno():
         print(">>> ou nao houve retorno fisico no periodo. Aumente DIAS_DEVOLUCAO e tente.", flush=True)
 
 
+# ---------------- DEBUG CASO: despeja TUDO de um pedido especifico ----------------
+def rodar_debug_caso():
+    oid = os.environ.get("PEDIDO_DEBUG", "").strip()
+    if not oid:
+        print("Defina o pedido no campo 'pedido' (PEDIDO_DEBUG).")
+        return
+    tokens = lista_refresh_tokens()
+    for seller_id, refresh in tokens:
+        try:
+            access, sid, refresh = obter_access(sb, seller_id, refresh)
+        except Exception as e:
+            print(f"[{seller_id}] token: {e}")
+            continue
+        r = ml_get(f"/post-purchase/v1/claims/search?order_id={oid}", access)
+        lote = (r.get("data") or r.get("results") or []) if isinstance(r, dict) else []
+        if not lote:
+            continue
+        print(f"\n################ PEDIDO {oid} na conta {sid} ################")
+        for c in lote:
+            cid = c.get("id")
+            _dump("CLAIM (busca)", c)
+            _dump("CLAIM detalhe", ml_get(f"/post-purchase/v1/claims/{cid}", access))
+            ret = ml_get(f"/post-purchase/v2/claims/{cid}/returns", access)
+            _dump("RETURN (v2)", ret)
+            shipments = (ret.get("shipments") or []) if isinstance(ret, dict) else []
+            for shp in shipments:
+                sidp = shp.get("shipment_id")
+                if sidp:
+                    _dump(f"SHIPMENT {sidp} detalhe", ml_get(f"/shipments/{sidp}", access))
+        return
+    print(f"Pedido {oid} nao encontrado nas contas.")
+
+
 # ---------------- Principal ----------------
 def main():
     tokens = lista_refresh_tokens()
@@ -546,5 +579,7 @@ if __name__ == "__main__":
         rodar_debug()
     elif _modo == "retorno":
         rodar_debug_retorno()
+    elif _modo == "caso":
+        rodar_debug_caso()
     else:
         main()
