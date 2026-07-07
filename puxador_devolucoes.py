@@ -1,11 +1,15 @@
 """
 Puxador de DEVOLUCOES / RMA  Mercado Livre -> Supabase
-(mesmo estilo do seu puxador de vendas: refresh token por conta,
- Supabase, Telegram, roda no GitHub Actions)
+(mesmo estilo do puxador de vendas: refresh token por conta, Supabase,
+ Telegram, roda no GitHub Actions)
+
+Filtro correto da API: a busca de claims exige AO MENOS um filtro. Usamos
+'player_role=respondent' + 'player_user_id' (o vendedor e o respondente da
+reclamacao do comprador) e cortamos por data no cliente (ultimos DIAS dias).
 
 Modos:
   (sem MODO)  -> rodada normal (ultimos DIAS dias, todas as contas)
-  MODO=debug  -> NAO grava nada; imprime a resposta CRUA da API pra calibrar.
+  MODO=debug  -> NAO grava nada; testa varios filtros e mostra a resposta crua.
 """
 import os
 import time
@@ -88,23 +92,39 @@ def lista_refresh_tokens():
 
 
 # ---------------- Busca de claims/devolucoes ----------------
-def buscar_claims(access, seller_id):
-    desde = (datetime.now(timezone.utc) - timedelta(days=DIAS)) \
-        .strftime("%Y-%m-%dT%H:%M:%S.000-03:00")
-    ate = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000-03:00")
-    rng = urllib.parse.quote(f"date_created:after:{desde},before:{ate}")
+def _antes_do_corte(date_str, corte):
+    if not date_str:
+        return False
+    try:
+        dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+        return dt < corte
+    except Exception:
+        return False
 
+
+def buscar_claims(access, seller_id):
+    """Todas as reclamacoes onde a conta e respondente, dos ultimos DIAS dias.
+    Filtra por player_role=respondent (exigencia da API) e corta por data aqui."""
+    corte = datetime.now(timezone.utc) - timedelta(days=DIAS)
     claims, offset, total = [], 0, 1
-    while offset < total and offset < 2000:
+    while offset < total and offset < 3000:
         path = ("/post-purchase/v1/claims/search"
-                f"?range={rng}&sort=date_created:desc&limit=50&offset={offset}")
+                f"?player_role=respondent&player_user_id={seller_id}"
+                f"&sort=date_created:desc&limit=50&offset={offset}")
         data = ml_get(path, access)
         lote = data.get("data") or data.get("results") or []
         pag = data.get("paging") or {}
         total = pag.get("total", len(lote))
         if not lote:
             break
-        claims.extend(lote)
+        parou = False
+        for c in lote:
+            if _antes_do_corte(c.get("date_created"), corte):
+                parou = True
+                continue
+            claims.append(c)
+        if parou:      # ja passou do periodo (lista vem do mais novo pro mais velho)
+            break
         offset += 50
         time.sleep(0.3)
     return claims
@@ -272,10 +292,18 @@ def notificar_novas():
             .in_("claim_id", ids[i:i + 200]).execute()
 
 
-# ---------------- DEBUG: imprime resposta CRUA pra calibrar ----------------
+# ---------------- DEBUG: testa filtros e mostra resposta CRUA ----------------
 def _dump(rotulo, obj):
     print(f"\n--- {rotulo} ---")
     print(json.dumps(obj, indent=2, ensure_ascii=False)[:3000])
+
+
+def _total(r):
+    if isinstance(r, dict):
+        lote = r.get("data") or r.get("results") or []
+        pag = r.get("paging") or {}
+        return pag.get("total", len(lote)), lote
+    return 0, []
 
 
 def rodar_debug():
@@ -284,6 +312,7 @@ def rodar_debug():
         raise SystemExit("Nenhum refresh_token em 'contas'.")
     print(f"Contas a testar: {len(tokens)}")
     achou = None
+    base = "/post-purchase/v1/claims/search"
     for seller_id, refresh in tokens:
         try:
             d = renovar_token(refresh)
@@ -294,37 +323,36 @@ def rodar_debug():
         sid = str(d.get("user_id") or seller_id)
         print(f"\n================ CONTA {sid} ================")
 
-        desde = (datetime.now(timezone.utc) - timedelta(days=DIAS)) \
-            .strftime("%Y-%m-%dT%H:%M:%S.000-03:00")
-        ate = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000-03:00")
-        rng = urllib.parse.quote(f"date_created:after:{desde},before:{ate}")
-        rA = ml_get(f"/post-purchase/v1/claims/search?range={rng}&limit=5", access)
-        _dump(f"[A] busca ultimos {DIAS} dias (resposta crua)", rA)
+        variantes = [
+            ("respondent", f"{base}?player_role=respondent&player_user_id={sid}&limit=5"),
+            ("status=opened", f"{base}?status=opened&limit=5"),
+            ("status=closed", f"{base}?status=closed&limit=5"),
+            ("stage=claim", f"{base}?stage=claim&limit=5"),
+            ("stage=dispute", f"{base}?stage=dispute&limit=5"),
+        ]
+        for nome, url in variantes:
+            r = ml_get(url, access)
+            tot, lote = _total(r)
+            err = r.get("error") if isinstance(r, dict) else None
+            print(f"  [{nome}] -> total={tot}  http={r.get('_http')}  erro={err}")
+            if lote and not achou:
+                achou = (sid, access, lote[0], nome)
 
-        rB = ml_get("/post-purchase/v1/claims/search?limit=5", access)
-        _dump("[B] busca SEM filtro, limit 5 (resposta crua)", rB)
-
-        rC = ml_get(f"/marketplace/v2/claims/search?limit=5&user_id={sid}", access)
-        _dump("[C] variante /marketplace/v2/claims/search (resposta crua)", rC)
-
-        for r in (rB, rA, rC):
-            lote = (r.get("data") or r.get("results") or []) if isinstance(r, dict) else []
-            if lote:
-                achou = (sid, access, lote[0])
-                break
-        if achou:
+        if achou and achou[0] == sid:
+            # mostra a resposta crua da variante que funcionou nesta conta
+            _dump(f"RESPOSTA CRUA (variante '{achou[3]}')",
+                  ml_get(dict(variantes)[achou[3]], access))
             break
 
     if not achou:
-        print("\n>>> Nenhum claim retornado em nenhuma conta.")
-        print(">>> Se [A]/[B]/[C] mostram erro (403 / 401 / forbidden / invalid_token),")
-        print(">>> o problema e PERMISSAO/ESCOPO do app no ML (nao 'sem devolucao').")
-        print(">>> Se mostram paging.total = 0 sem erro, ai sim nao houve devolucao.")
+        print("\n>>> Nenhuma variante retornou claims em nenhuma conta.")
+        print(">>> Se todas deram total=0 SEM erro, realmente nao ha devolucao no ML.")
+        print(">>> Se apareceu erro, me mande o texto do erro.")
         return
 
-    sid, access, c0 = achou
+    sid, access, c0, nome = achou
     cid = c0.get("id")
-    print(f"\n>>> Achei o claim {cid} na conta {sid}. Detalhando:")
+    print(f"\n>>> Filtro vencedor: '{nome}'. Claim {cid} na conta {sid}. Detalhando:")
     _dump("JSON CRU DO CLAIM (search)", c0)
     _dump("DETALHE /post-purchase/v1/claims/{id}",
           ml_get(f"/post-purchase/v1/claims/{cid}", access))
