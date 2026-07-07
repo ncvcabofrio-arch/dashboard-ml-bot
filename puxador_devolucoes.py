@@ -220,6 +220,7 @@ def claim_para_linha(c, access, seller_id):
         "resolucao_beneficiado": ",".join(res.get("benefited") or []) or None,
         "resolucao_fechado_por": res.get("closed_by"),
         "resolucao_em": res.get("date_created"),
+        "aplicou_cobertura": res.get("applied_coverage"),
         "data_abertura": c.get("date_created"),
         "ml_atualizado_em": c.get("last_updated"),
     }
@@ -276,7 +277,7 @@ def retorno_do_claim(claim_id, access):
 
 
 # ---- auto-avanco das etapas iniciais a partir do status do ML ----
-ETAPAS_ORDER = ["aberto", "em_transito", "recebido_triagem", "para_assistencia",
+ETAPAS_ORDER = ["aberto", "em_transito", "coleta", "recebido_triagem", "para_assistencia",
                 "reparo_interno", "retornou_assistencia", "desfecho", "cancelada", "encerrado"]
 ETAPA_IDX = {e: i for i, e in enumerate(ETAPAS_ORDER)}
 
@@ -525,7 +526,11 @@ def main():
             except Exception as e:
                 print("  aviso: falha no return", linha["claim_id"], str(e)[:80])
             linha["tem_retorno"] = bool(ret)
-            linha["_etapa_ml"] = etapa_do_retorno(ret)
+            et_ml = etapa_do_retorno(ret)
+            # ML aplicou cobertura e nao ha retorno chegando -> voce precisa COLETAR
+            if et_ml not in ("recebido_triagem", "em_transito") and linha.get("aplicou_cobertura"):
+                et_ml = "coleta"
+            linha["_etapa_ml"] = et_ml
             linhas.append(linha)
             if ret:
                 retornos.append(ret)
