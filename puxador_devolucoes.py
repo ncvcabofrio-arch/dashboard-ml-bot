@@ -236,23 +236,76 @@ def retorno_do_claim(claim_id, access):
     d = ml_get(f"/post-purchase/v2/claims/{claim_id}/returns", access)
     if not isinstance(d, dict) or d.get("_http") in (403, 404):
         return None
-    ret = d
-    if isinstance(d.get("data"), list) and d["data"]:
-        ret = d["data"][0]
-    shipping = ret.get("shipping") or {}
-    review = ret.get("review") or {}
-    if not (ret.get("status") or shipping or ret.get("subtype")):
+    if not (d.get("status") or d.get("shipments") or d.get("subtype")):
         return None
+    # o transporte vem em 'shipments' (array); pega o envio de retorno
+    shp = {}
+    for s in (d.get("shipments") or []):
+        if isinstance(s, dict) and s.get("type") == "return":
+            shp = s
+            break
+    if not shp and d.get("shipments"):
+        shp = d["shipments"][0] if isinstance(d["shipments"][0], dict) else {}
+    # custo do frete do envio de retorno (mesmo endpoint /costs do puxador de vendas)
+    frete = None
+    sid_ship = shp.get("shipment_id")
+    if sid_ship:
+        try:
+            cst = ml_get(f"/shipments/{sid_ship}/costs", access)
+            if isinstance(cst, dict):
+                frete = cst.get("gross_amount")
+                if frete is None:
+                    for grp in ("senders", "receivers"):
+                        arr = cst.get(grp) or []
+                        if arr and isinstance(arr[0], dict) and arr[0].get("cost") is not None:
+                            frete = arr[0]["cost"]
+                            break
+        except Exception:
+            frete = None
     return {
         "claim_id": str(claim_id),
-        "return_status": ret.get("status"),
-        "subtype": ret.get("subtype"),
-        "shipment_id": str(shipping.get("id")) if shipping.get("id") else None,
-        "tracking": shipping.get("tracking_number"),
-        "tracking_status": shipping.get("status"),
-        "review_status": review.get("status"),
-        "ml_atualizado_em": ret.get("last_updated") or ret.get("date_created"),
+        "return_status": d.get("status"),            # delivered / expired / shipped...
+        "subtype": d.get("subtype"),                 # return_total / return_partial
+        "shipment_id": str(shp.get("shipment_id")) if shp.get("shipment_id") else None,
+        "tracking": shp.get("tracking_number"),
+        "tracking_status": shp.get("status"),        # delivered / shipped / cancelled...
+        "frete": frete,                              # custo do frete reverso, se houver
+        "review_status": d.get("status_money"),      # refunded / retained (status do dinheiro)
+        "ml_atualizado_em": d.get("last_updated") or d.get("date_created"),
     }
+
+
+# ---- auto-avanco das etapas iniciais a partir do status do ML ----
+ETAPAS_ORDER = ["aberto", "em_transito", "recebido_triagem", "para_assistencia",
+                "reparo_interno", "retornou_assistencia", "desfecho", "encerrado"]
+ETAPA_IDX = {e: i for i, e in enumerate(ETAPAS_ORDER)}
+
+
+def etapa_do_retorno(ret):
+    """Deduz a etapa inicial a partir do status do envio de retorno do ML."""
+    if not ret:
+        return None
+    st = (ret.get("tracking_status") or "").lower()
+    top = (ret.get("return_status") or "").lower()
+    if st == "delivered" or top == "delivered":
+        return "recebido_triagem"
+    if st in ("shipped", "in_transit", "in_hub", "in_warehouse", "handling",
+              "ready_to_ship", "pending", "picked_up", "out_for_delivery"):
+        return "em_transito"
+    return None
+
+
+def etapas_atuais(claim_ids):
+    if not claim_ids:
+        return {}
+    out = {}
+    for i in range(0, len(claim_ids), 200):
+        lote = claim_ids[i:i + 200]
+        rows = (sb.table("devolucoes").select("claim_id, etapa_interna")
+                .in_("claim_id", lote).execute().data) or []
+        for r in rows:
+            out[r["claim_id"]] = r.get("etapa_interna")
+    return out
 
 
 # ---------------- Gravacao (preserva campos internos) ----------------
@@ -435,13 +488,35 @@ def main():
             except Exception as e:
                 print("  aviso: falha no return", linha["claim_id"], str(e)[:80])
             linha["tem_retorno"] = bool(ret)
+            linha["_etapa_ml"] = etapa_do_retorno(ret)
             linhas.append(linha)
             if ret:
                 retornos.append(ret)
             time.sleep(0.2)
 
+        # auto-avanco das etapas INICIAIS a partir do ML.
+        # So mexe se ainda esta em 'aberto'/'em_transito' -> nao passa por cima
+        # de quem ja foi movido pra triagem/assistencia/etc. na mao.
+        atuais = etapas_atuais([l["claim_id"] for l in linhas])
+        hist_et = []
+        for l in linhas:
+            ml_et = l.pop("_etapa_ml", None)
+            if not ml_et:
+                continue
+            cur = atuais.get(l["claim_id"]) or "aberto"
+            if cur in ("aberto", "em_transito") and ETAPA_IDX.get(ml_et, 9) > ETAPA_IDX.get(cur, 0):
+                l["etapa_interna"] = ml_et
+                hist_et.append({"claim_id": l["claim_id"], "campo": "etapa_interna",
+                                "de_valor": cur, "para_valor": ml_et, "por": "ml"})
+
         n = gravar_devolucoes(linhas)
         gravar_retornos(retornos)
+        if hist_et:
+            for i in range(0, len(hist_et), 200):
+                try:
+                    sb.table("devolucoes_historico").insert(hist_et[i:i + 200]).execute()
+                except Exception:
+                    pass
         total += n
         print(f"[{sid}] {n} devolucoes atualizadas em {datetime.now()}")
 
