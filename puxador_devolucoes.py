@@ -277,7 +277,7 @@ def retorno_do_claim(claim_id, access):
 
 # ---- auto-avanco das etapas iniciais a partir do status do ML ----
 ETAPAS_ORDER = ["aberto", "em_transito", "recebido_triagem", "para_assistencia",
-                "reparo_interno", "retornou_assistencia", "desfecho", "encerrado"]
+                "reparo_interno", "retornou_assistencia", "desfecho", "cancelada", "encerrado"]
 ETAPA_IDX = {e: i for i, e in enumerate(ETAPAS_ORDER)}
 
 
@@ -292,6 +292,10 @@ def etapa_do_retorno(ret):
     if st in ("shipped", "in_transit", "in_hub", "in_warehouse", "handling",
               "ready_to_ship", "pending", "picked_up", "out_for_delivery"):
         return "em_transito"
+    # devolucoes que morreram (produto nao voltou) -> sai do Aberto
+    if top in ("cancelled", "expired", "failed", "closed", "not_delivered") \
+       or st in ("cancelled", "not_delivered"):
+        return "cancelada"
     return None
 
 
@@ -502,6 +506,10 @@ def main():
         for l in linhas:
             ml_et = l.pop("_etapa_ml", None)
             if not ml_et:
+                continue
+            # 'cancelada' so vale se o claim ja FECHOU no ML. Se ainda esta
+            # 'opened', o caso continua ativo -> fica no Aberto.
+            if ml_et == "cancelada" and (l.get("status_ml") or "").lower() != "closed":
                 continue
             cur = atuais.get(l["claim_id"]) or "aberto"
             if cur in ("aberto", "em_transito") and ETAPA_IDX.get(ml_et, 9) > ETAPA_IDX.get(cur, 0):
