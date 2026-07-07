@@ -3,18 +3,17 @@ Puxador de DEVOLUCOES / RMA  Mercado Livre -> Supabase
 (mesmo estilo do puxador de vendas: refresh token por conta, Supabase,
  Telegram, roda no GitHub Actions)
 
-Filtro correto da API: a busca de claims exige AO MENOS um filtro. Usamos
+Filtro da API: a busca de claims exige ao menos um filtro. Usamos
 'player_role=respondent' + 'player_user_id' (o vendedor e o respondente da
-reclamacao do comprador) e cortamos por data no cliente (ultimos DIAS dias).
+reclamacao) e cortamos por data no cliente (ultimos DIAS dias).
 
 Modos:
   (sem MODO)  -> rodada normal (ultimos DIAS dias, todas as contas)
-  MODO=debug  -> NAO grava nada; testa varios filtros e mostra a resposta crua.
+  MODO=debug  -> NAO grava nada; testa filtros e mostra resposta crua.
 """
 import os
 import time
 import json
-import urllib.parse
 from datetime import datetime, timedelta, timezone
 
 import requests
@@ -103,8 +102,7 @@ def _antes_do_corte(date_str, corte):
 
 
 def buscar_claims(access, seller_id):
-    """Todas as reclamacoes onde a conta e respondente, dos ultimos DIAS dias.
-    Filtra por player_role=respondent (exigencia da API) e corta por data aqui."""
+    """Reclamacoes onde a conta e respondente, dos ultimos DIAS dias."""
     corte = datetime.now(timezone.utc) - timedelta(days=DIAS)
     claims, offset, total = [], 0, 1
     while offset < total and offset < 3000:
@@ -123,7 +121,7 @@ def buscar_claims(access, seller_id):
                 parou = True
                 continue
             claims.append(c)
-        if parou:      # ja passou do periodo (lista vem do mais novo pro mais velho)
+        if parou:      # lista vem do mais novo pro mais velho -> ja passou do periodo
             break
         offset += 50
         time.sleep(0.3)
@@ -141,6 +139,22 @@ def detalhe_motivo(reason_id, access):
         txt = d.get("detail") or d.get("name") or d.get("description")
     MOTIVO_CACHE[reason_id] = txt
     return txt
+
+
+def order_de_shipment(shipment_id, access):
+    """Quando o claim aponta pra um envio, descobre o pedido dele."""
+    if not shipment_id:
+        return None
+    sh = ml_get(f"/shipments/{shipment_id}", access)
+    if isinstance(sh, dict):
+        oid = sh.get("order_id")
+        if oid:
+            return str(oid)
+        # alguns envios trazem a lista de pedidos
+        for o in (sh.get("order_ids") or sh.get("orders") or []):
+            if isinstance(o, dict) and o.get("id"):
+                return str(o["id"])
+    return None
 
 
 def dados_do_pedido(order_id, access):
@@ -165,13 +179,28 @@ def dados_do_pedido(order_id, access):
 def claim_para_linha(c, access, seller_id):
     resource = c.get("resource")
     resource_id = c.get("resource_id")
+
+    # descobre o pedido: direto (resource=order) ou via envio (resource=shipment)
     order_id = str(resource_id) if resource == "order" and resource_id else None
     if not order_id:
         for ent in (c.get("related_entities") or []):
             if isinstance(ent, dict) and ent.get("type") == "order":
                 order_id = str(ent.get("id"))
                 break
+    if not order_id and resource == "shipment" and resource_id:
+        try:
+            order_id = order_de_shipment(resource_id, access)
+        except Exception:
+            order_id = None
 
+    # comprador (quem reclamou = complainant)
+    comprador_id = None
+    for p in (c.get("players") or []):
+        if p.get("role") == "complainant":
+            comprador_id = p.get("user_id")
+            break
+
+    res = c.get("resolution") or {}
     reason_id = c.get("reason_id")
     linha = {
         "claim_id": str(c.get("id")),
@@ -185,6 +214,11 @@ def claim_para_linha(c, access, seller_id):
         "motivo": detalhe_motivo(reason_id, access),
         "resource": resource,
         "resource_id": str(resource_id) if resource_id else None,
+        "comprador_id": str(comprador_id) if comprador_id else None,
+        "resolucao_motivo": res.get("reason"),
+        "resolucao_beneficiado": ",".join(res.get("benefited") or []) or None,
+        "resolucao_fechado_por": res.get("closed_by"),
+        "resolucao_em": res.get("date_created"),
         "data_abertura": c.get("date_created"),
         "ml_atualizado_em": c.get("last_updated"),
     }
@@ -280,7 +314,8 @@ def notificar_novas():
             conta = contas.get(d.get("seller_id"), d.get("seller_id") or "-")
             titulo = d.get("titulo") or "(produto)"
             motivo = d.get("motivo") or d.get("reason_id") or "-"
-            tg_send("↩️ <b>Nova devolucao!</b>\n"
+            flag = " 📦(produto volta)" if d.get("tem_retorno") else ""
+            tg_send("↩️ <b>Nova devolucao!</b>" + flag + "\n"
                     f"Conta: {conta}\n"
                     f"Produto: {titulo}\n"
                     f"Pedido: {d.get('order_id') or '-'}\n"
@@ -322,44 +357,22 @@ def rodar_debug():
         access = d["access_token"]
         sid = str(d.get("user_id") or seller_id)
         print(f"\n================ CONTA {sid} ================")
-
-        variantes = [
-            ("respondent", f"{base}?player_role=respondent&player_user_id={sid}&limit=5"),
-            ("status=opened", f"{base}?status=opened&limit=5"),
-            ("status=closed", f"{base}?status=closed&limit=5"),
-            ("stage=claim", f"{base}?stage=claim&limit=5"),
-            ("stage=dispute", f"{base}?stage=dispute&limit=5"),
-        ]
-        for nome, url in variantes:
-            r = ml_get(url, access)
-            tot, lote = _total(r)
-            err = r.get("error") if isinstance(r, dict) else None
-            print(f"  [{nome}] -> total={tot}  http={r.get('_http')}  erro={err}")
-            if lote and not achou:
-                achou = (sid, access, lote[0], nome)
-
-        if achou and achou[0] == sid:
-            # mostra a resposta crua da variante que funcionou nesta conta
-            _dump(f"RESPOSTA CRUA (variante '{achou[3]}')",
-                  ml_get(dict(variantes)[achou[3]], access))
+        url = f"{base}?player_role=respondent&player_user_id={sid}&limit=5"
+        r = ml_get(url, access)
+        tot, lote = _total(r)
+        print(f"  respondent -> total={tot}  http={r.get('_http')}")
+        if lote:
+            c0 = lote[0]
+            cid = c0.get("id")
+            _dump("JSON CRU DO 1o CLAIM", c0)
+            _dump("RETURN /post-purchase/v2/claims/{id}/returns",
+                  ml_get(f"/post-purchase/v2/claims/{cid}/returns", access))
+            _dump("LINHA que seria gravada em 'devolucoes'",
+                  claim_para_linha(c0, access, sid))
+            achou = True
             break
-
     if not achou:
-        print("\n>>> Nenhuma variante retornou claims em nenhuma conta.")
-        print(">>> Se todas deram total=0 SEM erro, realmente nao ha devolucao no ML.")
-        print(">>> Se apareceu erro, me mande o texto do erro.")
-        return
-
-    sid, access, c0, nome = achou
-    cid = c0.get("id")
-    print(f"\n>>> Filtro vencedor: '{nome}'. Claim {cid} na conta {sid}. Detalhando:")
-    _dump("JSON CRU DO CLAIM (search)", c0)
-    _dump("DETALHE /post-purchase/v1/claims/{id}",
-          ml_get(f"/post-purchase/v1/claims/{cid}", access))
-    _dump("RETURN /post-purchase/v2/claims/{id}/returns",
-          ml_get(f"/post-purchase/v2/claims/{cid}/returns", access))
-    _dump("LINHA que seria gravada em 'devolucoes'",
-          claim_para_linha(c0, access, sid))
+        print("\n>>> Nenhum claim no periodo/filtro em nenhuma conta.")
 
 
 # ---------------- Principal ----------------
@@ -386,11 +399,15 @@ def main():
         linhas, retornos = [], []
         for c in claims:
             linha = claim_para_linha(c, access, sid)
-            linhas.append(linha)
+            ret = None
             try:
-                retornos.append(retorno_do_claim(linha["claim_id"], access))
+                ret = retorno_do_claim(linha["claim_id"], access)
             except Exception as e:
                 print("  aviso: falha no return", linha["claim_id"], str(e)[:80])
+            linha["tem_retorno"] = bool(ret)
+            linhas.append(linha)
+            if ret:
+                retornos.append(ret)
             time.sleep(0.2)
 
         n = gravar_devolucoes(linhas)
