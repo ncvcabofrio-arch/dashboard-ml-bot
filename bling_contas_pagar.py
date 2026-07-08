@@ -9,6 +9,7 @@ Python puro (sem pip install).
 """
 import os
 import json
+import time
 import base64
 import urllib.request
 import urllib.error
@@ -29,6 +30,26 @@ def http(method, url, headers, data=None, timeout=40):
             return r.status, r.read().decode()
     except urllib.error.HTTPError as e:
         return e.code, e.read().decode()
+
+
+# ---- Chamadas ao BLING com freio (rate limit) + retry no 429/5xx ----
+_ultima = [0.0]
+MIN_INTERVALO = 0.6   # segundos entre chamadas ao Bling (~1,6/s; abaixo do limite de 3/s)
+
+
+def bling(method, url, headers, data=None, tentativas=6):
+    st, raw = 0, ""
+    for i in range(tentativas):
+        espera = MIN_INTERVALO - (time.time() - _ultima[0])
+        if espera > 0:
+            time.sleep(espera)
+        _ultima[0] = time.time()
+        st, raw = http(method, url, headers, data)
+        if st == 429 or st >= 500:
+            time.sleep(2 * (i + 1))   # backoff: 2s, 4s, 6s...
+            continue
+        return st, raw
+    return st, raw
 
 
 def sb_get(path):
@@ -65,7 +86,7 @@ def obter_access(row):
     basic = base64.b64encode(f"{row['client_id']}:{secret}".encode()).decode()
     body = urllib.parse.urlencode(
         {"grant_type": "refresh_token", "refresh_token": row["refresh_token"]}).encode()
-    st, raw = http("POST", TOKEN_URL, {
+    st, raw = bling("POST", TOKEN_URL, {
         "Authorization": "Basic " + basic,
         "Content-Type": "application/x-www-form-urlencoded",
         "Accept": "application/json"}, body)
@@ -86,7 +107,7 @@ def baixar_abertas(access):
     hdr = {"Authorization": "Bearer " + access, "Accept": "application/json"}
     abertas, pagina = [], 1
     while pagina <= 200:  # trava de segurança
-        st, raw = http("GET", f"{BASE}/contas/pagar?pagina={pagina}&limite=100", hdr)
+        st, raw = bling("GET", f"{BASE}/contas/pagar?pagina={pagina}&limite=100", hdr)
         if st >= 300:
             raise RuntimeError(f"contas/pagar HTTP {st}: {raw[:200]}")
         data = json.loads(raw).get("data", [])
@@ -112,7 +133,7 @@ def resolver_fornecedores(access, ids):
     for i in ids:
         if i in nome:
             continue
-        st, raw = http("GET", f"{BASE}/contatos/{i}", hdr)
+        st, raw = bling("GET", f"{BASE}/contatos/{i}", hdr)
         if st < 300:
             d = json.loads(raw).get("data", {})
             nome[i] = d.get("nome") or f"(contato {i})"
