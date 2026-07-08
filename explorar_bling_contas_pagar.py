@@ -1,7 +1,7 @@
 """
-Explorador do Bling: testa o refresh do token e mostra a ESTRUTURA CRUA de contas a pagar.
-Não grava contas a pagar ainda — só imprime, pra gente ver os campos reais e montar o robô certo.
-Roda com Python puro (sem pip install).
+Explorador do Bling (parte 2): confirma os códigos de 'situacao', busca o NOME do
+fornecedor (contato) e mostra o DETALHE de uma conta a pagar (pra ver categoria, descrição etc.).
+Não grava contas a pagar — só imprime. Python puro.
 """
 import os
 import json
@@ -9,6 +9,7 @@ import base64
 import urllib.request
 import urllib.error
 import urllib.parse
+from collections import Counter
 from datetime import datetime, timezone, timedelta
 
 BASE = "https://www.bling.com.br/Api/v3"
@@ -44,7 +45,7 @@ def sb_patch(conta, fields):
 def refresh(conta, client_id, refresh_token):
     secret = os.environ.get("BLING_SECRET_" + conta)
     if not secret:
-        raise RuntimeError(f"Sem secret BLING_SECRET_{conta} no GitHub.")
+        raise RuntimeError(f"Sem secret BLING_SECRET_{conta}.")
     basic = base64.b64encode(f"{client_id}:{secret}".encode()).decode()
     body = urllib.parse.urlencode(
         {"grant_type": "refresh_token", "refresh_token": refresh_token}).encode()
@@ -59,26 +60,44 @@ def refresh(conta, client_id, refresh_token):
               + timedelta(seconds=int(d.get("expires_in", 21600)))).isoformat()
     fields = {"access_token": d["access_token"], "access_expira_em": expira}
     if d.get("refresh_token"):
-        fields["refresh_token"] = d["refresh_token"]   # Bling pode rotacionar
+        fields["refresh_token"] = d["refresh_token"]
     sb_patch(conta, fields)
     return d["access_token"]
 
 
 contas = sb_get("bling_contas?select=conta,client_id,refresh_token")
-print("Contas encontradas:", [c["conta"] for c in contas])
+fez_detalhe = False
 
 for c in contas:
     conta = c["conta"]
-    print("\n=========== ", conta, " ===========")
+    print("\n===========", conta, "===========")
     try:
         access = refresh(conta, c["client_id"], c["refresh_token"])
-        print("refresh OK (token renovado e salvo)")
     except Exception as e:
-        print("ERRO no refresh:", e)
+        print("ERRO refresh:", e)
         continue
+    hdr = {"Authorization": "Bearer " + access, "Accept": "application/json"}
 
-    # Amostra pequena de contas a pagar (só pra ver a estrutura).
-    st, raw = http("GET", BASE + "/contas/pagar?pagina=1&limite=3",
-                   {"Authorization": "Bearer " + access, "Accept": "application/json"})
-    print("GET /contas/pagar -> HTTP", st)
-    print(raw[:3000])
+    st, raw = http("GET", BASE + "/contas/pagar?pagina=1&limite=100", hdr)
+    print("GET /contas/pagar (limite 100) -> HTTP", st)
+    try:
+        arr = json.loads(raw).get("data", [])
+    except Exception:
+        print(raw[:600]); continue
+    print("Registros nesta página:", len(arr))
+    print("Contagem por 'situacao':", dict(Counter(x.get("situacao") for x in arr)))
+
+    if arr and not fez_detalhe:
+        fez_detalhe = True
+        primeiro = arr[0]
+        pid = primeiro.get("id")
+        cid = (primeiro.get("contato") or {}).get("id")
+
+        st2, raw2 = http("GET", f"{BASE}/contas/pagar/{pid}", hdr)
+        print(f"\n-- DETALHE de uma conta a pagar (/contas/pagar/{pid}) HTTP {st2} --")
+        print(raw2[:2800])
+
+        if cid:
+            st3, raw3 = http("GET", f"{BASE}/contatos/{cid}", hdr)
+            print(f"\n-- FORNECEDOR (/contatos/{cid}) HTTP {st3} --")
+            print(raw3[:1800])
