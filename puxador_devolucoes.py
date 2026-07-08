@@ -510,8 +510,10 @@ def rodar_debug_pedido():
             print(f"[{seller_id}] token: {e}")
     for oid in oids:
         achou = False
+        ultima = None
         for sid, access in accs:
             o = ml_get(f"/orders/{oid}", access)
+            ultima = o
             if not (isinstance(o, dict) and o.get("id")):
                 continue
             print(f"\n################ PEDIDO {oid} na conta {sid} ################")
@@ -526,7 +528,13 @@ def rodar_debug_pedido():
             achou = True
             break
         if not achou:
-            print(f"\n>>> Pedido {oid} nao encontrado em nenhuma conta (via /orders).")
+            print(f"\n>>> Pedido {oid} NAO achado via /orders. Resposta crua da ultima conta:")
+            print(json.dumps(ultima, indent=2, ensure_ascii=False)[:700] if ultima is not None else "(sem resposta)")
+            # tenta como pack: busca os pedidos do pack
+            pk = ml_get(f"/packs/{oid}", accs[0][1]) if accs else None
+            if isinstance(pk, dict) and pk.get("orders"):
+                print(f">>> {oid} parece ser um PACK. Pedidos dentro dele:",
+                      [str((x or {}).get("id")) for x in pk.get("orders", [])])
 
 
 # ---------------- Principal ----------------
