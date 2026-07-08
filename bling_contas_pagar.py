@@ -102,22 +102,22 @@ def obter_access(row):
     return d["access_token"]
 
 
-def baixar_abertas(access):
-    """Baixa TODAS as contas a pagar (paginado) e retorna só as em aberto (situacao=1)."""
+def baixar_contas(access):
+    """Baixa TODAS as contas a pagar (paginado): em aberto (1) e pagas (2)."""
     hdr = {"Authorization": "Bearer " + access, "Accept": "application/json"}
-    abertas, pagina = [], 1
-    while pagina <= 200:  # trava de segurança
+    tudo, pagina = [], 1
+    while pagina <= 300:  # trava de segurança
         st, raw = bling("GET", f"{BASE}/contas/pagar?pagina={pagina}&limite=100", hdr)
         if st >= 300:
             raise RuntimeError(f"contas/pagar HTTP {st}: {raw[:200]}")
         data = json.loads(raw).get("data", [])
         if not data:
             break
-        abertas += [x for x in data if x.get("situacao") == 1]
+        tudo += [x for x in data if x.get("situacao") in (1, 2)]
         if len(data) < 100:
             break
         pagina += 1
-    return abertas
+    return tudo
 
 
 def resolver_fornecedores(access, ids):
@@ -153,12 +153,12 @@ def main():
         conta = row["conta"]
         try:
             access = obter_access(row)
-            abertas = baixar_abertas(access)
+            registros = baixar_contas(access)
         except Exception as e:
             print(f"[{conta}] pulei (erro, mantive dados de ontem): {e}")
             continue
 
-        ids = sorted({(x.get("contato") or {}).get("id") for x in abertas})
+        ids = sorted({(x.get("contato") or {}).get("id") for x in registros})
         nome = resolver_fornecedores(access, ids)
 
         linhas = [{
@@ -170,16 +170,16 @@ def main():
             "contato_id": (x.get("contato") or {}).get("id"),
             "fornecedor": nome.get((x.get("contato") or {}).get("id")),
             "forma_pagamento_id": (x.get("formaPagamento") or {}).get("id"),
-        } for x in abertas]
+        } for x in registros]
 
-        # Substitui: apaga as desta conta e regrava só as em aberto de agora.
-        sb_write("DELETE", f"contas_pagar?conta=eq.{urllib.parse.quote(conta)}")
+        # Upsert por id: atualiza a situação quando um boleto passa de aberto p/ pago.
         for i in range(0, len(linhas), 200):
-            sb_write("POST", "contas_pagar", linhas[i:i + 200])
-        soma = sum((l["valor"] or 0) for l in linhas)
-        print(f"[{conta}] {len(linhas)} contas a pagar em aberto — total R$ {soma:,.2f}")
+            sb_write("POST", "contas_pagar?on_conflict=id", linhas[i:i + 200])
+        aberto = sum((l["valor"] or 0) for l in linhas if l["situacao"] == 1)
+        pago = sum((l["valor"] or 0) for l in linhas if l["situacao"] == 2)
+        print(f"[{conta}] {len(linhas)} contas — em aberto R$ {aberto:,.2f} · pagas R$ {pago:,.2f}")
         total += len(linhas)
-    print(f"Fim. {total} boletos em aberto no total.")
+    print(f"Fim. {total} contas a pagar (aberto + pagas) no total.")
 
 
 if __name__ == "__main__":
