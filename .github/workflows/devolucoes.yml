@@ -18,6 +18,7 @@ on:
           - pedido
           - scan
           - backfill
+          - monitor
       dias:
         description: "Quantos dias para tras buscar (padrao 30)"
         required: false
@@ -48,4 +49,19 @@ jobs:
           MODO:              ${{ github.event.inputs.modo }}
           DIAS_DEVOLUCAO:    ${{ github.event.inputs.dias }}
           PEDIDO_DEBUG:      ${{ github.event.inputs.pedido }}
+        run: python puxador_devolucoes.py
+
+      # No AGENDAMENTO tambem roda o monitor (esteira dos envios com problema).
+      # Nas rodadas manuais nao roda aqui — voce escolhe 'monitor' na lista se quiser.
+      - name: Monitor de envios com problema
+        if: github.event_name == 'schedule'
+        env:
+          ML_CLIENT_ID:      ${{ secrets.ML_CLIENT_ID }}
+          ML_CLIENT_SECRET:  ${{ secrets.ML_CLIENT_SECRET }}
+          ML_REFRESH_TOKEN:  ${{ secrets.ML_REFRESH_TOKEN }}
+          SUPABASE_URL:      ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY:      ${{ secrets.SUPABASE_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+          MODO:              monitor
         run: python puxador_devolucoes.py
