@@ -1,0 +1,29 @@
+name: Bling - gerar token
+# Gera o token de UMA conta do Bling por vez.
+# Você roda 1x pra cada CNPJ (logado naquela conta no Bling na hora de autorizar).
+on:
+  workflow_dispatch:
+    inputs:
+      code:
+        description: "Código que apareceu no fim da URL depois de autorizar (só o valor)"
+        required: true
+      conta:
+        description: "Nome da conta (ex.: PONTOMUSICAL_CF, CABOFRIO, MG)"
+        required: true
+jobs:
+  gerar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install requests supabase
+      - run: python gerar_token_bling.py
+        env:
+          BLING_CLIENT_ID: ${{ secrets.BLING_CLIENT_ID }}
+          BLING_CLIENT_SECRET: ${{ secrets.BLING_CLIENT_SECRET }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          CODE: ${{ inputs.code }}
+          CONTA: ${{ inputs.conta }}
