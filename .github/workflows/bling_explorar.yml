@@ -1,0 +1,19 @@
+name: Bling - explorar contas a pagar
+# Só mostra a estrutura crua (não grava). Rode manualmente uma vez.
+on:
+  workflow_dispatch:
+jobs:
+  explorar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python explorar_bling_contas_pagar.py
+        env:
+          BLING_SECRET_PONTOMUSICAL_CF: ${{ secrets.BLING_SECRET_PONTOMUSICAL_CF }}
+          BLING_SECRET_CABOFRIO: ${{ secrets.BLING_SECRET_CABOFRIO }}
+          BLING_SECRET_MG: ${{ secrets.BLING_SECRET_MG }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
