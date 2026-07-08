@@ -657,6 +657,7 @@ def rodar_backfill():
                 grava.append({"order_id": str(r.get("order_id")), "seller_id": sid,
                               "titulo": r.get("titulo"), "valor": r.get("valor_unitario"),
                               "status_envio": st, "substatus": sub, "tipo": _tp,
+                              "shipping_id": str(shp),
                               "data_venda": r.get("data_aprovacao")})
             if filtro:
                 if (sub or "").lower() == filtro:
@@ -689,6 +690,114 @@ def rodar_backfill():
         print(f"\n=== LISTA ({len(achados)}) order_id | status/substatus | valor | titulo ===", flush=True)
         for oid, st, sub, val, tit in achados:
             print(f"  {oid} | {st}/{sub} | {val} | {tit}")
+
+
+# ---------------- Monitor (esteira automatica dos envios com problema) ----------------
+def _shipping_do_pedido(order_id, access):
+    """Descobre o shipping_id a partir do pedido (quando nao esta guardado)."""
+    o = ml_get(f"/orders/{order_id}", access)
+    if isinstance(o, dict):
+        sh = o.get("shipping") or {}
+        if sh.get("id"):
+            return str(sh["id"])
+    return None
+
+
+def _scan_cancelados_recentes(dias, access_por_conta):
+    """Varre os pedidos CANCELADOS dos ultimos 'dias' dias e devolve os que
+    tem envio com problema, no formato pronto pra upsert. Pega casos NOVOS."""
+    corte = (datetime.now(timezone.utc) - timedelta(days=dias)).date().isoformat()
+    rows = (sb.table("vendas")
+            .select("order_id, shipping_id, titulo, seller_id, valor_unitario, data_aprovacao")
+            .eq("status", "cancelled").gte("data_aprovacao", corte)
+            .execute().data) or []
+    novos, seen = [], set()
+    for r in rows:
+        shp = r.get("shipping_id")
+        sid = str(r.get("seller_id"))
+        if not shp or shp in seen:
+            continue
+        seen.add(shp)
+        access = access_por_conta.get(sid)
+        if not access:
+            continue
+        sj = ml_get(f"/shipments/{shp}", access)
+        st = sj.get("status") if isinstance(sj, dict) else None
+        sub = sj.get("substatus") if isinstance(sj, dict) else None
+        _tp = _tipo_envio(st, sub)
+        if _tp:
+            novos.append({"order_id": str(r.get("order_id")), "seller_id": sid,
+                          "titulo": r.get("titulo"), "valor": r.get("valor_unitario"),
+                          "status_envio": st, "substatus": sub, "tipo": _tp,
+                          "shipping_id": str(shp), "data_venda": r.get("data_aprovacao")})
+        time.sleep(0.12)
+    return novos
+
+
+def rodar_monitor():
+    """A cada rodada: (1) acha casos NOVOS nos cancelados recentes;
+    (2) re-consulta os casos ABERTOS e atualiza status/substatus (a esteira
+    anda sozinha, porque classe/etapa saem da view v_envios_problema);
+    (3) dispara alerta no Telegram quando um envio VIRA 'confiscated'."""
+    dias = int((os.environ.get("DIAS_DEVOLUCAO") or os.environ.get("DIAS") or "20"))
+    toks = {str(sid): rt for sid, rt in lista_refresh_tokens()}
+    access_por_conta = {}
+    for sid, rt in toks.items():
+        try:
+            access_por_conta[sid] = obter_access(sb, sid, rt)[0]
+        except Exception as e:
+            print(f"[{sid}] token: {e}")
+
+    # (1) casos novos
+    novos = _scan_cancelados_recentes(dias, access_por_conta)
+    if novos:
+        for i in range(0, len(novos), 200):
+            try:
+                sb.table("envios_problema").upsert(novos[i:i+200], on_conflict="order_id").execute()
+            except Exception as e:
+                print("Aviso: falha ao gravar novos:", str(e)[:150])
+    print(f"Monitor: {len(novos)} envios-problema nos cancelados dos ultimos {dias} dias.", flush=True)
+
+    # (2) re-consulta os ABERTOS e atualiza
+    abertos = (sb.table("envios_problema").select(
+        "order_id, seller_id, titulo, valor, shipping_id, substatus, notificado")
+        .neq("fechado", True).execute().data) or []
+    print(f"Monitor: {len(abertos)} casos abertos pra atualizar.", flush=True)
+    alertas = []
+    for c in abertos:
+        sid = str(c.get("seller_id"))
+        access = access_por_conta.get(sid)
+        if not access:
+            continue
+        shp = c.get("shipping_id")
+        if not shp:
+            shp = _shipping_do_pedido(c["order_id"], access)
+        if not shp:
+            continue
+        sj = ml_get(f"/shipments/{shp}", access)
+        st = sj.get("status") if isinstance(sj, dict) else None
+        sub = sj.get("substatus") if isinstance(sj, dict) else None
+        upd = {"status_envio": st, "substatus": sub, "shipping_id": str(shp),
+               "atualizado_em": datetime.now(timezone.utc).isoformat()}
+        # alerta: virou confiscado agora e ainda nao avisamos
+        if (sub or "").lower() == "confiscated" and not c.get("notificado"):
+            alertas.append(c)
+            upd["notificado"] = True
+        try:
+            sb.table("envios_problema").update(upd).eq("order_id", c["order_id"]).execute()
+        except Exception as e:
+            print("Aviso: falha ao atualizar", c["order_id"], str(e)[:100])
+        time.sleep(0.15)
+
+    # (3) alertas de confiscado (gatilho ANTES do ML devolver o dinheiro)
+    if NOTIFICAR and alertas:
+        for c in alertas:
+            tg_send("⚠️ <b>ENVIO CONFISCADO (risco de prejuizo)</b>\n"
+                    f"Pedido <code>{c['order_id']}</code>\n"
+                    f"{(c.get('titulo') or '')[:80]}\n"
+                    f"Valor: R$ {c.get('valor')}\n"
+                    "Confiscado pela Receita/transporte. Acompanhe o reembolso ao cliente.")
+    print(f"Monitor: {len(alertas)} alertas de confiscado enviados.", flush=True)
 
 
 # ---------------- Principal ----------------
@@ -782,5 +891,7 @@ if __name__ == "__main__":
         rodar_scan()
     elif _modo == "backfill":
         rodar_backfill()
+    elif _modo == "monitor":
+        rodar_monitor()
     else:
         main()
