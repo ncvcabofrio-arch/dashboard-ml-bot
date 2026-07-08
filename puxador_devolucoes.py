@@ -593,6 +593,21 @@ def rodar_scan():
 
 
 # ---------------- BACKFILL: envios dos pedidos CANCELADOS (do ano) via banco ----------------
+PERDA_TOTAL = {"confiscated", "lost", "stolen", "damaged"}
+RECUPERAVEL = {"returned", "returning_to_sender", "returned_to_warehouse", "returning_to_hub"}
+
+
+def _tipo_envio(st, sub):
+    s = (sub or "").lower()
+    if s in PERDA_TOTAL:
+        return "perda_total"
+    if s in RECUPERAVEL:
+        return "recuperavel"
+    if (st or "") == "not_delivered":
+        return "nao_entregue_outro"
+    return None
+
+
 def rodar_backfill():
     from collections import Counter
     filtro = os.environ.get("PEDIDO_DEBUG", "").strip().lower()   # opcional: filtra por substatus
@@ -614,6 +629,7 @@ def rodar_backfill():
     toks = {str(sid): rt for sid, rt in lista_refresh_tokens()}
     dist = Counter()
     achados = []
+    grava = []
     for sid, lst in porconta.items():
         refresh = toks.get(sid)
         if not refresh:
@@ -634,6 +650,12 @@ def rodar_backfill():
             st = sj.get("status") if isinstance(sj, dict) else None
             sub = sj.get("substatus") if isinstance(sj, dict) else None
             dist[f"{st} / {sub}"] += 1
+            _tp = _tipo_envio(st, sub)
+            if _tp:
+                grava.append({"order_id": str(r.get("order_id")), "seller_id": sid,
+                              "titulo": r.get("titulo"), "valor": r.get("valor_unitario"),
+                              "status_envio": st, "substatus": sub, "tipo": _tp,
+                              "data_venda": r.get("data_aprovacao")})
             if filtro:
                 if (sub or "").lower() == filtro:
                     print(f"\n===== {r.get('order_id')} | {st}/{sub} | R$ {r.get('valor_unitario')} | {r.get('titulo')} =====", flush=True)
@@ -651,6 +673,13 @@ def rodar_backfill():
             if (i + 1) % 100 == 0:
                 print(f"   ...{i+1}/{len(lst)}", flush=True)
             time.sleep(0.15)
+    if grava:
+        for i in range(0, len(grava), 200):
+            try:
+                sb.table("envios_problema").upsert(grava[i:i + 200], on_conflict="order_id").execute()
+            except Exception as e:
+                print("Aviso: falha ao gravar envios_problema:", str(e)[:150])
+        print(f"\nGravados {len(grava)} envios com problema em 'envios_problema'.", flush=True)
     print("\n=== DISTRIBUICAO (status/substatus dos envios cancelados) ===", flush=True)
     for k, v in dist.most_common():
         print(f"  {v:4d}  {k}")
