@@ -1,0 +1,21 @@
+name: Bling - contas a pagar
+# Puxa o contas a pagar em aberto das contas do Bling.
+on:
+  workflow_dispatch:       # botão manual
+  schedule:
+    - cron: "0 9 * * *"    # todo dia ~06h de Brasília (09h UTC)
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python bling_contas_pagar.py
+        env:
+          BLING_SECRET_PONTOMUSICAL_CF: ${{ secrets.BLING_SECRET_PONTOMUSICAL_CF }}
+          BLING_SECRET_CABOFRIO: ${{ secrets.BLING_SECRET_CABOFRIO }}
+          BLING_SECRET_MG: ${{ secrets.BLING_SECRET_MG }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
