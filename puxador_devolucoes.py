@@ -25,7 +25,7 @@ CLIENT_SECRET = os.environ["ML_CLIENT_SECRET"]
 SEED_REFRESH  = os.environ.get("ML_REFRESH_TOKEN", "")
 SUPABASE_URL  = os.environ["SUPABASE_URL"]
 SUPABASE_KEY  = os.environ["SUPABASE_KEY"]
-DIAS          = int(os.environ.get("DIAS_DEVOLUCAO", os.environ.get("DIAS", "30")))
+DIAS          = int((os.environ.get("DIAS_DEVOLUCAO") or os.environ.get("DIAS") or "30"))
 SO_SELLER     = os.environ.get("SO_SELLER", "").strip()
 
 TG_TOKEN  = os.environ.get("TELEGRAM_BOT_TOKEN", "")
