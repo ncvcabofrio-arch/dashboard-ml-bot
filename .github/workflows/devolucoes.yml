@@ -6,9 +6,16 @@ on:
   workflow_dispatch:          # permite rodar na mao pelo botao "Run workflow"
     inputs:
       modo:
-        description: "Deixe vazio p/ rodada normal, ou 'debug' p/ imprimir JSON cru"
+        description: "O que rodar"
         required: false
-        default: ""
+        type: choice
+        default: normal
+        options:
+          - normal
+          - debug
+          - retorno
+          - caso
+          - pedido
       dias:
         description: "Quantos dias para tras buscar (padrao 30)"
         required: false
