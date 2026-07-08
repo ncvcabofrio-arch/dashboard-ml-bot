@@ -1,10 +1,11 @@
 """
-Gerador de token do Bling (uma vez por conta/CNPJ).
-Troca o 'code' (que aparece na URL depois de você autorizar) por um par de tokens
-(access + refresh) e guarda no Supabase, na tabela bling_contas.
+Gerador de token do Bling — uma vez por conta/CNPJ.
+Cada conta tem seu PRÓPRIO app (client_id + client_secret).
+- client_id: vem como input do workflow (não é secreto) e é gravado no banco.
+- client_secret: vem de um Secret do GitHub chamado BLING_SECRET_<CONTA>.
 
-Usa SÓ Python puro (sem pip install) pra rodar rápido — o code do Bling expira em segundos.
-O Client Secret vem dos Secrets do GitHub — nunca passa pelo chat.
+Troca o 'code' por tokens (access + refresh) e guarda no Supabase (tabela bling_contas).
+Usa só Python puro (sem pip install) pra rodar rápido — o code do Bling expira em segundos.
 """
 import os
 import json
@@ -14,15 +15,20 @@ import urllib.error
 import urllib.parse
 from datetime import datetime, timezone, timedelta
 
-# URL de OAuth da API v3 do Bling.
 TOKEN_URL = "https://www.bling.com.br/Api/v3/oauth/token"
 
-CID   = os.environ["BLING_CLIENT_ID"]
-CSEC  = os.environ["BLING_CLIENT_SECRET"]
-CODE  = os.environ["CODE"].strip()
 CONTA = os.environ["CONTA"].strip()
+CID   = os.environ["CLIENT_ID"].strip()
+CODE  = os.environ["CODE"].strip()
 SB_URL = os.environ["SUPABASE_URL"].rstrip("/")
 SB_KEY = os.environ["SUPABASE_KEY"]
+
+# O secret desta conta vem de BLING_SECRET_<CONTA> (ex.: BLING_SECRET_CABOFRIO).
+sec_var = "BLING_SECRET_" + CONTA
+CSEC = os.environ.get(sec_var)
+if not CSEC:
+    raise SystemExit(f"Não achei o secret '{sec_var}' no GitHub. "
+                     f"Crie um Secret com esse nome e o Client Secret do app da conta {CONTA}.")
 
 
 def _post(url, data, headers, timeout=30):
@@ -34,7 +40,7 @@ def _post(url, data, headers, timeout=30):
         return e.code, e.read().decode()
 
 
-# 1) Troca o code por tokens (Basic auth = base64("client_id:client_secret"))
+# 1) Troca o code por tokens.
 basic = base64.b64encode(f"{CID}:{CSEC}".encode()).decode()
 body = urllib.parse.urlencode({"grant_type": "authorization_code", "code": CODE}).encode()
 status, raw = _post(TOKEN_URL, body, {
@@ -47,11 +53,12 @@ d = json.loads(raw)
 if "access_token" not in d:
     raise SystemExit("Falha ao trocar o code por token: " + str(d))
 
-# 2) Grava no Supabase (upsert por 'conta') via API REST, sem biblioteca externa.
+# 2) Grava no Supabase (upsert por 'conta'), incluindo o client_id.
 expira = (datetime.now(timezone.utc)
           + timedelta(seconds=int(d.get("expires_in", 21600)))).isoformat()
 payload = json.dumps({
     "conta": CONTA,
+    "client_id": CID,
     "refresh_token": d["refresh_token"],
     "access_token": d["access_token"],
     "access_expira_em": expira,
