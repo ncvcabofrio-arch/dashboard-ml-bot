@@ -595,6 +595,7 @@ def rodar_scan():
 # ---------------- BACKFILL: envios dos pedidos CANCELADOS (do ano) via banco ----------------
 def rodar_backfill():
     from collections import Counter
+    filtro = os.environ.get("PEDIDO_DEBUG", "").strip().lower()   # opcional: filtra por substatus
     ini = f"{datetime.now(timezone.utc).year}-01-01"
     cancel, passo, off = [], 1000, 0
     while True:
@@ -633,16 +634,30 @@ def rodar_backfill():
             st = sj.get("status") if isinstance(sj, dict) else None
             sub = sj.get("substatus") if isinstance(sj, dict) else None
             dist[f"{st} / {sub}"] += 1
-            achados.append((r.get("order_id"), st, sub, r.get("valor_unitario"), r.get("titulo")))
+            if filtro:
+                if (sub or "").lower() == filtro:
+                    print(f"\n===== {r.get('order_id')} | {st}/{sub} | R$ {r.get('valor_unitario')} | {r.get('titulo')} =====", flush=True)
+                    _dump("SHIPMENT", sj)
+                    o = ml_get(f"/orders/{r.get('order_id')}", access)
+                    if isinstance(o, dict):
+                        _dump("ORDER (id/status/payments)",
+                              {"id": o.get("id"), "status": o.get("status"), "payments": o.get("payments")})
+                        for p in (o.get("payments") or []):
+                            pid = p.get("id")
+                            if pid:
+                                _dump(f"COLLECTION {pid}", ml_get(f"/collections/{pid}", access))
+            else:
+                achados.append((r.get("order_id"), st, sub, r.get("valor_unitario"), r.get("titulo")))
             if (i + 1) % 100 == 0:
                 print(f"   ...{i+1}/{len(lst)}", flush=True)
             time.sleep(0.15)
     print("\n=== DISTRIBUICAO (status/substatus dos envios cancelados) ===", flush=True)
     for k, v in dist.most_common():
         print(f"  {v:4d}  {k}")
-    print(f"\n=== LISTA ({len(achados)}) order_id | status/substatus | valor | titulo ===", flush=True)
-    for oid, st, sub, val, tit in achados:
-        print(f"  {oid} | {st}/{sub} | {val} | {tit}")
+    if not filtro:
+        print(f"\n=== LISTA ({len(achados)}) order_id | status/substatus | valor | titulo ===", flush=True)
+        for oid, st, sub, val, tit in achados:
+            print(f"  {oid} | {st}/{sub} | {val} | {tit}")
 
 
 # ---------------- Principal ----------------
