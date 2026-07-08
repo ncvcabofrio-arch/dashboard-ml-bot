@@ -452,65 +452,81 @@ def rodar_debug_retorno():
 
 
 # ---------------- DEBUG CASO: despeja TUDO de um pedido especifico ----------------
+def _lista_pedidos():
+    raw = os.environ.get("PEDIDO_DEBUG", "")
+    for sep in (",", ";", "\n", "\t"):
+        raw = raw.replace(sep, " ")
+    return [x for x in raw.split() if x]
+
+
 def rodar_debug_caso():
-    oid = os.environ.get("PEDIDO_DEBUG", "").strip()
-    if not oid:
-        print("Defina o pedido no campo 'pedido' (PEDIDO_DEBUG).")
+    oids = _lista_pedidos()
+    if not oids:
+        print("Defina o(s) pedido(s) no campo 'pedido' (separe por virgula ou espaco).")
         return
-    tokens = lista_refresh_tokens()
-    for seller_id, refresh in tokens:
+    accs = []
+    for seller_id, refresh in lista_refresh_tokens():
         try:
             access, sid, refresh = obter_access(sb, seller_id, refresh)
+            accs.append((sid, access))
         except Exception as e:
             print(f"[{seller_id}] token: {e}")
-            continue
-        r = ml_get(f"/post-purchase/v1/claims/search?order_id={oid}", access)
-        lote = (r.get("data") or r.get("results") or []) if isinstance(r, dict) else []
-        if not lote:
-            continue
-        print(f"\n################ PEDIDO {oid} na conta {sid} ################")
-        for c in lote:
-            cid = c.get("id")
-            _dump("CLAIM (busca)", c)
-            _dump("CLAIM detalhe", ml_get(f"/post-purchase/v1/claims/{cid}", access))
-            ret = ml_get(f"/post-purchase/v2/claims/{cid}/returns", access)
-            _dump("RETURN (v2)", ret)
-            shipments = (ret.get("shipments") or []) if isinstance(ret, dict) else []
-            for shp in shipments:
-                sidp = shp.get("shipment_id")
-                if sidp:
-                    _dump(f"SHIPMENT {sidp} detalhe", ml_get(f"/shipments/{sidp}", access))
-        return
-    print(f"Pedido {oid} nao encontrado nas contas.")
+    for oid in oids:
+        achou = False
+        for sid, access in accs:
+            r = ml_get(f"/post-purchase/v1/claims/search?order_id={oid}", access)
+            lote = (r.get("data") or r.get("results") or []) if isinstance(r, dict) else []
+            if not lote:
+                continue
+            print(f"\n################ PEDIDO {oid} na conta {sid} ################")
+            for c in lote:
+                cid = c.get("id")
+                _dump("CLAIM (busca)", c)
+                _dump("CLAIM detalhe", ml_get(f"/post-purchase/v1/claims/{cid}", access))
+                ret = ml_get(f"/post-purchase/v2/claims/{cid}/returns", access)
+                _dump("RETURN (v2)", ret)
+                for shp in ((ret.get("shipments") or []) if isinstance(ret, dict) else []):
+                    sidp = shp.get("shipment_id")
+                    if sidp:
+                        _dump(f"SHIPMENT {sidp} detalhe", ml_get(f"/shipments/{sidp}", access))
+            achou = True
+            break
+        if not achou:
+            print(f"\n>>> Pedido {oid}: nenhum claim encontrado nas contas.")
 
 
 # ---------------- DEBUG PEDIDO: pedido + envio + financeiro (sem depender de claim) ----------------
 def rodar_debug_pedido():
-    oid = os.environ.get("PEDIDO_DEBUG", "").strip()
-    if not oid:
-        print("Defina o pedido no campo 'pedido' (PEDIDO_DEBUG).")
+    oids = _lista_pedidos()
+    if not oids:
+        print("Defina o(s) pedido(s) no campo 'pedido' (separe por virgula ou espaco).")
         return
-    tokens = lista_refresh_tokens()
-    for seller_id, refresh in tokens:
+    accs = []
+    for seller_id, refresh in lista_refresh_tokens():
         try:
             access, sid, refresh = obter_access(sb, seller_id, refresh)
+            accs.append((sid, access))
         except Exception as e:
             print(f"[{seller_id}] token: {e}")
-            continue
-        o = ml_get(f"/orders/{oid}", access)
-        if not (isinstance(o, dict) and o.get("id")):
-            continue
-        print(f"\n################ PEDIDO {oid} na conta {sid} ################")
-        _dump("ORDER /orders/{id}", o)
-        ship = (o.get("shipping") or {}).get("id")
-        if ship:
-            _dump(f"SHIPMENT {ship} (status/substatus)", ml_get(f"/shipments/{ship}", access))
-        for p in (o.get("payments") or []):
-            pid = p.get("id")
-            if pid:
-                _dump(f"COLLECTION /collections/{pid} (financeiro)", ml_get(f"/collections/{pid}", access))
-        return
-    print(f"Pedido {oid} nao encontrado em nenhuma conta (via /orders).")
+    for oid in oids:
+        achou = False
+        for sid, access in accs:
+            o = ml_get(f"/orders/{oid}", access)
+            if not (isinstance(o, dict) and o.get("id")):
+                continue
+            print(f"\n################ PEDIDO {oid} na conta {sid} ################")
+            _dump("ORDER /orders/{id}", o)
+            ship = (o.get("shipping") or {}).get("id")
+            if ship:
+                _dump(f"SHIPMENT {ship} (status/substatus)", ml_get(f"/shipments/{ship}", access))
+            for p in (o.get("payments") or []):
+                pid = p.get("id")
+                if pid:
+                    _dump(f"COLLECTION /collections/{pid} (financeiro)", ml_get(f"/collections/{pid}", access))
+            achou = True
+            break
+        if not achou:
+            print(f"\n>>> Pedido {oid} nao encontrado em nenhuma conta (via /orders).")
 
 
 # ---------------- Principal ----------------
