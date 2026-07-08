@@ -592,6 +592,59 @@ def rodar_scan():
             print(f"    {oid}  [{sub}]  (venda={ost})  {tit}")
 
 
+# ---------------- BACKFILL: envios dos pedidos CANCELADOS (do ano) via banco ----------------
+def rodar_backfill():
+    from collections import Counter
+    ini = f"{datetime.now(timezone.utc).year}-01-01"
+    cancel, passo, off = [], 1000, 0
+    while True:
+        rows = (sb.table("vendas")
+                .select("order_id, shipping_id, titulo, seller_id, valor_unitario, data_aprovacao")
+                .eq("status", "cancelled").gte("data_aprovacao", ini)
+                .range(off, off + passo - 1).execute().data) or []
+        cancel += rows
+        if len(rows) < passo:
+            break
+        off += passo
+    print(f"Pedidos CANCELADOS no vendas desde {ini}: {len(cancel)}", flush=True)
+    porconta = {}
+    for r in cancel:
+        porconta.setdefault(str(r.get("seller_id")), []).append(r)
+    toks = {str(sid): rt for sid, rt in lista_refresh_tokens()}
+    dist = Counter()
+    achados = []
+    for sid, lst in porconta.items():
+        refresh = toks.get(sid)
+        if not refresh:
+            print(f"[{sid}] sem token, pulei {len(lst)}")
+            continue
+        try:
+            access, sid2, refresh = obter_access(sb, sid, refresh)
+        except Exception as e:
+            print(f"[{sid}] token: {e}"); continue
+        print(f"[{sid}] {len(lst)} cancelados; checando envios...", flush=True)
+        seen = set()
+        for i, r in enumerate(lst):
+            shp = r.get("shipping_id")
+            if not shp or shp in seen:
+                continue
+            seen.add(shp)
+            sj = ml_get(f"/shipments/{shp}", access)
+            st = sj.get("status") if isinstance(sj, dict) else None
+            sub = sj.get("substatus") if isinstance(sj, dict) else None
+            dist[f"{st} / {sub}"] += 1
+            achados.append((r.get("order_id"), st, sub, r.get("valor_unitario"), r.get("titulo")))
+            if (i + 1) % 100 == 0:
+                print(f"   ...{i+1}/{len(lst)}", flush=True)
+            time.sleep(0.15)
+    print("\n=== DISTRIBUICAO (status/substatus dos envios cancelados) ===", flush=True)
+    for k, v in dist.most_common():
+        print(f"  {v:4d}  {k}")
+    print(f"\n=== LISTA ({len(achados)}) order_id | status/substatus | valor | titulo ===", flush=True)
+    for oid, st, sub, val, tit in achados:
+        print(f"  {oid} | {st}/{sub} | {val} | {tit}")
+
+
 # ---------------- Principal ----------------
 def main():
     tokens = lista_refresh_tokens()
@@ -681,5 +734,7 @@ if __name__ == "__main__":
         rodar_debug_pedido()
     elif _modo == "scan":
         rodar_scan()
+    elif _modo == "backfill":
+        rodar_backfill()
     else:
         main()
