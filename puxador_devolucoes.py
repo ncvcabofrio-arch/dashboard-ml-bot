@@ -537,6 +537,61 @@ def rodar_debug_pedido():
                       [str((x or {}).get("id")) for x in pk.get("orders", [])])
 
 
+# ---------------- SCAN: mede volume e distribuicao de substatus dos envios ----------------
+def rodar_scan():
+    import urllib.parse
+    from collections import Counter
+    desde = (datetime.now(timezone.utc) - timedelta(days=DIAS)) \
+        .strftime("%Y-%m-%dT%H:%M:%S.000-03:00")
+    PROBLEMA = {"confiscated", "not_delivered", "returned_to_sender", "returning_to_sender",
+                "stolen", "lost", "damaged", "delivery_failed", "shipment_stopped"}
+    CAP = 500  # limite de envios por conta pra nao demorar demais
+    for seller_id, refresh in lista_refresh_tokens():
+        try:
+            access, sid, refresh = obter_access(sb, seller_id, refresh)
+        except Exception as e:
+            print(f"[{seller_id}] token: {e}")
+            continue
+        print(f"\n================ CONTA {sid} (ultimos {DIAS} dias) ================", flush=True)
+        ships = {}
+        offset, total = 0, 1
+        while offset < total and offset < 3000:
+            path = ("/orders/search?seller=" + str(sid) +
+                    "&order.date_created.from=" + urllib.parse.quote(desde) +
+                    "&sort=date_desc&limit=50&offset=" + str(offset))
+            data = ml_get(path, access)
+            total = (data.get("paging") or {}).get("total", 0) if isinstance(data, dict) else 0
+            for o in (data.get("results", []) if isinstance(data, dict) else []):
+                shp = (o.get("shipping") or {}).get("id")
+                if shp and shp not in ships:
+                    it = (o.get("order_items") or [{}])[0]
+                    ships[shp] = (str(o.get("id")), (it.get("item") or {}).get("title"), o.get("status"))
+            offset += 50
+            if len(ships) >= CAP:
+                break
+            time.sleep(0.2)
+        print(f"  pedidos totais no periodo: {total} | envios distintos coletados: {len(ships)}"
+              + ("  (CAP atingido)" if len(ships) >= CAP else ""), flush=True)
+        dist = Counter()
+        problemas = []
+        for i, (shp, (oid, tit, ost)) in enumerate(ships.items()):
+            sj = ml_get(f"/shipments/{shp}", access)
+            sub = sj.get("substatus") if isinstance(sj, dict) else None
+            st = sj.get("status") if isinstance(sj, dict) else None
+            dist[f"{st} / {sub}"] += 1
+            if sub in PROBLEMA:
+                problemas.append((oid, sub, ost, tit))
+            if (i + 1) % 100 == 0:
+                print(f"    ...{i+1}/{len(ships)}", flush=True)
+            time.sleep(0.15)
+        print("  --- distribuicao status / substatus ---", flush=True)
+        for k, v in dist.most_common():
+            print(f"    {v:4d}  {k}")
+        print(f"  --- envios com PROBLEMA ({len(problemas)}) ---", flush=True)
+        for oid, sub, ost, tit in problemas[:60]:
+            print(f"    {oid}  [{sub}]  (venda={ost})  {tit}")
+
+
 # ---------------- Principal ----------------
 def main():
     tokens = lista_refresh_tokens()
@@ -624,5 +679,7 @@ if __name__ == "__main__":
         rodar_debug_caso()
     elif _modo == "pedido":
         rodar_debug_pedido()
+    elif _modo == "scan":
+        rodar_scan()
     else:
         main()
