@@ -484,6 +484,35 @@ def rodar_debug_caso():
     print(f"Pedido {oid} nao encontrado nas contas.")
 
 
+# ---------------- DEBUG PEDIDO: pedido + envio + financeiro (sem depender de claim) ----------------
+def rodar_debug_pedido():
+    oid = os.environ.get("PEDIDO_DEBUG", "").strip()
+    if not oid:
+        print("Defina o pedido no campo 'pedido' (PEDIDO_DEBUG).")
+        return
+    tokens = lista_refresh_tokens()
+    for seller_id, refresh in tokens:
+        try:
+            access, sid, refresh = obter_access(sb, seller_id, refresh)
+        except Exception as e:
+            print(f"[{seller_id}] token: {e}")
+            continue
+        o = ml_get(f"/orders/{oid}", access)
+        if not (isinstance(o, dict) and o.get("id")):
+            continue
+        print(f"\n################ PEDIDO {oid} na conta {sid} ################")
+        _dump("ORDER /orders/{id}", o)
+        ship = (o.get("shipping") or {}).get("id")
+        if ship:
+            _dump(f"SHIPMENT {ship} (status/substatus)", ml_get(f"/shipments/{ship}", access))
+        for p in (o.get("payments") or []):
+            pid = p.get("id")
+            if pid:
+                _dump(f"COLLECTION /collections/{pid} (financeiro)", ml_get(f"/collections/{pid}", access))
+        return
+    print(f"Pedido {oid} nao encontrado em nenhuma conta (via /orders).")
+
+
 # ---------------- Principal ----------------
 def main():
     tokens = lista_refresh_tokens()
@@ -569,5 +598,7 @@ if __name__ == "__main__":
         rodar_debug_retorno()
     elif _modo == "caso":
         rodar_debug_caso()
+    elif _modo == "pedido":
+        rodar_debug_pedido()
     else:
         main()
