@@ -16,6 +16,7 @@ on:
           - retorno
           - caso
           - pedido
+          - scan
       dias:
         description: "Quantos dias para tras buscar (padrao 30)"
         required: false
