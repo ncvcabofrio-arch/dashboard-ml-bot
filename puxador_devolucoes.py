@@ -605,6 +605,8 @@ def _tipo_envio(st, sub):
         return "recuperavel"
     if (st or "") == "not_delivered":
         return "nao_entregue_outro"
+    if (st or "") == "delivered":
+        return "entregue_cancelado"
     return None
 
 
