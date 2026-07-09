@@ -23,6 +23,7 @@ on:
           - checar_coleta
           - claims_abertas
           - mediacoes
+          - mapear_coleta
       dias:
         description: "Quantos dias para tras buscar (padrao 30)"
         required: false
