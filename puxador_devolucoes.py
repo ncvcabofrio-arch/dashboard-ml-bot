@@ -800,6 +800,80 @@ def rodar_monitor():
     print(f"Monitor: {len(alertas)} alertas de confiscado enviados.", flush=True)
 
 
+# ---------------- Limpar coleta (tira cancelados-sem-envio) ----------------
+def rodar_limpar_coleta():
+    """Varre os casos em etapa 'coleta' e separa os que foram CANCELADOS SEM
+    NUNCA TEREM SIDO ENVIADOS (produto nunca saiu -> nada a coletar).
+    Por padrao SO RELATA. Para mover de verdade, rode com o campo 'pedido' = aplicar."""
+    aplicar = os.environ.get("PEDIDO_DEBUG", "").strip().lower() == "aplicar"
+    casos = (sb.table("devolucoes").select("claim_id, order_id, seller_id, titulo")
+             .eq("etapa_interna", "coleta").execute().data) or []
+    print(f"Coleta: {len(casos)} casos pra checar. Modo: {'APLICAR' if aplicar else 'so relato'}", flush=True)
+
+    # mapa order_id -> shipping_id (via vendas), em lotes
+    oids = [str(c["order_id"]) for c in casos if c.get("order_id")]
+    ship_por_order = {}
+    for i in range(0, len(oids), 150):
+        lote = oids[i:i + 150]
+        rows = (sb.table("vendas").select("order_id, shipping_id")
+                .in_("order_id", lote).execute().data) or []
+        for r in rows:
+            if r.get("shipping_id"):
+                ship_por_order[str(r["order_id"])] = str(r["shipping_id"])
+
+    toks = {str(sid): rt for sid, rt in lista_refresh_tokens()}
+    acc = {}
+    nunca, enviados, sem_ship = [], 0, 0
+    for idx, c in enumerate(casos):
+        sid = str(c.get("seller_id"))
+        if sid not in acc:
+            rt = toks.get(sid)
+            if not rt:
+                continue
+            try:
+                acc[sid] = obter_access(sb, sid, rt)[0]
+            except Exception as e:
+                print(f"[{sid}] token: {e}"); continue
+        access = acc[sid]
+        oid = str(c.get("order_id"))
+        shp = ship_por_order.get(oid) or _shipping_do_pedido(oid, access)
+        if not shp:
+            sem_ship += 1
+            continue
+        sh = ml_get(f"/shipments/{shp}", access)
+        hist = (sh.get("status_history") or {}) if isinstance(sh, dict) else {}
+        enviou = bool(hist.get("date_shipped") or hist.get("date_delivered"))
+        if enviou:
+            enviados += 1
+        else:
+            nunca.append(c)
+        if (idx + 1) % 50 == 0:
+            print(f"   ...{idx+1}/{len(casos)}", flush=True)
+        time.sleep(0.15)
+
+    print(f"\n=== RESULTADO ===", flush=True)
+    print(f"NUNCA ENVIADOS (cancelado antes de despachar, sai da coleta): {len(nunca)}")
+    print(f"Foram enviados/entregues (ficam na coleta pra investigar):    {enviados}")
+    if sem_ship:
+        print(f"Sem shipping_id (nao deu pra checar):                        {sem_ship}")
+    for c in nunca:
+        print(f"  fora -> {c['order_id']} | {(c.get('titulo') or '')[:50]}")
+
+    if aplicar and nunca:
+        for c in nunca:
+            try:
+                sb.table("devolucoes").update({"etapa_interna": "cancelada"}) \
+                    .eq("claim_id", c["claim_id"]).execute()
+                sb.table("devolucoes_historico").insert({
+                    "claim_id": c["claim_id"], "campo": "etapa_interna",
+                    "de_valor": "coleta", "para_valor": "cancelada", "por": "limpar_coleta"}).execute()
+            except Exception as e:
+                print("  falha ao mover", c["order_id"], str(e)[:80])
+        print(f"\nAPLICADO: {len(nunca)} movidos de 'coleta' -> 'cancelada'.")
+    elif nunca:
+        print(f"\n(rode de novo com o campo 'pedido' = aplicar para mover esses {len(nunca)} pra fora da coleta)")
+
+
 # ---------------- Principal ----------------
 def main():
     tokens = lista_refresh_tokens()
@@ -893,5 +967,7 @@ if __name__ == "__main__":
         rodar_backfill()
     elif _modo == "monitor":
         rodar_monitor()
+    elif _modo == "limpar_coleta":
+        rodar_limpar_coleta()
     else:
         main()
