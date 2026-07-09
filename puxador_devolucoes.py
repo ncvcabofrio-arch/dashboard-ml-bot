@@ -1289,7 +1289,9 @@ def rodar_classificar_coleta():
         et = r.get("etapa_interna") or "aberto"
         eh_coleta = (r.get("status_ml") == "closed") and (rstatus in ("failed", "expired")) and bool(volumoso)
         novo = None
-        if eh_coleta and et in ("aberto", "em_transito", "coleta"):
+        if eh_coleta and et != "coleta":
+            # retorno falhou + volumoso -> e coleta, venha de onde vier
+            # (recebido_triagem/encerrado ficaram errados: retorno falhado nao foi 'recebido')
             novo = "coleta"
         elif et == "coleta" and not eh_coleta:
             if rstatus == "delivered":
