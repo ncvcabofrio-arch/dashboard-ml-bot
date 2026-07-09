@@ -999,8 +999,10 @@ def rodar_mediacoes():
                      .eq("claim_id", cid).limit(1).execute().data) or []
             prazo_antigo = atual[0].get("acao_prazo") if atual else None
             if obrig and prazo:
-                # ainda PENDENTE (aparece na aba)
-                upd = {"acao_pendente": acao, "acao_obrigatoria": True, "acao_prazo": prazo}
+                # ainda PENDENTE (aparece na aba). Se veio um prazo NOVO (ex: mediacao
+                # deu outra data apos voce responder), volta limpo -> nao fica em "Resolvidas".
+                upd = {"acao_pendente": acao, "acao_obrigatoria": True, "acao_prazo": prazo,
+                       "acao_resultado": None, "acao_resolvida_em": None}
                 ja = atual[0].get("acao_notificada") if atual else None
                 if ja != prazo:   # prazo novo (ou mudou) -> alerta uma vez
                     alertas.append({"order": c.get("resource_id"), "acao": acao, "prazo": prazo,
