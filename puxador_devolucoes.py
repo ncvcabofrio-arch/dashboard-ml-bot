@@ -1220,6 +1220,107 @@ def rodar_diag_coleta():
         print(f"  {v:4d}  {k}")
 
 
+# ---------------- Classificar coleta (grava retorno + reclassifica) ----------------
+def rodar_classificar_coleta():
+    """Varre as mediacoes, grava return_status/return_money/volumoso e RECLASSIFICA
+    a etapa pela regra logistica:
+      coleta   = FECHADO + retorno failed/expired + VOLUMOSO  (produto nao voltou)
+      voltou   = retorno delivered   -> recebido_triagem (reestocar)
+      voltando = shipped/label_generated -> em_transito
+      resto    = sai da coleta -> encerrado
+    So mexe em etapas 'aberto/em_transito/coleta' (nao toca trabalho manual)."""
+    from collections import Counter
+    rows, off, passo = [], 0, 1000
+    while True:
+        lote = (sb.table("devolucoes")
+                .select("order_id, seller_id, claim_id, status_ml, etapa_interna, titulo")
+                .eq("tipo", "mediations").range(off, off + passo - 1).execute().data) or []
+        rows += lote
+        if len(lote) < passo:
+            break
+        off += passo
+    print(f"Mediacoes a classificar: {len(rows)}", flush=True)
+
+    oids = [str(r["order_id"]) for r in rows if r.get("order_id")]
+    ship = {}
+    for i in range(0, len(oids), 200):
+        vr = (sb.table("vendas").select("order_id, shipping_id")
+              .in_("order_id", oids[i:i + 200]).execute().data) or []
+        for v in vr:
+            if v.get("shipping_id"):
+                ship[str(v["order_id"])] = str(v["shipping_id"])
+
+    toks = {str(sid): rt for sid, rt in lista_refresh_tokens()}
+    acc = {}
+    resumo = Counter()
+    mudancas = 0
+    for idx, r in enumerate(rows):
+        sid = str(r.get("seller_id"))
+        if SO_SELLER and sid != SO_SELLER:
+            continue
+        if sid not in acc:
+            rt = toks.get(sid)
+            if not rt:
+                continue
+            try:
+                acc[sid] = obter_access(sb, sid, rt)[0]
+            except Exception as e:
+                print(f"[{sid}] token: {e}"); continue
+        access = acc[sid]
+        oid = str(r.get("order_id"))
+        volumoso = None
+        shp = ship.get(oid)
+        if shp:
+            sj = ml_get(f"/shipments/{shp}", access)
+            time.sleep(0.1)
+            if isinstance(sj, dict):
+                tm = sj.get("tracking_method") or ""
+                itypes = " ".join(sj.get("items_types") or [])
+                volumoso = ("Voluminoso" in tm or "bulky" in itypes)
+        rstatus = rmoney = None
+        cid = r.get("claim_id")
+        if cid:
+            ret = ml_get(f"/post-purchase/v2/claims/{cid}/returns", access)
+            time.sleep(0.1)
+            if isinstance(ret, dict) and not ret.get("error") and ret.get("_http") != 404:
+                rstatus, rmoney = ret.get("status"), ret.get("status_money")
+        upd = {"return_status": rstatus, "return_money": rmoney, "volumoso": volumoso}
+
+        et = r.get("etapa_interna") or "aberto"
+        eh_coleta = (r.get("status_ml") == "closed") and (rstatus in ("failed", "expired")) and bool(volumoso)
+        novo = None
+        if eh_coleta and et in ("aberto", "em_transito", "coleta"):
+            novo = "coleta"
+        elif et == "coleta" and not eh_coleta:
+            if rstatus == "delivered":
+                novo = "recebido_triagem"
+            elif rstatus in ("shipped", "label_generated"):
+                novo = "em_transito"
+            else:
+                novo = "encerrado"
+        if novo and novo != et:
+            upd["etapa_interna"] = novo
+            mudancas += 1
+            try:
+                sb.table("devolucoes_historico").insert({
+                    "claim_id": cid, "campo": "etapa_interna",
+                    "de_valor": et, "para_valor": novo, "por": "classificar_coleta"}).execute()
+            except Exception:
+                pass
+        try:
+            sb.table("devolucoes").update(upd).eq("claim_id", cid).execute()
+        except Exception as e:
+            print("  upd falha", cid, str(e)[:80])
+        resumo["COLETA" if eh_coleta else (rstatus or "sem_retorno")] += 1
+        if (idx + 1) % 100 == 0:
+            print(f"   ...{idx+1}/{len(rows)}", flush=True)
+
+    print(f"\n=== {mudancas} mudaram de etapa ===", flush=True)
+    print("--- distribuicao (retorno) ---")
+    for k, v in resumo.most_common():
+        print(f"  {v:4d}  {k}")
+
+
 # ---------------- Principal ----------------
 def main():
     tokens = lista_refresh_tokens()
@@ -1325,5 +1426,7 @@ if __name__ == "__main__":
         rodar_mapear_coleta()
     elif _modo == "diag_coleta":
         rodar_diag_coleta()
+    elif _modo == "classificar_coleta":
+        rodar_classificar_coleta()
     else:
         main()
