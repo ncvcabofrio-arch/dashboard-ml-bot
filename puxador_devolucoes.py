@@ -947,6 +947,82 @@ def rodar_checar_coleta():
     print("\n(fim)")
 
 
+# ---------------- Mediacoes: prazo de resposta + alerta ----------------
+def _acao_do_respondente(det, seller_id):
+    """Le players[respondent].available_actions e devolve
+    (acao, obrigatoria, prazo_iso) — a acao com prazo mais proximo."""
+    acao, obrig, prazo = None, False, None
+    for p in (det.get("players") or []):
+        # respondente = o vendedor (por papel; confere o user_id por seguranca)
+        if p.get("role") != "respondent":
+            continue
+        for a in (p.get("available_actions") or []):
+            if a.get("mandatory"):
+                obrig = True
+            due = a.get("due_date")
+            if due and (prazo is None or due < prazo):
+                prazo, acao = due, a.get("action")
+            if acao is None:
+                acao = a.get("action")
+    return acao, obrig, prazo
+
+
+def rodar_mediacoes():
+    """Varre as reclamacoes ABERTAS, grava o prazo de resposta na devolucoes e
+    ALERTA no Telegram quando ha acao obrigatoria com prazo (pra nao perder no
+    automatico). Some sozinho quando nao precisa mais de acao."""
+    alertas = []
+    for seller_id, refresh in lista_refresh_tokens():
+        if SO_SELLER and str(seller_id) != SO_SELLER:
+            continue
+        try:
+            access, sid, refresh = obter_access(sb, seller_id, refresh)
+        except Exception as e:
+            print(f"[{seller_id}] token: {e}"); continue
+        claims = buscar_claims(access, sid)
+        abertas = [c for c in claims if (c.get("status") or "").lower() != "closed"]
+        print(f"[{sid}] {len(abertas)} reclamacoes abertas", flush=True)
+        for c in abertas:
+            cid = str(c.get("id"))
+            det = ml_get(f"/post-purchase/v1/claims/{cid}", access)
+            if not isinstance(det, dict):
+                continue
+            acao, obrig, prazo = _acao_do_respondente(det, sid)
+            upd = {"acao_pendente": acao, "acao_obrigatoria": obrig, "acao_prazo": prazo}
+            if obrig and prazo:
+                atual = (sb.table("devolucoes").select("acao_notificada, titulo, valor")
+                         .eq("claim_id", cid).limit(1).execute().data) or []
+                ja = atual[0].get("acao_notificada") if atual else None
+                if ja != prazo:   # prazo novo (ou mudou) -> alerta uma vez
+                    alertas.append({"order": c.get("resource_id"), "acao": acao, "prazo": prazo,
+                                    "titulo": (atual[0].get("titulo") if atual else None),
+                                    "valor": (atual[0].get("valor") if atual else None)})
+                    upd["acao_notificada"] = prazo
+            try:
+                sb.table("devolucoes").update(upd).eq("claim_id", cid).execute()
+            except Exception as e:
+                print("  falha update", cid, str(e)[:80])
+            time.sleep(0.2)
+        # limpa prazo das que ja fecharam (somem da aba sozinhas)
+        try:
+            sb.table("devolucoes").update(
+                {"acao_prazo": None, "acao_pendente": None, "acao_obrigatoria": False}) \
+                .eq("seller_id", str(sid)).eq("status_ml", "closed").execute()
+        except Exception:
+            pass
+
+    if NOTIFICAR and alertas:
+        for a in alertas:
+            pr = (a["prazo"] or "")[:16].replace("T", " ")
+            tg_send("⏰ <b>RECLAMACAO A RESPONDER</b>\n"
+                    f"Pedido <code>{a['order']}</code>\n"
+                    f"{(a.get('titulo') or '')[:70]}\n"
+                    f"Acao: {a['acao']}\n"
+                    f"Prazo: {pr}\n"
+                    "Responda/conteste no ML antes de vencer — senao perde no automatico.")
+    print(f"Mediacoes: {len(alertas)} alertas de prazo enviados.", flush=True)
+
+
 # ---------------- Diagnostico: reclamacoes ABERTAS + prazo ----------------
 def rodar_claims_abertas():
     """Lista as reclamacoes/mediacoes ABERTAS (nao encerradas) e mostra os
@@ -1079,5 +1155,7 @@ if __name__ == "__main__":
         rodar_checar_coleta()
     elif _modo == "claims_abertas":
         rodar_claims_abertas()
+    elif _modo == "mediacoes":
+        rodar_mediacoes()
     else:
         main()
