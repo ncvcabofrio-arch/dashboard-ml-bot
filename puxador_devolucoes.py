@@ -1133,6 +1133,76 @@ def rodar_mapear_coleta():
     print("\n(fim) — me manda esse log que eu acho o sinal comum das coletas")
 
 
+# ---------------- Diagnostico da coleta (sinal logistico, sem financeiro) ----------------
+def rodar_diag_coleta():
+    """Varre as mediacoes, olha o RETORNO de cada uma e lista as que tem retorno
+    NAO concluido (produto nao voltou) -> candidatas a COLETA. Marca se e volumoso.
+    Nao usa nada financeiro. So relatorio."""
+    rows, off, passo = [], 0, 1000
+    while True:
+        lote = (sb.table("devolucoes").select("order_id, seller_id, claim_id, status_ml, titulo")
+                .eq("tipo", "mediations").range(off, off + passo - 1).execute().data) or []
+        rows += lote
+        if len(lote) < passo:
+            break
+        off += passo
+    print(f"Mediacoes a checar: {len(rows)}", flush=True)
+
+    oids = [str(r["order_id"]) for r in rows if r.get("order_id")]
+    ship = {}
+    for i in range(0, len(oids), 200):
+        vr = (sb.table("vendas").select("order_id, shipping_id")
+              .in_("order_id", oids[i:i + 200]).execute().data) or []
+        for v in vr:
+            if v.get("shipping_id"):
+                ship[str(v["order_id"])] = str(v["shipping_id"])
+
+    toks = {str(sid): rt for sid, rt in lista_refresh_tokens()}
+    acc = {}
+    achados = []
+    print(f"\n{'order_id':<16} {'vol':<4} {'claim':<7} {'return.status':<13} {'money':<10} {'refund_at':<10} titulo")
+    print("-" * 122)
+    for idx, r in enumerate(rows):
+        sid = str(r.get("seller_id"))
+        if SO_SELLER and sid != SO_SELLER:
+            continue
+        if sid not in acc:
+            rt = toks.get(sid)
+            if not rt:
+                continue
+            try:
+                acc[sid] = obter_access(sb, sid, rt)[0]
+            except Exception as e:
+                print(f"[{sid}] token: {e}"); continue
+        access = acc[sid]
+        cid = r.get("claim_id")
+        ret = ml_get(f"/post-purchase/v2/claims/{cid}/returns", access)
+        time.sleep(0.12)
+        if not isinstance(ret, dict) or ret.get("error") or ret.get("_http") == 404:
+            continue
+        rstatus = ret.get("status")
+        if rstatus in ("success", "closed", "completed"):
+            continue   # retorno concluido -> nao e coleta
+        oid = str(r.get("order_id"))
+        vol = "?"
+        shp = ship.get(oid)
+        if shp:
+            sj = ml_get(f"/shipments/{shp}", access)
+            if isinstance(sj, dict):
+                tm = sj.get("tracking_method") or ""
+                itypes = " ".join(sj.get("items_types") or [])
+                vol = "sim" if ("Voluminoso" in tm or "bulky" in itypes) else "nao"
+            time.sleep(0.12)
+        achados.append((oid, vol, rstatus))
+        print(f"{oid:<16} {vol:<4} {(r.get('status_ml') or ''):<7} {(rstatus or '-'):<13} "
+              f"{(ret.get('status_money') or '-'):<10} {(ret.get('refund_at') or '-'):<10} "
+              f"{(r.get('titulo') or '')[:32]}", flush=True)
+        if (idx + 1) % 100 == 0:
+            print(f"   ...{idx+1}/{len(rows)}", flush=True)
+    nvol = sum(1 for a in achados if a[1] == "sim")
+    print(f"\n=== {len(achados)} candidatos a coleta (retorno nao concluido) | volumosos: {nvol} ===", flush=True)
+
+
 # ---------------- Principal ----------------
 def main():
     tokens = lista_refresh_tokens()
@@ -1236,5 +1306,7 @@ if __name__ == "__main__":
         rodar_mediacoes()
     elif _modo == "mapear_coleta":
         rodar_mapear_coleta()
+    elif _modo == "diag_coleta":
+        rodar_diag_coleta()
     else:
         main()
