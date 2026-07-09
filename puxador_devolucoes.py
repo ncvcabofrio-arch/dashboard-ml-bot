@@ -947,6 +947,39 @@ def rodar_checar_coleta():
     print("\n(fim)")
 
 
+# ---------------- Diagnostico: reclamacoes ABERTAS + prazo ----------------
+def rodar_claims_abertas():
+    """Lista as reclamacoes/mediacoes ABERTAS (nao encerradas) e mostra os
+    campos candidatos a PRAZO de resposta, pra montar o alerta de 'responder
+    a tempo'. Faz dump completo das 2 primeiras pra achar o campo certo."""
+    dumps = 0
+    for seller_id, refresh in lista_refresh_tokens():
+        if SO_SELLER and str(seller_id) != SO_SELLER:
+            continue
+        try:
+            access, sid, refresh = obter_access(sb, seller_id, refresh)
+        except Exception as e:
+            print(f"[{seller_id}] token: {e}"); continue
+        claims = buscar_claims(access, sid)
+        abertas = [c for c in claims if (c.get("status") or "").lower() != "closed"]
+        print(f"\n[{sid}] {len(abertas)} reclamacoes ABERTAS de {len(claims)} no periodo", flush=True)
+        for c in abertas:
+            cid = c.get("id")
+            det = ml_get(f"/post-purchase/v1/claims/{cid}", access)
+            print(f"  claim {cid} | status={c.get('status')} stage={c.get('stage')} "
+                  f"type={c.get('type')} order={c.get('resource_id')}", flush=True)
+            if isinstance(det, dict):
+                for k in ("due_date", "expected_resolution_date", "date_created",
+                          "last_updated", "available_actions", "actions", "players", "resolution"):
+                    if k in det and det[k] not in (None, [], {}):
+                        print(f"      {k}: {json.dumps(det[k], ensure_ascii=False)[:280]}")
+            if dumps < 2:
+                _dump(f"CLAIM {cid} COMPLETO", det)
+                dumps += 1
+            time.sleep(0.2)
+    print("\n(fim) — me manda esse log que eu acho o campo do prazo")
+
+
 # ---------------- Principal ----------------
 def main():
     tokens = lista_refresh_tokens()
@@ -1044,5 +1077,7 @@ if __name__ == "__main__":
         rodar_limpar_coleta()
     elif _modo == "checar_coleta":
         rodar_checar_coleta()
+    elif _modo == "claims_abertas":
+        rodar_claims_abertas()
     else:
         main()
