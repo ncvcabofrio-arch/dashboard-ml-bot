@@ -851,27 +851,100 @@ def rodar_limpar_coleta():
             print(f"   ...{idx+1}/{len(casos)}", flush=True)
         time.sleep(0.15)
 
-    print(f"\n=== RESULTADO ===", flush=True)
-    print(f"NUNCA ENVIADOS (cancelado antes de despachar, sai da coleta): {len(nunca)}")
-    print(f"Foram enviados/entregues (ficam na coleta pra investigar):    {enviados}")
+    print("\n=== RESULTADO ===", flush=True)
+    print(f"NUNCA ENVIADOS (sai da coleta):  {len(nunca)}")
+    print(f"Enviados/entregues (ficam):      {enviados}")
     if sem_ship:
-        print(f"Sem shipping_id (nao deu pra checar):                        {sem_ship}")
-    for c in nunca:
-        print(f"  fora -> {c['order_id']} | {(c.get('titulo') or '')[:50]}")
+        print(f"Sem shipping_id (nao checado):   {sem_ship}")
 
-    if aplicar and nunca:
+    if not aplicar:
         for c in nunca:
+            print(f"  fora -> {c['order_id']} | {(c.get('titulo') or '')[:50]}")
+        if nunca:
+            print(f"\n(rode de novo com o campo 'pedido' = aplicar para mover esses {len(nunca)} pra fora da coleta)")
+        return
+
+    # APLICAR em LOTE (poucas chamadas, rapido)
+    ids = [c["claim_id"] for c in nunca]
+    movidos = 0
+    for i in range(0, len(ids), 100):
+        lote = ids[i:i + 100]
+        try:
+            sb.table("devolucoes").update({"etapa_interna": "cancelada"}) \
+                .in_("claim_id", lote).execute()
+            movidos += len(lote)
+        except Exception as e:
+            print("  falha no lote de update:", str(e)[:120])
+        try:
+            sb.table("devolucoes_historico").insert(
+                [{"claim_id": cid, "campo": "etapa_interna", "de_valor": "coleta",
+                  "para_valor": "cancelada", "por": "limpar_coleta"} for cid in lote]).execute()
+        except Exception:
+            pass
+        print(f"   movidos {movidos}/{len(ids)}", flush=True)
+    print(f"\nAPLICADO: {movidos} movidos de 'coleta' -> 'cancelada'.")
+
+
+# ---------------- Checar coleta (relatorio pra achar o padrao) ----------------
+def rodar_checar_coleta():
+    """Relatorio compacto dos casos em 'coleta': para cada um traz
+    status/substatus do envio, se foi entregue, se reembolsou e o 'flow' do
+    reembolso. Nao grava nada -> so pra a gente achar o padrao."""
+    casos = (sb.table("devolucoes").select("claim_id, order_id, seller_id, titulo, valor")
+             .eq("etapa_interna", "coleta").order("data_abertura", desc=True).execute().data) or []
+    print(f"Checando {len(casos)} casos em coleta...\n", flush=True)
+
+    oids = [str(c["order_id"]) for c in casos if c.get("order_id")]
+    ship = {}
+    for i in range(0, len(oids), 150):
+        rows = (sb.table("vendas").select("order_id, shipping_id")
+                .in_("order_id", oids[i:i + 150]).execute().data) or []
+        for r in rows:
+            if r.get("shipping_id"):
+                ship[str(r["order_id"])] = str(r["shipping_id"])
+
+    toks = {str(sid): rt for sid, rt in lista_refresh_tokens()}
+    acc = {}
+    print(f"{'order_id':<16} {'R$':>7}  {'envio (status/substatus)':<28} {'entreg':<6} {'reemb':<5} {'flow':<16} titulo")
+    print("-" * 130)
+    for c in casos:
+        sid = str(c.get("seller_id"))
+        if sid not in acc:
+            rt = toks.get(sid)
+            if not rt:
+                continue
             try:
-                sb.table("devolucoes").update({"etapa_interna": "cancelada"}) \
-                    .eq("claim_id", c["claim_id"]).execute()
-                sb.table("devolucoes_historico").insert({
-                    "claim_id": c["claim_id"], "campo": "etapa_interna",
-                    "de_valor": "coleta", "para_valor": "cancelada", "por": "limpar_coleta"}).execute()
+                acc[sid] = obter_access(sb, sid, rt)[0]
             except Exception as e:
-                print("  falha ao mover", c["order_id"], str(e)[:80])
-        print(f"\nAPLICADO: {len(nunca)} movidos de 'coleta' -> 'cancelada'.")
-    elif nunca:
-        print(f"\n(rode de novo com o campo 'pedido' = aplicar para mover esses {len(nunca)} pra fora da coleta)")
+                print(f"[{sid}] token: {e}"); continue
+        access = acc[sid]
+        oid = str(c.get("order_id"))
+        shp = ship.get(oid) or _shipping_do_pedido(oid, access)
+        envio, entregue = "-", "-"
+        if shp:
+            sj = ml_get(f"/shipments/{shp}", access)
+            if isinstance(sj, dict):
+                envio = f"{sj.get('status')}/{sj.get('substatus')}"
+                hist = sj.get("status_history") or {}
+                entregue = "sim" if hist.get("date_delivered") else "nao"
+        reemb, flow = "-", "-"
+        o = ml_get(f"/orders/{oid}", access)
+        pid = None
+        if isinstance(o, dict):
+            for p in (o.get("payments") or []):
+                if p.get("id"):
+                    pid = p.get("id")
+                reemb = "sim" if p.get("status") == "refunded" else "nao"
+        if pid:
+            col = ml_get(f"/collections/{pid}", access)
+            if isinstance(col, dict):
+                for rf in (col.get("refunds") or []):
+                    fl = ((rf.get("metadata") or {}).get("coverage") or {}).get("flow")
+                    if fl:
+                        flow = fl
+        print(f"{oid:<16} {(c.get('valor') or 0):>7.0f}  {envio:<28} {entregue:<6} {reemb:<5} {flow:<16} {(c.get('titulo') or '')[:32]}", flush=True)
+        time.sleep(0.2)
+    print("\n(fim)")
 
 
 # ---------------- Principal ----------------
@@ -969,5 +1042,7 @@ if __name__ == "__main__":
         rodar_monitor()
     elif _modo == "limpar_coleta":
         rodar_limpar_coleta()
+    elif _modo == "checar_coleta":
+        rodar_checar_coleta()
     else:
         main()
