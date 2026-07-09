@@ -25,6 +25,7 @@ on:
           - mediacoes
           - mapear_coleta
           - diag_coleta
+          - classificar_coleta
       dias:
         description: "Quantos dias para tras buscar (padrao 30)"
         required: false
