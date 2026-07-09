@@ -20,6 +20,7 @@ on:
           - backfill
           - monitor
           - limpar_coleta
+          - checar_coleta
       dias:
         description: "Quantos dias para tras buscar (padrao 30)"
         required: false
