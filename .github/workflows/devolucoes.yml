@@ -19,12 +19,13 @@ on:
           - scan
           - backfill
           - monitor
+          - limpar_coleta
       dias:
         description: "Quantos dias para tras buscar (padrao 30)"
         required: false
         default: "30"
       pedido:
-        description: "Order_id para debug de um caso (use com modo=caso)"
+        description: "Order_id(s) p/ modo=caso/pedido. No modo=limpar_coleta, escreva 'aplicar' para mover de verdade."
         required: false
         default: ""
 
