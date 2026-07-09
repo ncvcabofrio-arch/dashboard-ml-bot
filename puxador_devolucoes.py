@@ -1084,6 +1084,55 @@ def rodar_claims_abertas():
     print("\n(fim) — me manda esse log que eu acho o campo do prazo")
 
 
+# ---------------- Mapear coleta (achar o sinal que define coleta) ----------------
+def rodar_mapear_coleta():
+    """Dump COMPLETO (devolucoes + claim + RETURNS + shipment) dos pedidos passados
+    no campo 'pedido' (separados por virgula). Serve pra achar o sinal comum que
+    define uma COLETA de verdade e virar regra."""
+    ids = _lista_pedidos()
+    if not ids:
+        print("Passe os order_ids no campo 'pedido' (separados por virgula).")
+        return
+    rows = (sb.table("devolucoes")
+            .select("order_id, seller_id, claim_id, etapa_interna, tem_retorno, aplicou_cobertura, status_ml")
+            .in_("order_id", ids).execute().data) or []
+    info = {str(r["order_id"]): r for r in rows}
+    toks = {str(sid): rt for sid, rt in lista_refresh_tokens()}
+    acc = {}
+    for oid in ids:
+        rec = info.get(oid)
+        print(f"\n################ COLETA? {oid} ################", flush=True)
+        sid = str(rec.get("seller_id")) if rec else None
+        if not sid:
+            v = (sb.table("vendas").select("seller_id").eq("order_id", oid).limit(1).execute().data) or []
+            sid = str(v[0]["seller_id"]) if v else None
+        if not sid:
+            print("  sem seller_id, pulei"); continue
+        if sid not in acc:
+            try:
+                acc[sid] = obter_access(sb, sid, toks.get(sid))[0]
+            except Exception as e:
+                print(f"  token: {e}"); continue
+        access = acc[sid]
+        if rec:
+            print(f"  devolucoes: etapa={rec.get('etapa_interna')} status_ml={rec.get('status_ml')} "
+                  f"tem_retorno={rec.get('tem_retorno')} aplicou_cobertura={rec.get('aplicou_cobertura')} "
+                  f"claim={rec.get('claim_id')}", flush=True)
+        cid = rec.get("claim_id") if rec else None
+        if cid:
+            _dump("CLAIM", ml_get(f"/post-purchase/v1/claims/{cid}", access))
+            _dump("RETURNS (v2)", ml_get(f"/post-purchase/v2/claims/{cid}/returns", access))
+        o = ml_get(f"/orders/{oid}", access)
+        _dump("ORDER (completo)", o)
+        shp = ((o.get("shipping") or {}).get("id")) if isinstance(o, dict) else None
+        if shp:
+            _dump("SHIPMENT (status/substatus/status_history)", ml_get(f"/shipments/{shp}", access))
+            # tambem o /shipments/{id}/history (movimentacoes) ajuda a ver coleta
+            _dump("SHIPMENT HISTORY", ml_get(f"/shipments/{shp}/history", access))
+        time.sleep(0.3)
+    print("\n(fim) — me manda esse log que eu acho o sinal comum das coletas")
+
+
 # ---------------- Principal ----------------
 def main():
     tokens = lista_refresh_tokens()
@@ -1185,5 +1234,7 @@ if __name__ == "__main__":
         rodar_claims_abertas()
     elif _modo == "mediacoes":
         rodar_mediacoes()
+    elif _modo == "mapear_coleta":
+        rodar_mapear_coleta()
     else:
         main()
