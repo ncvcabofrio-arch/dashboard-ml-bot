@@ -970,7 +970,14 @@ def _acao_do_respondente(det, seller_id):
 def rodar_mediacoes():
     """Varre as reclamacoes ABERTAS, grava o prazo de resposta na devolucoes e
     ALERTA no Telegram quando ha acao obrigatoria com prazo (pra nao perder no
-    automatico). Some sozinho quando nao precisa mais de acao."""
+    automatico). Some sozinho quando nao precisa mais de acao.
+    Tambem registra o desfecho de cada prazo (respondida x vencida)."""
+    agora = datetime.now(timezone.utc)
+    def _passou(prazo_iso):
+        try:
+            return datetime.fromisoformat((prazo_iso or "").replace("Z", "+00:00")) < agora
+        except Exception:
+            return False
     alertas = []
     for seller_id, refresh in lista_refresh_tokens():
         if SO_SELLER and str(seller_id) != SO_SELLER:
@@ -988,28 +995,47 @@ def rodar_mediacoes():
             if not isinstance(det, dict):
                 continue
             acao, obrig, prazo = _acao_do_respondente(det, sid)
-            upd = {"acao_pendente": acao, "acao_obrigatoria": obrig, "acao_prazo": prazo}
+            atual = (sb.table("devolucoes").select("acao_prazo, acao_notificada, titulo, valor")
+                     .eq("claim_id", cid).limit(1).execute().data) or []
+            prazo_antigo = atual[0].get("acao_prazo") if atual else None
             if obrig and prazo:
-                atual = (sb.table("devolucoes").select("acao_notificada, titulo, valor")
-                         .eq("claim_id", cid).limit(1).execute().data) or []
+                # ainda PENDENTE (aparece na aba)
+                upd = {"acao_pendente": acao, "acao_obrigatoria": True, "acao_prazo": prazo}
                 ja = atual[0].get("acao_notificada") if atual else None
                 if ja != prazo:   # prazo novo (ou mudou) -> alerta uma vez
                     alertas.append({"order": c.get("resource_id"), "acao": acao, "prazo": prazo,
                                     "titulo": (atual[0].get("titulo") if atual else None),
                                     "valor": (atual[0].get("valor") if atual else None)})
                     upd["acao_notificada"] = prazo
+            elif prazo_antigo:
+                # tinha prazo e agora nao tem acao -> RESOLVIDO (voce respondeu, ou venceu)
+                res = "vencida" if _passou(prazo_antigo) else "respondida"
+                upd = {"acao_pendente": None, "acao_obrigatoria": False, "acao_prazo": None,
+                       "acao_notificada": None, "acao_resultado": res,
+                       "acao_resolvida_em": agora.isoformat()}
+            else:
+                upd = {"acao_pendente": acao, "acao_obrigatoria": obrig}
             try:
                 sb.table("devolucoes").update(upd).eq("claim_id", cid).execute()
             except Exception as e:
                 print("  falha update", cid, str(e)[:80])
             time.sleep(0.2)
-        # limpa prazo das que ja fecharam (somem da aba sozinhas)
+        # reclamacoes que FECHARAM no ML e ainda tinham prazo -> registra desfecho e limpa
         try:
-            sb.table("devolucoes").update(
-                {"acao_prazo": None, "acao_pendente": None, "acao_obrigatoria": False}) \
-                .eq("seller_id", str(sid)).eq("status_ml", "closed").execute()
+            fechadas = (sb.table("devolucoes").select("claim_id, acao_prazo")
+                        .eq("seller_id", str(sid)).eq("status_ml", "closed")
+                        .not_.is_("acao_prazo", "null").execute().data) or []
         except Exception:
-            pass
+            fechadas = []
+        for f in fechadas:
+            res = "vencida" if _passou(f.get("acao_prazo")) else "respondida"
+            try:
+                sb.table("devolucoes").update(
+                    {"acao_prazo": None, "acao_pendente": None, "acao_obrigatoria": False,
+                     "acao_notificada": None, "acao_resultado": res,
+                     "acao_resolvida_em": agora.isoformat()}).eq("claim_id", f["claim_id"]).execute()
+            except Exception:
+                pass
 
     if NOTIFICAR and alertas:
         for a in alertas:
