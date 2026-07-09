@@ -1234,7 +1234,8 @@ def rodar_classificar_coleta():
     while True:
         lote = (sb.table("devolucoes")
                 .select("order_id, seller_id, claim_id, status_ml, etapa_interna, titulo")
-                .eq("tipo", "mediations").range(off, off + passo - 1).execute().data) or []
+                .or_("tipo.eq.mediations,etapa_interna.eq.coleta")   # mediacoes + quem ja esta em coleta (pra limpar)
+                .range(off, off + passo - 1).execute().data) or []
         rows += lote
         if len(lote) < passo:
             break
