@@ -21,6 +21,7 @@ on:
           - monitor
           - limpar_coleta
           - checar_coleta
+          - claims_abertas
       dias:
         description: "Quantos dias para tras buscar (padrao 30)"
         required: false
