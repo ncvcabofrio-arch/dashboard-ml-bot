@@ -1160,8 +1160,8 @@ def rodar_diag_coleta():
     toks = {str(sid): rt for sid, rt in lista_refresh_tokens()}
     acc = {}
     achados = []
-    print(f"\n{'order_id':<16} {'vol':<4} {'claim':<7} {'return.status':<13} {'money':<10} {'refund_at':<10} titulo")
-    print("-" * 122)
+    print(f"\n{'order_id':<16} {'entregue':<8} {'envio (status/substatus)':<26} {'return':<13} {'money':<10} titulo")
+    print("-" * 125)
     for idx, r in enumerate(rows):
         sid = str(r.get("seller_id"))
         if SO_SELLER and sid != SO_SELLER:
@@ -1175,32 +1175,49 @@ def rodar_diag_coleta():
             except Exception as e:
                 print(f"[{sid}] token: {e}"); continue
         access = acc[sid]
-        cid = r.get("claim_id")
-        ret = ml_get(f"/post-purchase/v2/claims/{cid}/returns", access)
-        time.sleep(0.12)
-        if not isinstance(ret, dict) or ret.get("error") or ret.get("_http") == 404:
-            continue
-        rstatus = ret.get("status")
-        if rstatus in ("success", "closed", "completed"):
-            continue   # retorno concluido -> nao e coleta
         oid = str(r.get("order_id"))
-        vol = "?"
         shp = ship.get(oid)
-        if shp:
-            sj = ml_get(f"/shipments/{shp}", access)
-            if isinstance(sj, dict):
-                tm = sj.get("tracking_method") or ""
-                itypes = " ".join(sj.get("items_types") or [])
-                vol = "sim" if ("Voluminoso" in tm or "bulky" in itypes) else "nao"
-            time.sleep(0.12)
-        achados.append((oid, vol, rstatus))
-        print(f"{oid:<16} {vol:<4} {(r.get('status_ml') or ''):<7} {(rstatus or '-'):<13} "
-              f"{(ret.get('status_money') or '-'):<10} {(ret.get('refund_at') or '-'):<10} "
-              f"{(r.get('titulo') or '')[:32]}", flush=True)
+        if not shp:
+            continue
+        sj = ml_get(f"/shipments/{shp}", access)
+        time.sleep(0.12)
+        if not isinstance(sj, dict):
+            continue
+        tm = sj.get("tracking_method") or ""
+        itypes = " ".join(sj.get("items_types") or [])
+        if not ("Voluminoso" in tm or "bulky" in itypes):
+            continue   # SO os VOLUMOSOS
+        hist = sj.get("status_history") or {}
+        entregue = "sim" if hist.get("date_delivered") else "nao"
+        envio = f"{sj.get('status')}/{sj.get('substatus')}"
+        cid = r.get("claim_id")
+        ret = ml_get(f"/post-purchase/v2/claims/{cid}/returns", access) if cid else None
+        time.sleep(0.1)
+        if isinstance(ret, dict) and not ret.get("error") and ret.get("_http") != 404:
+            rstatus, money = (ret.get("status") or "-"), (ret.get("status_money") or "-")
+        else:
+            rstatus, money = "sem_retorno", "-"
+        achados.append((oid, entregue, rstatus))
+        print(f"{oid:<16} {entregue:<8} {envio:<26} {rstatus:<13} {money:<10} {(r.get('titulo') or '')[:34]}", flush=True)
         if (idx + 1) % 100 == 0:
-            print(f"   ...{idx+1}/{len(rows)}", flush=True)
-    nvol = sum(1 for a in achados if a[1] == "sim")
-    print(f"\n=== {len(achados)} candidatos a coleta (retorno nao concluido) | volumosos: {nvol} ===", flush=True)
+            print(f"   ...{idx+1}/{len(rows)} varridos", flush=True)
+    # resumo por estado do retorno (volumosos)
+    from collections import Counter
+    buck = Counter()
+    for _oid, _entr, _rst in achados:
+        if _rst in ("failed", "expired", "not_delivered"):
+            buck["NAO VOLTOU (coleta/perda)"] += 1
+        elif _rst == "delivered":
+            buck["VOLTOU (reestocar)"] += 1
+        elif _rst in ("shipped", "label_generated", "in_transit", "ready_to_ship"):
+            buck["VOLTANDO (antes de expirar)"] += 1
+        elif _rst == "cancelled":
+            buck["cancelado"] += 1
+        else:
+            buck[_rst or "sem_retorno"] += 1
+    print(f"\n=== {len(achados)} mediacoes VOLUMOSAS (candidatas a coleta) ===", flush=True)
+    for k, v in buck.most_common():
+        print(f"  {v:4d}  {k}")
 
 
 # ---------------- Principal ----------------
