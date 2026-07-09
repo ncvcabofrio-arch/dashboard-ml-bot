@@ -3,6 +3,7 @@ name: Puxador de Devolucoes (RMA)
 on:
   schedule:
     - cron: "*/30 * * * *"   # a cada 30 min (devolucao nao precisa ser tao rapida quanto venda)
+    - cron: "0 6 * * *"      # 1x/dia (~3h BRT): classificar_coleta (pesado)
   workflow_dispatch:          # permite rodar na mao pelo botao "Run workflow"
     inputs:
       modo:
@@ -85,4 +86,18 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
           MODO:              mediacoes
+        run: python puxador_devolucoes.py
+
+      # 1x/dia (cron das 6h UTC): reclassifica a coleta pela logistica do retorno.
+      - name: Classificar coleta (diario)
+        if: github.event.schedule == '0 6 * * *'
+        env:
+          ML_CLIENT_ID:      ${{ secrets.ML_CLIENT_ID }}
+          ML_CLIENT_SECRET:  ${{ secrets.ML_CLIENT_SECRET }}
+          ML_REFRESH_TOKEN:  ${{ secrets.ML_REFRESH_TOKEN }}
+          SUPABASE_URL:      ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY:      ${{ secrets.SUPABASE_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+          MODO:              classificar_coleta
         run: python puxador_devolucoes.py
