@@ -304,11 +304,15 @@ def modo_lote():
             ok, log = executar(sug["item_id"], access, entrar, sair)
             if ok:
                 marcar_status(sug["item_id"], "aplicada"); res = "aplicado"
+            elif any("START_DATE" in l for l in log):
+                # promoção com janela de data manual (ex.: oferta-relâmpago): pula limpo
+                marcar_status(sug["item_id"], "manual"); res = "manual"
             else:
                 res = "erro_entrar"
             det = " | ".join(log)
         cont[res] = cont.get(res, 0) + 1
-        tag = {"aplicado": "✅", "simulado": "•", "erro_entrar": "⛔", "sem_alvo": "⚠️"}.get(res, "·")
+        tag = {"aplicado": "✅", "simulado": "•", "erro_entrar": "⛔",
+               "sem_alvo": "⚠️", "manual": "⏭️"}.get(res, "·")
         print(f"{tag} [{res}] {sug['item_id']} {str(sug.get('titulo'))[:28]} -> {det}", flush=True)
         time.sleep(0.3)
 
