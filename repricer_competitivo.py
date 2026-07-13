@@ -127,67 +127,42 @@ def consulta_do_item(it):
     return " ".join(sig) if sig else (titulo[:40] or None)
 
 
-def _preco_seller(r):
-    s = r.get("seller_id")
-    if s is None:
-        s = (r.get("seller") or {}).get("id")
-    return s, r.get("price")
-
-
-def _site_search(q, sid, access):
+def _busca_catalogo(q, sid, access, tipo):
+    """Acha produto(s) de catálogo (por EAN ou por texto) e lista os concorrentes deles.
+    Substitui /sites/search, que o ML bloqueia (403) para o app. Exclui você."""
     from urllib.parse import quote
-    st, s = rec.get(f"/sites/MLB/search?q={quote(str(q))}&condition=new&limit=50", access)
-    raw = (s.get("results") if isinstance(s, dict) else None) or []
-    out = []
-    for r in raw:
-        seller, preco = _preco_seller(r)
-        try:
-            if str(seller) != str(sid) and preco:
-                out.append(float(preco))
-        except (TypeError, ValueError):
-            pass
+    if tipo == "ean":
+        url = f"/products/search?status=active&site_id=MLB&product_identifier={q}"
+    else:
+        url = f"/products/search?status=active&site_id=MLB&q={quote(str(q))}"
+    st, d = rec.get(url, access)
+    prods = (d.get("results") if isinstance(d, dict) else None) or []
+    precos = []
+    usados = []
+    for prod in prods[:2]:   # os 2 produtos mais relevantes
+        if prod.get("id"):
+            c = concorrentes(prod["id"], sid, access)
+            precos += c
+            usados.append(f"{prod['id']}({len(c)})")
     if DEBUG:
-        obs = ""
-        if isinstance(s, dict) and st >= 400:
-            obs = str({k: s.get(k) for k in ("message", "error", "status", "cause")})[:180]
-        elif not isinstance(s, dict):
-            obs = str(s)[:180]
-        print(f"    [site q='{str(q)[:45]}'] HTTP {st} | resultados={len(raw)} conc={len(out)} {obs}", flush=True)
-    return out
+        print(f"    [products/search {tipo}='{str(q)[:40]}'] HTTP {st} | produtos={len(prods)} "
+              f"-> {', '.join(usados) or 'nenhum'} | conc={len(precos)}", flush=True)
+    return sorted(precos)
 
 
 def concorrencia_mercado(ean, consulta, titulo, sid, access):
-    """Concorrentes para itens FORA do catálogo. Ordem de preferência:
-       1) EAN: /products/search?product_identifier=EAN -> itens do produto  +  /sites/MLB/search?q=EAN
-       2) Marca+modelo (como um humano busca): /sites/MLB/search?q=MARCA MODELO
-       3) Título completo (último recurso, aproximado)
+    """Concorrentes via CATÁLOGO (a busca de listagens /sites/search é bloqueada pelo ML):
+       1) EAN -> produto de catálogo -> concorrentes
+       2) marca+modelo (texto) -> produto de catálogo -> concorrentes
        Retorna (precos_ordenados, origem). Exclui você."""
     if ean:
-        precos = []
-        st, d = rec.get(f"/products/search?status=active&site_id=MLB&product_identifier={ean}", access)
-        prods = (d.get("results") if isinstance(d, dict) else None) or []
-        if DEBUG:
-            obs = str(d)[:180] if (not isinstance(d, dict) or st >= 400) else ""
-            print(f"    [products/search EAN {ean}] HTTP {st} | produtos={len(prods)} {obs}", flush=True)
-        for prod in prods[:3]:
-            if prod.get("id"):
-                c = concorrentes(prod["id"], sid, access)
-                if DEBUG:
-                    print(f"      produto {prod['id']} -> {len(c)} concorrentes", flush=True)
-                precos += c
-        precos += _site_search(ean, sid, access)
+        precos = _busca_catalogo(ean, sid, access, "ean")
         if precos:
-            return sorted(precos), f"EAN {ean}"
-    # 2) marca + modelo (curto, como o usuário busca no site)
+            return precos, f"EAN {ean}"
     if consulta:
-        precos = _site_search(consulta, sid, access)
+        precos = _busca_catalogo(consulta, sid, access, "q")
         if precos:
-            return sorted(precos), f"marca+modelo '{consulta}'"
-    # 3) título completo (aproximado, último recurso)
-    if titulo:
-        precos = _site_search(titulo, sid, access)
-        if precos:
-            return sorted(precos), "título (aprox.)"
+            return precos, f"busca '{consulta}'"
     return [], None
 
 
