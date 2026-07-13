@@ -497,8 +497,83 @@ def modo_desconto():
         print("\n=== não criou. Veja a resposta acima. ===", flush=True)
 
 
+def modo_desconto_busca():
+    """SONDA: acha itens que PODEM receber um desconto individual e já calcula o
+    preço pra bater a MARGEM_ALVO. Só leitura. Use SELLER_ID + MARGEM_ALVO (sem ITEM_ID)."""
+    import repricer_sugestoes as rec
+    rec.preload()
+
+    access, sid = access_da_conta(SELLER_ID)
+    if not access:
+        print(f"não autentiquei a conta {SELLER_ID}.", flush=True); return
+    alvo = float(MARGEM_ALVO)
+    quantos = int(os.environ.get("QUANTOS", "15"))
+
+    # candidatos = itens que o robô marcou 'entrar' (têm custo e SEM promo ativa)
+    base = (sb.table("repricer_sugestoes").select("item_id, titulo, sku, preco_atual, custo")
+            .eq("seller_id", str(SELLER_ID)).eq("acao", "entrar")
+            .not_.is_("custo", "null").limit(quantos * 3).execute().data) or []
+    # de-duplica por item
+    vistos, fila = set(), []
+    for s in base:
+        if s["item_id"] in vistos:
+            continue
+        vistos.add(s["item_id"]); fila.append(s)
+
+    print(f"===== SONDA DESCONTO INDIVIDUAL | conta {sid} | margem-alvo {alvo:.0f}% =====", flush=True)
+    print(f"analisando até {quantos} candidatos (marcados 'entrar', com custo)...\n", flush=True)
+
+    achados = []
+    for s in fila:
+        if len(achados) >= quantos:
+            break
+        item_id = s["item_id"]
+        st, it = req("GET", f"/items/{item_id}", access)
+        if not isinstance(it, dict):
+            continue
+        if (it.get("status") != "active") or (it.get("condition") != "new"):
+            continue
+        p0 = float(it.get("price") or 0)
+        if not p0:
+            continue
+        cat, ltid = it.get("category_id"), it.get("listing_type_id")
+        sku = it.get("seller_sku") or it.get("seller_custom_field") or s.get("sku")
+        custo = rec.custo_de(sku)
+        if custo is None:
+            custo = float(s["custo"]) if s.get("custo") is not None else None
+        if custo is None:
+            continue
+        ativas = [o for o in promos_do_item(item_id, access) if isinstance(o, dict) and eh_ativa(o)]
+        if any((o.get("type") or "") in ("DEAL", "PRICE_DISCOUNT") for o in ativas):
+            continue   # em DEAL (bloqueia) ou já com desconto próprio
+        frete, _ = rec.frete_de(sku, item_id, access)
+        pb_min, pb_max = round(p0 * 0.20, 2), round(p0 * 0.95, 2)
+        deal, mres = _preco_para_margem(rec, alvo, cat, ltid, frete, custo, access, pb_min, pb_max)
+        if deal is None:
+            continue   # nem 5% de desconto mantém a margem-alvo
+        deal = min(max(deal, pb_min), pb_max)
+        desc = (1 - deal / p0) * 100
+        if desc < 5:
+            continue   # ML não aceita desconto < 5%; item já bate a margem sozinho
+        m, com, recebe = _margem_no_preco(rec, deal, cat, ltid, frete, custo, access)
+        achados.append((item_id, it.get("title"), p0, deal, desc, recebe, m))
+        time.sleep(0.15)
+
+    if not achados:
+        print("Nenhum candidato limpo agora (todos sem custo, em DEAL, ou desconto <5%).", flush=True)
+        return
+    achados.sort(key=lambda x: -x[4])   # maior desconto primeiro (mais competitivo)
+    print(f"{'ITEM':<15} {'cheio':>9} {'deal':>9} {'desc':>6} {'recebe':>9} {'marg':>6}  título", flush=True)
+    for item_id, tit, p0, deal, desc, recebe, m in achados:
+        print(f"{item_id:<15} {p0:>9.2f} {deal:>9.2f} {desc:>5.1f}% {recebe:>9.2f} {m:>5.1f}%  {str(tit)[:34]}", flush=True)
+    print(f"\n{len(achados)} candidato(s). Pegue um MLB e rode com ITEM_ID + MARGEM_ALVO "
+          f"(confirma=NAO pra revisar, depois SIM).", flush=True)
+
+
 def main():
-    if ITEM_ID and (MARGEM_ALVO or DEAL_PRICE):
+    if not ITEM_ID and SELLER_ID and MARGEM_ALVO:
+        modo_desconto_busca()
+    elif ITEM_ID and (MARGEM_ALVO or DEAL_PRICE):
         modo_desconto()
     elif ITEM_ID:
         modo_item()
