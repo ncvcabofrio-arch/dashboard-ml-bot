@@ -99,29 +99,77 @@ def path_sair(item_id, o):
     return f"/seller-promotions/items/{item_id}?" + "&".join(params)
 
 
-def entrar_body_path(item_id, o):
-    body = {"promotion_id": o.get("id"), "promotion_type": o.get("type")}
-    if o.get("ref_id"):
-        body["offer_id"] = o["ref_id"]
-    # tipos com preço/data definidos pelo vendedor: manda preço e as datas do candidato
-    if o.get("type") in ("DEAL", "PRICE_DISCOUNT", "LIGHTNING", "DOD", "VOLUME"):
-        preco = o.get("price") or o.get("suggested_discounted_price")
-        if preco:
-            body["deal_price"] = preco
-        if o.get("start_date"):
-            body["start_date"] = o["start_date"]
-        if o.get("finish_date"):
-            body["finish_date"] = o["finish_date"]
+COM_OFFER = {"SMART", "PRICE_MATCHING", "PRICE_MATCHING_MELI_ALL",
+             "MARKETPLACE_CAMPAIGN", "VOLUME", "SELLER_CAMPAIGN", "PRE_NEGOTIATED", "BANK"}
+
+
+def entrar_body_path(item_id, o, extra=None):
+    """Corpo do POST por tipo de promoção (conforme docs da Central de Promoções)."""
+    t = o.get("type")
+    body = {"promotion_type": t}
+    if t in COM_OFFER:
+        # co-financiadas: promotion_id + offer_id (ref_id completo do candidato)
+        body["promotion_id"] = o.get("id")
+        if o.get("ref_id"):
+            body["offer_id"] = o["ref_id"]
+    elif t == "DEAL":
+        body["promotion_id"] = o.get("id")
+        p = o.get("price") or o.get("suggested_discounted_price")
+        if p:
+            body["deal_price"] = p
+    elif t == "DOD":
+        p = o.get("price") or o.get("suggested_discounted_price")
+        if p:
+            body["deal_price"] = p
+    elif t == "LIGHTNING":
+        p = o.get("price") or o.get("suggested_discounted_price")
+        if p:
+            body["deal_price"] = p
+        stk = (o.get("stock") or {}).get("min")
+        if stk:
+            body["stock"] = stk
+    elif t == "PRICE_DISCOUNT":
+        p = o.get("suggested_discounted_price") or o.get("price")
+        if p:
+            body["deal_price"] = p
+    else:
+        body["promotion_id"] = o.get("id")
+        if o.get("ref_id"):
+            body["offer_id"] = o["ref_id"]
+    if extra:
+        body.update(extra)
     return f"/seller-promotions/items/{item_id}?app_version=v2", body
 
 
-def marcar_aplicada(item_id):
-    """Marca TODAS as linhas aprovadas desse item como aplicadas (limpa duplicatas)."""
+def detalhe_promo(pid, ptype, access):
+    st, d = req("GET", f"/seller-promotions/promotions/{pid}?promotion_type={ptype}&app_version=v2", access)
+    return d if isinstance(d, dict) else {}
+
+
+def fazer_entrar(item_id, o, access):
+    """Entra na promoção; se reclamar de START_DATE, busca as datas no detalhe e reenvia."""
+    path, body = entrar_body_path(item_id, o)
+    st, resp = req("POST", path, access, body=body)
+    if st == 400 and "START_DATE" in json.dumps(resp, ensure_ascii=False):
+        det = detalhe_promo(o.get("id"), o.get("type"), access)
+        extra = {}
+        if det.get("start_date"):
+            extra["start_date"] = det["start_date"]
+        if det.get("finish_date"):
+            extra["finish_date"] = det["finish_date"]
+        if extra:
+            path, body = entrar_body_path(item_id, o, extra)
+            st, resp = req("POST", path, access, body=body)
+    return st, resp
+
+
+def marcar_status(item_id, novo):
+    """Muda o status de TODAS as linhas aprovadas desse item (limpa duplicatas)."""
     try:
-        (sb.table("repricer_sugestoes").update({"status": "aplicada"})
+        (sb.table("repricer_sugestoes").update({"status": novo})
          .eq("item_id", item_id).eq("status", "aprovada").execute())
     except Exception as e:
-        print(f"   (aviso: não marquei aplicada: {e})", flush=True)
+        print(f"   (aviso: não atualizei status: {e})", flush=True)
 
 
 def plano_item(item_id, access, alvo_id, alvo_type, acao, so_entrar=False):
@@ -150,8 +198,7 @@ def executar(item_id, access, entrar, sair):
     """Executa: entra primeiro; só sai se entrar der certo. Retorna (ok, log)."""
     log = []
     if entrar:
-        path, body = entrar_body_path(item_id, entrar)
-        st, resp = req("POST", path, access, body=body)
+        st, resp = fazer_entrar(item_id, entrar, access)
         log.append(f"entrar {entrar.get('name') or entrar.get('type')}: HTTP {st}")
         if not (200 <= st < 300):
             log.append(f"  resp: {json.dumps(resp, ensure_ascii=False)[:200]}")
@@ -251,7 +298,7 @@ def modo_lote():
         else:
             ok, log = executar(sug["item_id"], access, entrar, sair)
             if ok:
-                marcar_aplicada(sug["item_id"]); res = "aplicado"
+                marcar_status(sug["item_id"], "aplicada"); res = "aplicado"
             else:
                 res = "erro_entrar"
             det = " | ".join(log)
