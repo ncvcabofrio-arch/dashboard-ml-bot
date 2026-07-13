@@ -13,7 +13,8 @@ from supabase import create_client
 from ml_auth import obter_access
 
 API = "https://api.mercadolibre.com"
-AMOSTRA = int(os.environ.get("AMOSTRA", "40"))        # itens ativos por conta (suba quando quiser)
+# 0 = TODOS os ativos (pagina tudo). Ponha um número só pra testar rápido (ex.: 40).
+MAX_ITENS = int(os.environ.get("MAX_ITENS", os.environ.get("AMOSTRA", "0")))
 MARGEM_PADRAO = float(os.environ.get("MARGEM_MIN", "18"))
 sb = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"])
 
@@ -39,6 +40,59 @@ def contas():
     if not cs and seed:
         cs = [(None, seed)]
     return cs
+
+
+def todos_ativos(sid, access):
+    """Retorna TODOS os item_ids ativos da conta (pagina de verdade).
+    Usa offset até 1000; se a conta tiver mais que isso, muda pro modo 'scan'.
+    Se MAX_ITENS > 0, corta nesse total (útil só pra teste rápido)."""
+    ids = []
+    total = None
+    offset = 0
+    while True:
+        st, d = get(f"/users/{sid}/items/search?status=active&limit=50&offset={offset}", access)
+        if not isinstance(d, dict):
+            break
+        res = d.get("results") or []
+        ids.extend(res)
+        total = (d.get("paging") or {}).get("total")
+        offset += 50
+        if MAX_ITENS and len(ids) >= MAX_ITENS:
+            break
+        if not res or offset >= 1000 or (total is not None and offset >= total):
+            break
+
+    # conta grande (> 1000 ativos): refaz pelo 'scan', que não tem teto
+    if not (MAX_ITENS and len(ids) >= MAX_ITENS) and total and total > 1000:
+        ids = []
+        scroll = None
+        while True:
+            path = f"/users/{sid}/items/search?status=active&search_type=scan&limit=100"
+            if scroll:
+                path += f"&scroll_id={scroll}"
+            st, d = get(path, access)
+            if not isinstance(d, dict):
+                break
+            res = d.get("results") or []
+            if not res:
+                break
+            ids.extend(res)
+            scroll = d.get("scroll_id")
+            if MAX_ITENS and len(ids) >= MAX_ITENS:
+                break
+            if not scroll:
+                break
+
+    # dedup preservando ordem
+    seen = set()
+    out = []
+    for i in ids:
+        if i not in seen:
+            seen.add(i)
+            out.append(i)
+    if MAX_ITENS:
+        out = out[:MAX_ITENS]
+    return out, total
 
 
 def custo_de(sku):
@@ -156,9 +210,9 @@ def main():
     for seller_id, refresh in contas():
         access, sid, refresh = obter_access(sb, seller_id, refresh)
         print(f"\n===== CONTA {sid} =====", flush=True)
-        st, busca = get(f"/users/{sid}/items/search?status=active&limit={AMOSTRA}", access)
-        ids = (busca or {}).get("results", []) if isinstance(busca, dict) else []
-        print(f"itens ativos: {len(ids)}", flush=True)
+        ids, total = todos_ativos(sid, access)
+        cap = f" (varrendo {len(ids)}, limite de teste MAX_ITENS={MAX_ITENS})" if MAX_ITENS else ""
+        print(f"itens ativos: {len(ids)} de {total if total is not None else '?'}{cap}", flush=True)
 
         for item_id in ids:
             ofertas = ofertas_do_item(item_id, access)
