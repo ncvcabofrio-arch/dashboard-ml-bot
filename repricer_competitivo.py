@@ -17,11 +17,17 @@ Uso: SELLER_ID=<conta>  [MAX_ITENS=30]  [MARGEM_MIN=18]
 Só leitura: usa GET /items/{id}, /items/{id}/price_to_win, /products/{pid}/items.
 """
 import os
+import re
 import time
 import repricer_sugestoes as rec
 from ml_auth import obter_access
 
 API = rec.API
+NORM_CUSTO = {}   # sku normalizado -> sku original na tabela produtos (só p/ DIAGNÓSTICO)
+
+
+def _norm(s):
+    return re.sub(r"\s+", "", str(s)).upper() if s else ""
 SELLER_ID = (os.environ.get("SELLER_ID") or "").strip()
 MAX_ITENS = int(os.environ.get("MAX_ITENS", "30"))
 EPS = 0.01
@@ -133,12 +139,13 @@ def analisar(item_id, access, sid):
     st, it = rec.get(f"/items/{item_id}?include_attributes=all", access)
     if not isinstance(it, dict):
         return None
+    raw_aq = it.get("available_quantity")
     try:
-        aq = int(it.get("available_quantity"))
+        aq = int(raw_aq)
     except (TypeError, ValueError):
         aq = None
     if aq is not None and aq <= 0:
-        return {"item_id": item_id, "titulo": it.get("title"), "acao": "sem_estoque",
+        return {"item_id": item_id, "titulo": it.get("title"), "aq": raw_aq, "acao": "sem_estoque",
                 "detalhe": "estoque zero"}
     p0 = float(it.get("price") or 0)
     cat, ltid = it.get("category_id"), it.get("listing_type_id")
@@ -147,16 +154,21 @@ def analisar(item_id, access, sid):
     catalog_listing = bool(it.get("catalog_listing"))   # SÓ True = compete de fato no catálogo
     custo = rec.custo_de(sku)
     if custo is None or not p0:
-        return {"item_id": item_id, "titulo": it.get("title"), "sku": sku, "acao": "sem_custo",
-                "detalhe": f"sem custo (SKU={sku or '—'}) | cheio R${p0 or '—'}"}
+        nk = _norm(sku)
+        if nk and nk in NORM_CUSTO:
+            extra = f" [ESTÁ na tabela como '{NORM_CUSTO[nk]}' — só diferença de formato!]"
+        else:
+            extra = " [não está na tabela produtos]"
+        return {"item_id": item_id, "titulo": it.get("title"), "sku": sku, "aq": raw_aq,
+                "acao": "sem_custo", "detalhe": f"sem custo (SKU={sku or '—'}){extra}"}
     frete, _ = rec.frete_de(sku, item_id, access)
     piso, grupo = rec.margem_minima_do(sku)
     pmin = preco_piso(piso, cat, ltid, frete, custo, access, p0)
     m_cheio, _, _ = margem_no_preco(p0, cat, ltid, frete, custo, access)
 
-    base = {"item_id": item_id, "titulo": it.get("title"), "sku": sku, "grupo": grupo, "piso": piso,
-            "preco_cheio": round(p0, 2), "margem_cheio": round(m_cheio, 1),
-            "preco_piso": pmin, "catalog": catalog_listing}
+    base = {"item_id": item_id, "titulo": it.get("title"), "sku": sku, "aq": raw_aq,
+            "grupo": grupo, "piso": piso, "preco_cheio": round(p0, 2),
+            "margem_cheio": round(m_cheio, 1), "preco_piso": pmin, "catalog": catalog_listing}
 
     if not catalog_listing:
         # Fora do catálogo -> busca concorrência por EAN (e por título como plano B)
@@ -240,6 +252,8 @@ def main():
     if not access:
         print(f"não autentiquei a conta {SELLER_ID}.", flush=True); return
 
+    for k in rec.CUSTOS:
+        NORM_CUSTO[_norm(k)] = k
     amostra = ", ".join(list(rec.CUSTOS.keys())[:15])
     print(f"amostra de SKUs na tabela 'produtos': {amostra}\n", flush=True)
 
@@ -261,7 +275,7 @@ def main():
                "nao_perseguir_ean": "🛑", "subir_margem": "⬆️", "manter_ganhando": "🏆",
                "ja_competitivo": "✅", "perde_nao_preco": "⚠️", "sem_concorrencia": "·",
                "sem_match": "🔍", "sem_dado": "?", "sem_custo": "∅"}.get(r["acao"], "·")
-        print(f"{tag} [{r['acao']}] {item_id} {str(r.get('titulo'))[:34]} "
+        print(f"{tag} [{r['acao']}] {item_id} est={r.get('aq')} {str(r.get('titulo'))[:30]} "
               f"| cheio R${r.get('preco_cheio')} (margem {r.get('margem_cheio')}%) "
               f"| {r.get('detalhe')}", flush=True)
         time.sleep(0.1)
