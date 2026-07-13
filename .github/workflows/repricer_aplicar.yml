@@ -1,67 +1,50 @@
-name: Repricer - Aplicador (Fase 2)
+name: Repricer - Desconto individual (teste 1 item)
 
-# ESCREVE na Central de Promoções. Roda só quando voce clicar.
-# 3 modos: item_id (um item) | seller_id (lote) | nenhum (descoberta).
+# Cria um DESCONTO PRÓPRIO (PRICE_DISCOUNT) num único anúncio, com o preço
+# calculado pra bater a MARGEM-ALVO. Nunca mexe no preço do anúncio — é oferta
+# na Central de Promoções e some quando expira (máx 14 dias).
 # Padrao = SIMULACAO. So escreve com confirma=SIM.
 on:
   workflow_dispatch:
     inputs:
       item_id:
-        description: "UM item (modo teste). Ex: MLB4214321589"
+        description: "O anúncio. Ex: MLB4214321589"
+        type: string
+        required: true
+        default: ""
+      margem_alvo:
+        description: "Margem % planejada (ex 18). O robô calcula o preço pra bater isso."
+        type: string
+        required: false
+        default: "18"
+      dias:
+        description: "Duração do desconto em dias (máx 14)"
+        type: string
+        required: false
+        default: "14"
+      deal_price:
+        description: "(Opcional) força um preço fixo em vez de calcular pela margem"
         type: string
         required: false
         default: ""
-      seller_id:
-        description: "Conta pro LOTE (aprovadas). Vazio + item vazio = so listar contas"
+      top_deal_price:
+        description: "(Opcional) preço menor só p/ clientes nível 3-6 (loyalty)"
         type: string
         required: false
         default: ""
-      limite:
-        description: "Lote: quantas aprovadas por rodada"
-        type: string
-        required: false
-        default: "5"
       confirma:
-        description: "Escrever de verdade? (NAO = simulacao)"
+        description: "Criar de verdade? (NAO = simulacao)"
         type: choice
         required: true
         default: "NAO"
         options: ["NAO", "SIM"]
-      so_ganho:
-        description: "Lote: so trocas 'dinheiro na mesa' (acao=trocar)?"
-        type: choice
-        required: true
-        default: "NAO"
-        options: ["NAO", "SIM"]
-      pular_sair:
-        description: "Lote: pular os 'sair' (aplica so ganhos entrar/trocar)?"
-        type: choice
-        required: true
-        default: "NAO"
-        options: ["NAO", "SIM"]
-      so_entrar:
-        description: "Item: so ENTRAR (nao sai de nada)?"
-        type: choice
-        required: true
-        default: "NAO"
-        options: ["NAO", "SIM"]
-      promo_id:
-        description: "Item (opcional): forcar promotion_id alvo"
-        type: string
-        required: false
-        default: ""
-      promo_type:
-        description: "Item (opcional): tipo do alvo, ex SMART"
-        type: string
-        required: false
-        default: ""
 
 concurrency:
   group: ml-puxador
   cancel-in-progress: false
 
 jobs:
-  aplicar:
+  desconto:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -70,20 +53,17 @@ jobs:
           python-version: '3.11'
       - name: Instalar dependencias
         run: pip install requests supabase
-      - name: Aplicar (ou simular)
+      - name: Criar desconto (ou simular)
         env:
           ML_CLIENT_ID:     ${{ secrets.ML_CLIENT_ID }}
           ML_CLIENT_SECRET: ${{ secrets.ML_CLIENT_SECRET }}
           ML_REFRESH_TOKEN: ${{ secrets.ML_REFRESH_TOKEN }}
           SUPABASE_URL:     ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY:     ${{ secrets.SUPABASE_KEY }}
-          ITEM_ID:    ${{ github.event.inputs.item_id }}
-          SELLER_ID:  ${{ github.event.inputs.seller_id }}
-          LIMITE:     ${{ github.event.inputs.limite }}
-          CONFIRMA:   ${{ github.event.inputs.confirma }}
-          SO_GANHO:   ${{ github.event.inputs.so_ganho }}
-          PULAR_SAIR: ${{ github.event.inputs.pular_sair }}
-          SO_ENTRAR:  ${{ github.event.inputs.so_entrar }}
-          PROMO_ID:   ${{ github.event.inputs.promo_id }}
-          PROMO_TYPE: ${{ github.event.inputs.promo_type }}
+          ITEM_ID:        ${{ github.event.inputs.item_id }}
+          MARGEM_ALVO:    ${{ github.event.inputs.margem_alvo }}
+          DIAS:           ${{ github.event.inputs.dias }}
+          DEAL_PRICE:     ${{ github.event.inputs.deal_price }}
+          TOP_DEAL_PRICE: ${{ github.event.inputs.top_deal_price }}
+          CONFIRMA:       ${{ github.event.inputs.confirma }}
         run: python repricer_aplicar.py
