@@ -34,6 +34,11 @@ PULAR_SAIR = (os.environ.get("PULAR_SAIR") or "").strip().upper() == "SIM"
 PROMO_ID = (os.environ.get("PROMO_ID") or "").strip()
 PROMO_TYPE = (os.environ.get("PROMO_TYPE") or "").strip()
 LIMITE = int(os.environ.get("LIMITE", "5"))
+# --- modo DESCONTO INDIVIDUAL (PRICE_DISCOUNT criado por nós) ---
+MARGEM_ALVO = (os.environ.get("MARGEM_ALVO") or "").strip()   # ex "18" (margem % planejada)
+DIAS = int(os.environ.get("DIAS", "14"))                       # duração do desconto (máx 14)
+DEAL_PRICE = (os.environ.get("DEAL_PRICE") or "").strip()      # opcional: força o preço (teste cru)
+TOP_DEAL_PRICE = (os.environ.get("TOP_DEAL_PRICE") or "").strip()  # opcional: preço p/ nível 3-6
 sb = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"])
 SEED = os.environ.get("ML_REFRESH_TOKEN", "")
 
@@ -337,8 +342,165 @@ def modo_descoberta():
         print(f"  seller_id={sid}  |  apelido: {nick}  |  aprovadas: {n}", flush=True)
 
 
+# ---------------- MODO 4: DESCONTO INDIVIDUAL (PRICE_DISCOUNT nosso) ----------------
+# Cria um desconto próprio no item, com o preço calculado para bater uma MARGEM-ALVO.
+# Nunca mexe no preço do anúncio: é uma oferta na Central de Promoções (some quando expira).
+# Chamada oficial (doc ML): POST /seller-promotions/items/{id}?app_version=v2
+#   body {deal_price, top_deal_price?, start_date, finish_date, promotion_type:"PRICE_DISCOUNT"}
+# Regras: reputação verde, item ativo/novo/exposição não-gratuita; desconto entre 5% e 80%;
+#         prazo máx 14 dias; se o item estiver num DEAL, só aplica quando o DEAL acabar.
+
+def _datas_desconto():
+    from datetime import date, timedelta
+    hoje = date.today()
+    dias = max(1, min(DIAS, 14))
+    fim = hoje + timedelta(days=dias - 1)   # start hoje 00:00 .. fim 23:59 => 'dias' dias corridos
+    return f"{hoje.isoformat()}T00:00:00", f"{fim.isoformat()}T00:00:00"
+
+
+def _margem_no_preco(rec, pb, cat, ltid, frete, custo, access):
+    """Mesma fórmula do robô de sugestões, com meli%=0 (desconto próprio, sem cofinanciamento)."""
+    com = rec.comissao(round(pb, 2), cat, ltid, access) or 0
+    recebe = pb - com - frete
+    margem = ((recebe - custo) / pb * 100) if pb else -999
+    return margem, round(com, 2), round(recebe, 2)
+
+
+def _preco_para_margem(rec, alvo_pct, cat, ltid, frete, custo, access, lo, hi):
+    """Acha, por busca binária, o preço cujo 'Você recebe' rende a margem-alvo.
+    A margem cresce com o preço, então dá pra bissecar entre lo(=maior desconto) e hi(=menor)."""
+    m_lo, _, _ = _margem_no_preco(rec, lo, cat, ltid, frete, custo, access)
+    m_hi, _, _ = _margem_no_preco(rec, hi, cat, ltid, frete, custo, access)
+    if m_hi < alvo_pct:          # nem no menor desconto (5%) a margem alcança o alvo
+        return None, m_hi
+    if m_lo >= alvo_pct:         # já no maior desconto (80%) a margem passa do alvo
+        return round(lo, 2), m_lo
+    for _ in range(38):
+        mid = (lo + hi) / 2
+        m, _, _ = _margem_no_preco(rec, mid, cat, ltid, frete, custo, access)
+        if m < alvo_pct:
+            lo = mid
+        else:
+            hi = mid
+    return round((lo + hi) / 2, 2), alvo_pct
+
+
+def modo_desconto():
+    import repricer_sugestoes as rec
+    rec.preload()   # carrega custos (produtos) e pisos (etiquetas/grupos)
+
+    access, sid, it = dono(ITEM_ID)
+    if not access:
+        print(f"não achei o item {ITEM_ID} em nenhuma conta.", flush=True); return
+
+    p0 = float(it.get("price") or 0)
+    cat = it.get("category_id")
+    ltid = it.get("listing_type_id")
+    sku = it.get("seller_sku") or it.get("seller_custom_field")
+    custo = rec.custo_de(sku)
+    frete, forig = rec.frete_de(sku, ITEM_ID, access)
+
+    modo = "⚠️ EXECUTAR" if CONFIRMA else "SIMULAÇÃO (dry-run)"
+    print(f"===== DESCONTO INDIVIDUAL | {ITEM_ID} | conta {sid} | {modo} =====", flush=True)
+    print(f"título: {it.get('title')}", flush=True)
+    print(f"preço cheio: R${p0:.2f} | custo: {custo} | frete(list_cost): R${frete:.2f} ({forig})"
+          f" | categoria {cat} | tipo {ltid}", flush=True)
+
+    # --- elegibilidade (só avisa; não bloqueia a simulação) ---
+    st, u = req("GET", f"/users/{sid}", access)
+    nivel = ((u or {}).get("seller_reputation") or {}).get("level_id") if isinstance(u, dict) else None
+    if nivel and "green" not in str(nivel):
+        print(f"⚠️ reputação '{nivel}' (a doc pede VERDE p/ PRICE_DISCOUNT).", flush=True)
+    if (it.get("status") or "") != "active":
+        print(f"⚠️ item não está 'active' (status={it.get('status')}).", flush=True)
+    if (it.get("condition") or "") != "new":
+        print(f"⚠️ item não é 'new' (condition={it.get('condition')}).", flush=True)
+    ativas = [o for o in promos_do_item(ITEM_ID, access) if isinstance(o, dict) and eh_ativa(o)]
+    if any((o.get("type") or "") == "DEAL" for o in ativas):
+        print("⚠️ item está num DEAL — o PRICE_DISCOUNT só aplica quando o DEAL terminar.", flush=True)
+
+    if custo is None and not DEAL_PRICE:
+        print("Sem custo cadastrado (tabela produtos) — não dá pra calcular margem. "
+              "Preencha o custo ou passe DEAL_PRICE pra teste cru.", flush=True)
+        return
+    if not p0:
+        print("Item sem preço — abortei.", flush=True); return
+
+    # faixa permitida pela doc: desconto entre 5% (preço=95%) e 80% (preço=20%)
+    pb_min = round(p0 * 0.20, 2)   # maior desconto (80% off)
+    pb_max = round(p0 * 0.95, 2)   # menor desconto (5% off)
+
+    # --- decide o deal_price ---
+    if DEAL_PRICE:
+        deal = round(float(DEAL_PRICE), 2)
+        origem = "DEAL_PRICE (forçado)"
+    elif MARGEM_ALVO:
+        alvo = float(MARGEM_ALVO)
+        deal, m_result = _preco_para_margem(rec, alvo, cat, ltid, frete, custo, access, pb_min, pb_max)
+        if deal is None:
+            # nem o menor desconto (5%) mantém a margem-alvo -> melhor NÃO entrar
+            m_cheio, _, rec_cheio = _margem_no_preco(rec, p0, cat, ltid, frete, custo, access)
+            print(f"\n✋ NÃO ENTRAR: com o menor desconto possível (5% -> R${pb_max:.2f}) a margem "
+                  f"cai pra {m_result:.1f}%, abaixo do alvo {alvo:.0f}%.", flush=True)
+            print(f"   No preço cheio a margem é {m_cheio:.1f}% (recebe R${rec_cheio:.2f}). "
+                  f"Melhor deixar sem desconto.", flush=True)
+            return
+        origem = f"margem-alvo {alvo:.0f}%"
+    else:
+        print("Passe MARGEM_ALVO (ex 18) ou DEAL_PRICE.", flush=True); return
+
+    # trava na faixa 5%–80%
+    deal = min(max(deal, pb_min), pb_max)
+    desc_pct = (1 - deal / p0) * 100
+    margem, com, recebe = _margem_no_preco(rec, deal, cat, ltid, frete, custo, access)
+    start, finish = _datas_desconto()
+
+    print(f"\n----- PLANO ({origem}) -----", flush=True)
+    print(f"  deal_price:  R${deal:.2f}   (desconto {desc_pct:.1f}% sobre R${p0:.2f})", flush=True)
+    if custo is not None:
+        print(f"  você recebe: R${recebe:.2f}  (comissão R${com:.2f} + frete R${frete:.2f})", flush=True)
+        print(f"  MARGEM resultante: {margem:.1f}%", flush=True)
+    print(f"  vigência: {start[:10]} a {finish[:10]}  ({DIAS} dia(s), some ao expirar)", flush=True)
+
+    body = {"deal_price": deal, "start_date": start, "finish_date": finish,
+            "promotion_type": "PRICE_DISCOUNT"}
+    if TOP_DEAL_PRICE:
+        body["top_deal_price"] = round(float(TOP_DEAL_PRICE), 2)
+    path = f"/seller-promotions/items/{ITEM_ID}?app_version=v2"
+    print(f"\n  POST {path}\n       body {json.dumps(body, ensure_ascii=False)}", flush=True)
+
+    if desc_pct < 5:
+        print("\n⚠️ desconto < 5%: o ML rejeita PRICE_DISCOUNT abaixo de 5%. "
+              "Nesse caso o item já bate a margem sem promoção.", flush=True)
+
+    if not CONFIRMA:
+        print("\n=== SIMULAÇÃO: nada escrito. CONFIRMA=SIM pra criar o desconto. ===", flush=True)
+        return
+
+    print("\n----- EXECUTANDO -----", flush=True)
+    st, resp = req("POST", path, access, body=body)
+    print(f"  POST -> HTTP {st}: {json.dumps(resp, ensure_ascii=False)[:300]}", flush=True)
+    if 200 <= st < 300:
+        time.sleep(3)
+        depois = promos_do_item(ITEM_ID, access)
+        pd = next((o for o in depois if isinstance(o, dict) and (o.get("type") or "") == "PRICE_DISCOUNT"), None)
+        if pd:
+            print(f"  estado agora: status={pd.get('status')} price={pd.get('price')} "
+                  f"original={pd.get('original_price')}", flush=True)
+            if pd.get("boosted_offer"):
+                print(f"  🎁 ML turbinou: +{pd.get('discount_meli_boosted_percentage')}% "
+                      f"(R${pd.get('discount_meli_boost_amount')}), preço p/ boost "
+                      f"R${pd.get('total_price_for_boosted_offer')} — você recebe mais.", flush=True)
+        print("\n=== desconto criado. Confira no painel/anúncio. Pra tirar: DELETE "
+              f"/seller-promotions/items/{ITEM_ID}?promotion_type=PRICE_DISCOUNT&app_version=v2 ===", flush=True)
+    else:
+        print("\n=== não criou. Veja a resposta acima. ===", flush=True)
+
+
 def main():
-    if ITEM_ID:
+    if ITEM_ID and (MARGEM_ALVO or DEAL_PRICE):
+        modo_desconto()
+    elif ITEM_ID:
         modo_item()
     elif SELLER_ID:
         modo_lote()
