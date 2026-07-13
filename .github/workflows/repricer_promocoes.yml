@@ -1,9 +1,14 @@
 name: Repricer - Promocoes (sonda, so leitura)
 
-# Roda só quando você clicar (Actions -> este workflow -> Run workflow).
-# NAO aplica nem altera promoção nenhuma — apenas lê e imprime no log.
+# Roda so quando voce clicar (Actions -> este workflow -> Run workflow).
+# Sonda descartavel: hoje despeja o JSON cru das promocoes de UM item. Nao altera nada.
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      item_id:
+        description: "Item MLB a diagnosticar"
+        required: false
+        default: "MLB6415054256"
 
 concurrency:
   group: ml-puxador
@@ -29,5 +34,5 @@ jobs:
           ML_REFRESH_TOKEN: ${{ secrets.ML_REFRESH_TOKEN }}
           SUPABASE_URL:     ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY:     ${{ secrets.SUPABASE_KEY }}
-          AMOSTRA: '10'
+          ITEM_ID: ${{ github.event.inputs.item_id }}
         run: python repricer_promocoes.py
