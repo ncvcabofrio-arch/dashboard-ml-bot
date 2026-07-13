@@ -56,8 +56,9 @@ def req(method, path, access, body=None, headers=None, tent=2):
 
 
 def wheaders(sid):
-    """Cabeçalhos exigidos pela escrita em /marketplace/seller-promotions."""
-    caller = CALLER_ID_ENV or str(sid)
+    """Cabeçalhos exigidos pela escrita em /marketplace/seller-promotions.
+    X-Caller-Id = client id do app (não o seller_id), conforme os exemplos da doc."""
+    caller = CALLER_ID_ENV or CLIENT_ID
     return {"version": "v2", "X-Client-Id": CLIENT_ID, "X-Caller-Id": caller}
 
 
@@ -142,7 +143,7 @@ def main():
     print(f"===== APLICADOR | {ITEM_ID} | conta {sid} =====", flush=True)
     print(f"título: {it.get('title')}", flush=True)
     print(f"MODO: {modo}", flush=True)
-    print(f"escrita em: /marketplace/seller-promotions (X-Caller-Id={CALLER_ID_ENV or sid})", flush=True)
+    print(f"escrita em: /marketplace/seller-promotions (X-Caller-Id={'(client id do app)' if not CALLER_ID_ENV else CALLER_ID_ENV})", flush=True)
 
     promos = promos_do_item(ITEM_ID, access)
     ativas = [o for o in promos if isinstance(o, dict) and eh_ativa(o)]
