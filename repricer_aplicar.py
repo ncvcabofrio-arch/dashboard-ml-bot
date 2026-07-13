@@ -1,19 +1,21 @@
 """
-APLICADOR (Fase 2) — escreve na Central de Promoções. Use com cuidado.
-Segurança:
-  - Só mexe em UM anúncio (ITEM_ID). Nunca em lote.
-  - Padrão SIMULAÇÃO (dry-run): só MOSTRA as chamadas. Só executa se CONFIRMA=SIM.
-  - SO_ENTRAR=SIM: só ENTRA no alvo, não sai de nada.
-  - Nunca toca no preço do anúncio — só entra/sai de promoções.
+APLICADOR (Fase 2) — escreve na Central de Promoções via API pública.
+Nunca mexe no preço do anúncio — só entra/sai de promoções.
 
-API doméstica (developers.mercadolibre.com.ar/en_us/smart-campaigns), confirmada:
+TRÊS MODOS (decididos pelo que você preenche):
+  1) ITEM_ID definido  -> UM item (bom pra testar). Aceita SO_ENTRAR / PROMO_ID / PROMO_TYPE.
+  2) SELLER_ID definido -> LOTE: aplica as APROVADAS daquela conta (limite LIMITE).
+  3) nenhum dos dois   -> DESCOBERTA: lista as contas (id, apelido, nº de aprovadas). Não escreve.
+
+SEGURANÇA (modos 1 e 2):
+  - Padrão SIMULAÇÃO (dry-run). Só escreve com CONFIRMA=SIM.
+  - Ordem segura: ENTRA no alvo primeiro; só SAI das outras se o entrar der certo.
+  - No lote, ao aplicar com sucesso marca a sugestão como 'aplicada' (não repete).
+
+Chamadas (validadas, API doméstica):
   ENTRAR: POST /seller-promotions/items/{item}?app_version=v2
-          body {promotion_id, promotion_type, offer_id}
-          offer_id = ref_id COMPLETO do candidato (ex.: "CANDIDATE-MLB...-NNN")
-  SAIR:   DELETE /seller-promotions/items/{item}?promotion_type=..&promotion_id=..&offer_id=..&app_version=v2
-          offer_id = ref_id COMPLETO da oferta ativa (ex.: "OFFER-MLB...-NNN")
-Leitura: GET /seller-promotions/items/{item}?app_version=v2
-Alvo: sugestão APROVADA (repricer_sugestoes) ou PROMO_ID/PROMO_TYPE.
+          body {promotion_id, promotion_type, offer_id=ref_id COMPLETO do candidato}
+  SAIR:   DELETE /seller-promotions/items/{item}?promotion_type=..&promotion_id=..&offer_id=ref_id COMPLETO&app_version=v2
 """
 import os
 import json
@@ -24,10 +26,13 @@ from ml_auth import obter_access
 
 API = "https://api.mercadolibre.com"
 ITEM_ID = (os.environ.get("ITEM_ID") or "").strip()
+SELLER_ID = (os.environ.get("SELLER_ID") or "").strip()
 CONFIRMA = (os.environ.get("CONFIRMA") or "").strip().upper() == "SIM"
 SO_ENTRAR = (os.environ.get("SO_ENTRAR") or "").strip().upper() == "SIM"
+SO_GANHO = (os.environ.get("SO_GANHO") or "").strip().upper() == "SIM"
 PROMO_ID = (os.environ.get("PROMO_ID") or "").strip()
 PROMO_TYPE = (os.environ.get("PROMO_TYPE") or "").strip()
+LIMITE = int(os.environ.get("LIMITE", "5"))
 sb = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"])
 SEED = os.environ.get("ML_REFRESH_TOKEN", "")
 
@@ -35,11 +40,10 @@ STATUS_ATIVA = {"started", "active", "in_progress", "ongoing", "pending"}
 
 
 def req(method, path, access, body=None, tent=2):
-    url = API + path
     h = {"Authorization": "Bearer " + access, "Content-Type": "application/json"}
     r = None
     for i in range(tent):
-        r = requests.request(method, url, headers=h, json=body, timeout=25)
+        r = requests.request(method, API + path, headers=h, json=body, timeout=25)
         if r.status_code == 429 or r.status_code >= 500:
             time.sleep(0.6 * (i + 1)); continue
         break
@@ -66,15 +70,18 @@ def dono(item_id):
     return None, None, None
 
 
+def access_da_conta(seller_id_alvo):
+    for seller_id, refresh in contas():
+        a, s, refresh = obter_access(sb, seller_id, refresh)
+        if str(s) == str(seller_id_alvo):
+            return a, s
+    return None, None
+
+
 def eh_ativa(o):
     if (o.get("status") or "").lower() in STATUS_ATIVA:
         return True
     return str(o.get("ref_id") or "").upper().startswith("OFFER-")
-
-
-def offer_id_de(o):
-    """offer_id = ref_id COMPLETO (ex.: CANDIDATE-MLB..-NNN ou OFFER-MLB..-NNN)."""
-    return o.get("ref_id") or None
 
 
 def promos_do_item(item_id, access):
@@ -82,112 +89,186 @@ def promos_do_item(item_id, access):
     return d if isinstance(d, list) else []
 
 
-def sugestao_aprovada(item_id):
-    try:
-        r = (sb.table("repricer_sugestoes").select("*")
-             .eq("item_id", item_id).eq("status", "aprovada").limit(1).execute().data)
-        return r[0] if r else None
-    except Exception:
-        return None
-
-
 def path_sair(item_id, o):
     params = [f"promotion_type={o.get('type')}", "app_version=v2"]
     if o.get("id"):
         params.append(f"promotion_id={o['id']}")
-    oid = offer_id_de(o)
-    if oid:
-        params.append(f"offer_id={oid}")
+    if o.get("ref_id"):
+        params.append(f"offer_id={o['ref_id']}")
     return f"/seller-promotions/items/{item_id}?" + "&".join(params)
 
 
 def entrar_body_path(item_id, o):
-    path = f"/seller-promotions/items/{item_id}?app_version=v2"
     body = {"promotion_id": o.get("id"), "promotion_type": o.get("type")}
-    oid = offer_id_de(o)
-    if oid:
-        body["offer_id"] = oid
+    if o.get("ref_id"):
+        body["offer_id"] = o["ref_id"]
     if o.get("type") in ("DEAL", "PRICE_DISCOUNT", "LIGHTNING", "DOD"):
         preco = o.get("price") or o.get("suggested_discounted_price")
         if preco:
             body["deal_price"] = preco
-    return path, body
+    return f"/seller-promotions/items/{item_id}?app_version=v2", body
 
 
-def main():
-    if not ITEM_ID:
-        print("Defina ITEM_ID.", flush=True); return
-    access, sid, it = dono(ITEM_ID)
-    if not access:
-        print(f"não achei o item {ITEM_ID}.", flush=True); return
+def marcar_aplicada(sug_id):
+    try:
+        sb.table("repricer_sugestoes").update({"status": "aplicada"}).eq("id", sug_id).execute()
+    except Exception as e:
+        print(f"   (aviso: não marquei aplicada: {e})", flush=True)
 
-    modo = "SIMULAÇÃO (dry-run)"
-    if CONFIRMA:
-        modo = "⚠️ EXECUTAR (só entrar)" if SO_ENTRAR else "⚠️ EXECUTAR"
-    print(f"===== APLICADOR | {ITEM_ID} | conta {sid} =====", flush=True)
-    print(f"título: {it.get('title')}", flush=True)
-    print(f"MODO: {modo}", flush=True)
 
-    promos = promos_do_item(ITEM_ID, access)
+def plano_item(item_id, access, alvo_id, alvo_type, acao, so_entrar=False):
+    """Monta (entrar, sair, alvo) sem executar."""
+    promos = promos_do_item(item_id, access)
     ativas = [o for o in promos if isinstance(o, dict) and eh_ativa(o)]
-    print(f"\nAtivas/enroladas agora ({len(ativas)}):", flush=True)
-    for o in ativas:
-        print(f"  - {o.get('name') or o.get('type')} | id={o.get('id')} type={o.get('type')} "
-              f"R${o.get('price')} ref={o.get('ref_id')}", flush=True)
-
     alvo = None
-    sug = sugestao_aprovada(ITEM_ID)
-    alvo_id = PROMO_ID or (sug.get("promocao_id") if sug else None)
-    alvo_type = PROMO_TYPE or (sug.get("promocao_tipo") if sug else None)
     if alvo_id:
         alvo = next((o for o in promos if o.get("id") == alvo_id), None)
         if not alvo and alvo_type:
             alvo = {"id": alvo_id, "type": alvo_type}
-    if not alvo:
-        print("\nSem alvo (nenhuma sugestão aprovada e sem PROMO_ID). Nada a fazer.", flush=True)
-        return
-    print(f"\nALVO (entrar): {alvo.get('name') or alvo.get('id')} | id={alvo.get('id')} "
-          f"type={alvo.get('type')} ref={alvo.get('ref_id')}", flush=True)
+    entrar = None
+    sair = []
+    a = (acao or "").lower()
+    if a in ("entrar", "trocar") or (a == "" and alvo):
+        if alvo:
+            ja = any(o.get("id") == alvo.get("id") and eh_ativa(o) for o in ativas)
+            entrar = None if ja else alvo
+            sair = [] if so_entrar else [o for o in ativas if o.get("id") != alvo.get("id")]
+    elif a == "sair":
+        sair = [] if so_entrar else ativas
+    return entrar, sair, alvo, ativas
 
-    ja_no_alvo = any(o.get("id") == alvo.get("id") and eh_ativa(o) for o in ativas)
-    sair = [] if SO_ENTRAR else [o for o in ativas if o.get("id") != alvo.get("id")]
+
+def executar(item_id, access, entrar, sair):
+    """Executa: entra primeiro; só sai se entrar der certo. Retorna (ok, log)."""
+    log = []
+    if entrar:
+        path, body = entrar_body_path(item_id, entrar)
+        st, resp = req("POST", path, access, body=body)
+        log.append(f"entrar {entrar.get('name') or entrar.get('type')}: HTTP {st}")
+        if not (200 <= st < 300):
+            log.append(f"  resp: {json.dumps(resp, ensure_ascii=False)[:200]}")
+            return False, log
+    for o in sair:
+        st, resp = req("DELETE", path_sair(item_id, o), access)
+        log.append(f"sair {o.get('name') or o.get('type')}: HTTP {st}")
+        time.sleep(0.3)
+    return True, log
+
+
+# ---------------- MODO 1: UM ITEM (teste) ----------------
+def modo_item():
+    access, sid, it = dono(ITEM_ID)
+    if not access:
+        print(f"não achei o item {ITEM_ID}.", flush=True); return
+    sug = None
+    try:
+        r = (sb.table("repricer_sugestoes").select("*")
+             .eq("item_id", ITEM_ID).eq("status", "aprovada").limit(1).execute().data)
+        sug = r[0] if r else None
+    except Exception:
+        pass
+    alvo_id = PROMO_ID or (sug.get("promocao_id") if sug else None)
+    alvo_type = PROMO_TYPE or (sug.get("promocao_tipo") if sug else None)
+    acao = (sug.get("acao") if sug else None) or ("entrar" if alvo_id else "")
+
+    modo = "SIMULAÇÃO (dry-run)"
+    if CONFIRMA:
+        modo = "⚠️ EXECUTAR (só entrar)" if SO_ENTRAR else "⚠️ EXECUTAR"
+    print(f"===== APLICADOR | {ITEM_ID} | conta {sid} | {modo} =====", flush=True)
+    print(f"título: {it.get('title')}", flush=True)
+
+    entrar, sair, alvo, ativas = plano_item(ITEM_ID, access, alvo_id, alvo_type, acao, SO_ENTRAR)
+    print(f"\nAtivas agora ({len(ativas)}): " +
+          ", ".join(f"{o.get('name') or o.get('type')}" for o in ativas), flush=True)
+    if not alvo and not sair:
+        print("Sem alvo e nada a sair. Nada a fazer.", flush=True); return
 
     print("\n----- PLANO -----", flush=True)
-    if not ja_no_alvo:
-        path, body = entrar_body_path(ITEM_ID, alvo)
-        print(f"  ENTRAR→ POST {path}\n           body {json.dumps(body, ensure_ascii=False)}", flush=True)
-    else:
-        print("  (alvo já ativo)", flush=True)
+    if entrar:
+        p, b = entrar_body_path(ITEM_ID, entrar)
+        print(f"  ENTRAR→ POST {p}\n           body {json.dumps(b, ensure_ascii=False)}", flush=True)
     for o in sair:
         print(f"  SAIR  → DELETE {path_sair(ITEM_ID, o)}", flush=True)
-    if SO_ENTRAR:
-        print("  (SO_ENTRAR: não sai de nada)", flush=True)
 
     if not CONFIRMA:
-        print("\n=== SIMULAÇÃO: nada foi escrito. CONFIRMA=SIM pra aplicar. ===", flush=True)
-        return
-
-    # ---- EXECUÇÃO: entrar primeiro; só sai depois se entrar der certo ----
+        print("\n=== SIMULAÇÃO: nada escrito. CONFIRMA=SIM pra aplicar. ===", flush=True); return
     print("\n----- EXECUTANDO -----", flush=True)
-    if not ja_no_alvo:
-        path, body = entrar_body_path(ITEM_ID, alvo)
-        st, resp = req("POST", path, access, body=body)
-        print(f"  ENTRAR → HTTP {st}: {json.dumps(resp, ensure_ascii=False)[:500]}", flush=True)
-        if not (200 <= st < 300):
-            print("\n⚠️ ENTRAR falhou — não saio de nada. Item fica como está.", flush=True)
-            return
-    for o in sair:
-        st, resp = req("DELETE", path_sair(ITEM_ID, o), access)
-        print(f"  SAIR {o.get('name') or o.get('type')} → HTTP {st}: {json.dumps(resp, ensure_ascii=False)[:300]}", flush=True)
-        time.sleep(0.4)
-
-    time.sleep(4.0)
-    print("\n----- ESTADO DEPOIS -----", flush=True)
-    for o in promos_do_item(ITEM_ID, access):
-        if eh_ativa(o):
-            print(f"  ativa/enrolada: {o.get('name') or o.get('type')} R${o.get('price')} "
-                  f"status={o.get('status')} (id={o.get('id')})", flush=True)
+    ok, log = executar(ITEM_ID, access, entrar, sair)
+    for l in log:
+        print("  " + l, flush=True)
+    if not ok:
+        print("⚠️ entrar falhou — não saí de nada.", flush=True)
     print("\n=== fim. Confira no painel. ===", flush=True)
+
+
+# ---------------- MODO 2: LOTE por conta ----------------
+def modo_lote():
+    access, sid = access_da_conta(SELLER_ID)
+    if not access:
+        print(f"não autentiquei a conta {SELLER_ID}.", flush=True); return
+    q = (sb.table("repricer_sugestoes").select("*")
+         .eq("seller_id", str(SELLER_ID)).eq("status", "aprovada"))
+    if SO_GANHO:
+        q = q.eq("acao", "trocar")
+    aprovadas = q.limit(LIMITE).execute().data or []
+
+    modo = "⚠️ EXECUTAR" if CONFIRMA else "SIMULAÇÃO (dry-run)"
+    print(f"===== APLICADOR LOTE | conta {sid} | {modo} =====", flush=True)
+    print(f"aprovadas a processar (limite {LIMITE}): {len(aprovadas)}"
+          f"{' | só trocas dinheiro-na-mesa' if SO_GANHO else ''}\n", flush=True)
+
+    cont = {}
+    for sug in aprovadas:
+        entrar, sair, alvo, ativas = plano_item(
+            sug["item_id"], access, sug.get("promocao_id"), sug.get("promocao_tipo"), sug.get("acao"))
+        if (sug.get("acao") or "").lower() in ("entrar", "trocar") and not alvo:
+            res, det = "sem_alvo", "promoção-alvo não está mais disponível (rode as sugestões de novo)"
+        elif not entrar and not sair:
+            res, det = "nada", "já no estado desejado"
+        elif not CONFIRMA:
+            partes = ([f"ENTRAR {entrar.get('name') or entrar.get('type')}"] if entrar else []) + \
+                     [f"SAIR {o.get('name') or o.get('type')}" for o in sair]
+            res, det = "simulado", " | ".join(partes)
+        else:
+            ok, log = executar(sug["item_id"], access, entrar, sair)
+            if ok:
+                marcar_aplicada(sug["id"]); res = "aplicado"
+            else:
+                res = "erro_entrar"
+            det = " | ".join(log)
+        cont[res] = cont.get(res, 0) + 1
+        tag = {"aplicado": "✅", "simulado": "•", "erro_entrar": "⛔", "sem_alvo": "⚠️"}.get(res, "·")
+        print(f"{tag} [{res}] {sug['item_id']} {str(sug.get('titulo'))[:28]} -> {det}", flush=True)
+        time.sleep(0.3)
+
+    print("\n=== " + ", ".join(f"{k}: {v}" for k, v in cont.items()) + " ===", flush=True)
+    if not CONFIRMA:
+        print("SIMULAÇÃO: nada escrito. CONFIRMA=SIM pra aplicar.", flush=True)
+
+
+# ---------------- MODO 3: DESCOBERTA ----------------
+def modo_descoberta():
+    print("=== DESCOBERTA (nenhuma escrita) ===", flush=True)
+    print("Preencha ITEM_ID (um item) ou SELLER_ID (lote). Contas disponíveis:\n", flush=True)
+    for seller_id, refresh in contas():
+        access, sid, refresh = obter_access(sb, seller_id, refresh)
+        st, u = req("GET", f"/users/{sid}", access)
+        nick = u.get("nickname") if isinstance(u, dict) else "?"
+        try:
+            n = sb.table("repricer_sugestoes").select("id", count="exact").eq(
+                "seller_id", str(sid)).eq("status", "aprovada").execute().count
+        except Exception:
+            n = "?"
+        print(f"  seller_id={sid}  |  apelido: {nick}  |  aprovadas: {n}", flush=True)
+
+
+def main():
+    if ITEM_ID:
+        modo_item()
+    elif SELLER_ID:
+        modo_lote()
+    else:
+        modo_descoberta()
 
 
 if __name__ == "__main__":
