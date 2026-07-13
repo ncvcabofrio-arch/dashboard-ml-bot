@@ -1,21 +1,21 @@
 """
-Sonda: achar o campo "VOCÊ RECEBE" das promoções — SOMENTE LEITURA.
-Para poucos itens ativos com promoção compartilhada candidata, despeja o JSON
-COMPLETO do detalhe e tenta o endpoint de oferta (offer_id/ref_id), procurando
-o valor líquido que o painel mostra como "Você recebe". Nada é aplicado.
+Sonda de FRETE pelo anúncio — SOMENTE LEITURA.
+Para alguns itens ativos, tenta pegar o custo de envio (o que VOCÊ paga no frete
+grátis) direto do anúncio, via /items/{id}/shipping_options com um CEP de destino.
+Despeja o JSON pra a gente achar o campo que corresponde ao "Custo de envio" do painel.
 """
 import os
 import time
 import json
-import re
 import requests
 from supabase import create_client
 from ml_auth import obter_access
 
 API = "https://api.mercadolibre.com"
+CEP = os.environ.get("CEP", "01310100")   # Av. Paulista, SP (destino de referência)
 sb = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"])
 SEED = os.environ.get("ML_REFRESH_TOKEN", "")
-MAX_ITENS = int(os.environ.get("MAX_ITENS", "3"))
+MAX_ITENS = int(os.environ.get("MAX_ITENS", "6"))
 
 
 def get(path, access, tent=3):
@@ -43,48 +43,29 @@ def main():
     for seller_id, refresh in contas():
         access, sid, refresh = obter_access(sb, seller_id, refresh)
         print(f"\n===== CONTA {sid} =====", flush=True)
-        st, busca = get(f"/users/{sid}/items/search?status=active&limit=25", access)
+        st, busca = get(f"/users/{sid}/items/search?status=active&limit={MAX_ITENS}", access)
         ids = (busca or {}).get("results", []) if isinstance(busca, dict) else []
 
-        achei = 0
         for item_id in ids:
-            st, resumo = get(f"/seller-promotions/items/{item_id}?app_version=v2", access)
-            if not isinstance(resumo, list) or not resumo:
-                continue
-            comp = [p for p in resumo if isinstance(p, dict) and p.get("meli_percentage") and p.get("status") == "candidate"]
-            if not comp:
-                continue
+            st, it = get(f"/items/{item_id}", access)
+            preco = it.get("price") if isinstance(it, dict) else None
+            titulo = (it.get("title") or "")[:40] if isinstance(it, dict) else ""
+            ship = it.get("shipping") if isinstance(it, dict) else None
+            print(f"\n### {item_id} | R${preco} | {titulo}", flush=True)
+            print(f"   shipping(item): {json.dumps(ship, ensure_ascii=False)[:200]}", flush=True)
 
-            pid, ptype = resumo[0].get("id"), resumo[0].get("type")
-            st, det = get(f"/seller-promotions/items/{item_id}?app_version=v2&promotion_id={pid}&promotion_type={ptype}", access)
-            print(f"\n### item {item_id} — DETALHE COMPLETO (sem cortar):", flush=True)
-            print(json.dumps(det, ensure_ascii=False, indent=1)[:2500], flush=True)
+            # 1) opções de envio com CEP de destino (traz custos)
+            st1, so = get(f"/items/{item_id}/shipping_options?zip_code={CEP}", access)
+            print(f"   shipping_options?zip={CEP} (status {st1}): {json.dumps(so, ensure_ascii=False)[:900]}", flush=True)
 
-            # tenta o endpoint de oferta com o ref_id / número
-            alvo = None
-            if isinstance(det, list):
-                for o in det:
-                    if isinstance(o, dict) and o.get("meli_percentage"):
-                        alvo = o; break
-            if alvo:
-                ref = str(alvo.get("ref_id") or "")
-                num = re.findall(r"(\d{6,})", ref)
-                tentativas = []
-                if ref: tentativas.append(ref)
-                if num: tentativas.append(num[-1])
-                for oid in tentativas:
-                    for base in (f"/seller-promotions/offers/{oid}?app_version=v2",
-                                 f"/seller-promotions/offers/{oid}"):
-                        st, off = get(base, access)
-                        print(f"  offers[{oid}] {base} -> status {st}: {json.dumps(off, ensure_ascii=False)[:700]}", flush=True)
+            # 2) frete grátis do site pra esse item (custo do vendedor)
+            st2, fr = get(f"/sites/MLB/shipping_options/free?item_id={item_id}&zip_code={CEP}", access)
+            print(f"   shipping_options/free (status {st2}): {json.dumps(fr, ensure_ascii=False)[:500]}", flush=True)
 
-            achei += 1
-            if achei >= MAX_ITENS:
-                break
-        if achei:
-            break  # uma conta com resultado já basta pra investigar
+            time.sleep(0.3)
+        break  # uma conta já basta pra achar o campo
 
-    print("\n=== sonda concluída (nada foi alterado) ===", flush=True)
+    print("\n=== sonda de frete concluída (nada foi alterado) ===", flush=True)
 
 
 if __name__ == "__main__":
