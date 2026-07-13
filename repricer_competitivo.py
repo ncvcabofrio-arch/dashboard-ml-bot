@@ -19,10 +19,12 @@ Só leitura: usa GET /items/{id}, /items/{id}/price_to_win, /products/{pid}/item
 import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 import repricer_sugestoes as rec
 from ml_auth import obter_access
 
 API = rec.API
+WORKERS = int(os.environ.get("WORKERS", "8"))   # itens processados em paralelo
 DEBUG = (os.environ.get("DEBUG") or "") == "1"
 DEBUG_ITEM = (os.environ.get("DEBUG_ITEM") or "").strip()   # analisa só 1 item, verboso
 NORM_CUSTO = {}   # sku normalizado -> sku original na tabela produtos (só p/ DIAGNÓSTICO)
@@ -36,27 +38,36 @@ MAX_ITENS = int(os.environ.get("MAX_ITENS", "30"))
 EPS = 0.01
 
 
+def _pct_cat(cat, ltid, access):
+    """% de comissão fixa da categoria (cacheada por (cat,ltid)). None se a API não trouxer."""
+    p = rec._percentual(cat, ltid, access)
+    return float(p) if p is not None else None
+
+
 def margem_no_preco(pb, cat, ltid, frete, custo, access):
-    """Fórmula 'Você recebe' com meli%=0 (sem cofinanciamento)."""
-    com = rec.comissao(round(pb, 2), cat, ltid, access) or 0
+    """'Você recebe' = preço - comissão - frete (meli%=0). Comissão = % fixa da categoria.
+    Determinístico e sem chamada por preço (usa a % cacheada)."""
+    pct = _pct_cat(cat, ltid, access)
+    com = (pb * pct / 100.0) if pct is not None else (rec.comissao(round(pb, 2), cat, ltid, access) or 0)
     recebe = pb - com - frete
-    return (((recebe - custo) / pb * 100) if pb else -999), round(com, 2), round(recebe, 2)
+    margem = ((recebe - custo) / pb * 100) if pb else -999
+    return margem, round(com, 2), round(recebe, 2)
 
 
 def preco_piso(piso_pct, cat, ltid, frete, custo, access, teto):
-    """Menor preço que ainda rende a margem mínima (piso). Busca binária monotônica."""
-    lo, hi = 0.5, max(teto, 1.0)
-    m_hi, _, _ = margem_no_preco(hi, cat, ltid, frete, custo, access)
-    if m_hi < piso_pct:              # nem no preço cheio a margem alcança o piso
+    """Menor preço que ainda rende a margem mínima — FÓRMULA FECHADA (sem busca binária):
+       margem = (1 - pct/100) - (frete+custo)/pb ; resolvendo margem = piso.
+    Retorna None se nem no preço cheio a margem alcança o piso (item já abaixo do piso)."""
+    pct = _pct_cat(cat, ltid, access)
+    if pct is None:
         return None
-    for _ in range(40):
-        mid = (lo + hi) / 2
-        m, _, _ = margem_no_preco(mid, cat, ltid, frete, custo, access)
-        if m < piso_pct:
-            lo = mid
-        else:
-            hi = mid
-    return round((lo + hi) / 2, 2)
+    denom = (1 - pct / 100.0) - piso_pct / 100.0
+    if denom <= 0:
+        return None
+    pb = (frete + custo) / denom
+    if pb > teto + 0.01:     # precisaria de preço acima do cheio -> já abaixo do piso
+        return None
+    return round(pb, 2)
 
 
 def price_to_win(item_id, access):
@@ -308,6 +319,7 @@ def analisar(item_id, access, sid):
 def main():
     if not SELLER_ID:
         print("Defina SELLER_ID (ex 177795203).", flush=True); return
+    print(">>> SONDA v3 (piso por fórmula fechada + paralelo) <<<", flush=True)
     rec.preload()
     # autentica TODAS as contas: guarda os seller_ids (p/ não competir consigo) e pega o access da escolhida
     access = sid = None
@@ -333,24 +345,29 @@ def main():
         ids = ids[:MAX_ITENS]
     print(f"===== SONDA COMPETITIVA | conta {sid} | amostra {len(ids)} de {total} (só leitura, pula estoque 0) =====\n", flush=True)
 
+    # processa os itens EM PARALELO (só leitura); mantém a ordem original
+    if DEBUG_ITEM:
+        resultados = [analisar(i, access, sid) for i in ids]
+    else:
+        with ThreadPoolExecutor(max_workers=WORKERS) as ex:
+            resultados = list(ex.map(lambda i: analisar(i, access, sid), ids))
+
+    TAGS = {"descontar": "🎯", "descontar_ean": "🎯", "descontar_piso": "🔻",
+            "nao_perseguir": "🛑", "nao_perseguir_ean": "🛑", "subir_margem": "⬆️",
+            "manter_ganhando": "🏆", "ja_competitivo": "✅", "perde_nao_preco": "⚠️",
+            "sem_concorrencia": "·", "sem_match": "🔍", "sem_dado": "?", "sem_custo": "∅"}
     cont = {}
     linhas = []
-    for item_id in ids:
-        r = analisar(item_id, access, sid)
+    for r in resultados:
         if not r:
             continue
         cont[r["acao"]] = cont.get(r["acao"], 0) + 1
         linhas.append(r)
         if r["acao"] == "sem_estoque":
             continue   # não polui a saída; conta no resumo
-        tag = {"descontar": "🎯", "descontar_ean": "🎯", "descontar_piso": "🔻",
-               "nao_perseguir": "🛑", "nao_perseguir_ean": "🛑", "subir_margem": "⬆️",
-               "manter_ganhando": "🏆", "ja_competitivo": "✅", "perde_nao_preco": "⚠️",
-               "sem_concorrencia": "·", "sem_match": "🔍", "sem_dado": "?", "sem_custo": "∅"}.get(r["acao"], "·")
-        print(f"{tag} [{r['acao']}] {item_id} est={r.get('aq')} {str(r.get('titulo'))[:30]} "
-              f"| cheio R${r.get('preco_cheio')} (margem {r.get('margem_cheio')}%) "
-              f"| {r.get('detalhe')}", flush=True)
-        time.sleep(0.1)
+        print(f"{TAGS.get(r['acao'], '·')} [{r['acao']}] {r['item_id']} est={r.get('aq')} "
+              f"{str(r.get('titulo'))[:30]} | cheio R${r.get('preco_cheio')} "
+              f"(margem {r.get('margem_cheio')}%) | {r.get('detalhe')}", flush=True)
 
     print("\n=== RESUMO: " + ", ".join(f"{k}: {v}" for k, v in cont.items()) + " ===", flush=True)
     cat = sum(1 for l in linhas if l.get("catalog"))
