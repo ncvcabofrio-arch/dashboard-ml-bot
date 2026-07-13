@@ -234,7 +234,10 @@ def analisar(item_id, access, sid):
             base.update({"acao": "ja_competitivo",
                          "detalhe": f"[{origem}] já é o mais barato: seu R${p0:.2f} < menor conc. "
                                     f"R${menor:.2f} ({len(precos)} conc)"})
-        elif pmin is not None and (menor - EPS) >= pmin:
+        elif pmin is None:
+            base.update({"acao": "nao_perseguir_ean",
+                         "detalhe": f"[{origem}] já abaixo do piso no preço cheio -> não dá pra descontar"})
+        elif (menor - EPS) >= pmin:
             alvo = round(menor - EPS, 2)
             m_alvo, _, _ = margem_no_preco(alvo, cat, ltid, frete, custo, access)
             desc = (1 - alvo / p0) * 100
@@ -242,8 +245,13 @@ def analisar(item_id, access, sid):
                          "detalhe": f"[{origem}] {len(precos)} conc, menor R${menor:.2f} -> "
                                     f"descontar p/ R${alvo:.2f} ({desc:.1f}% off, margem {m_alvo:.1f}%)"})
         else:
-            base.update({"acao": "nao_perseguir_ean",
-                         "detalhe": f"[{origem}] menor conc. R${menor:.2f} fura o piso (R${pmin}) -> não perseguir"})
+            # mercado abaixo do piso: desconta até o PISO (mantém 18%, o mais competitivo possível)
+            alvo = round(pmin, 2)
+            m_alvo, _, _ = margem_no_preco(alvo, cat, ltid, frete, custo, access)
+            desc = (1 - alvo / p0) * 100
+            base.update({"acao": "descontar_piso", "alvo": alvo, "margem_alvo": round(m_alvo, 1),
+                         "detalhe": f"[{origem}] menor conc R${menor:.2f} < piso -> descontar até o PISO "
+                                    f"R${alvo:.2f} ({desc:.1f}% off, margem {m_alvo:.1f}%; não bate o concorrente)"})
         return base
 
     ptw = price_to_win(item_id, access)
@@ -276,14 +284,21 @@ def analisar(item_id, access, sid):
         base.update({"acao": "perde_nao_preco", "detalhe": f"perde por: {base['reason'] or 'motivo não-preço'}"})
         return base
     alvo = float(alvo)
-    if pmin is not None and alvo >= pmin:
-        m_alvo, _, rec_alvo = margem_no_preco(alvo, cat, ltid, frete, custo, access)
+    if pmin is None:
+        base.update({"acao": "nao_perseguir",
+                     "detalhe": f"price_to_win R${alvo:.2f}; já abaixo do piso no cheio -> não dá pra descontar"})
+    elif alvo >= pmin:
+        m_alvo, _, _ = margem_no_preco(alvo, cat, ltid, frete, custo, access)
         desc = (1 - alvo / p0) * 100
         base.update({"acao": "descontar", "alvo": round(alvo, 2), "margem_alvo": round(m_alvo, 1),
                      "detalhe": f"descontar até R${alvo:.2f} ({desc:.1f}% off) -> margem {m_alvo:.1f}%"})
     else:
-        base.update({"acao": "nao_perseguir",
-                     "detalhe": f"price_to_win R${alvo:.2f} fura o piso (R${pmin}) -> não perseguir"})
+        alvo2 = round(pmin, 2)
+        m_alvo, _, _ = margem_no_preco(alvo2, cat, ltid, frete, custo, access)
+        desc = (1 - alvo2 / p0) * 100
+        base.update({"acao": "descontar_piso", "alvo": alvo2, "margem_alvo": round(m_alvo, 1),
+                     "detalhe": f"price_to_win R${alvo:.2f} < piso -> descontar até o PISO R${alvo2:.2f} "
+                                f"({desc:.1f}% off, margem {m_alvo:.1f}%)"})
     return base
 
 
@@ -322,10 +337,10 @@ def main():
         linhas.append(r)
         if r["acao"] == "sem_estoque":
             continue   # não polui a saída; conta no resumo
-        tag = {"descontar": "🎯", "descontar_ean": "🎯", "nao_perseguir": "🛑",
-               "nao_perseguir_ean": "🛑", "subir_margem": "⬆️", "manter_ganhando": "🏆",
-               "ja_competitivo": "✅", "perde_nao_preco": "⚠️", "sem_concorrencia": "·",
-               "sem_match": "🔍", "sem_dado": "?", "sem_custo": "∅"}.get(r["acao"], "·")
+        tag = {"descontar": "🎯", "descontar_ean": "🎯", "descontar_piso": "🔻",
+               "nao_perseguir": "🛑", "nao_perseguir_ean": "🛑", "subir_margem": "⬆️",
+               "manter_ganhando": "🏆", "ja_competitivo": "✅", "perde_nao_preco": "⚠️",
+               "sem_concorrencia": "·", "sem_match": "🔍", "sem_dado": "?", "sem_custo": "∅"}.get(r["acao"], "·")
         print(f"{tag} [{r['acao']}] {item_id} est={r.get('aq')} {str(r.get('titulo'))[:30]} "
               f"| cheio R${r.get('preco_cheio')} (margem {r.get('margem_cheio')}%) "
               f"| {r.get('detalhe')}", flush=True)
