@@ -1,13 +1,13 @@
 name: Repricer - Aplicador (Fase 2)
 
 # ESCREVE na Central de Promoções. Roda só quando voce clicar.
-# Padrao = SIMULACAO (nao escreve nada). Para aplicar de verdade, mude 'confirma' pra SIM.
+# Padrao = SIMULACAO (nao escreve). Para aplicar de verdade, mude 'confirma' pra SIM.
 # So mexe no item_id informado. Nunca em lote.
 on:
   workflow_dispatch:
     inputs:
       item_id:
-        description: "Item MLB a aplicar"
+        description: "Item MLB"
         type: string
         required: true
         default: MLB4214321589
@@ -16,9 +16,23 @@ on:
         type: choice
         required: true
         default: "NAO"
-        options:
-          - "NAO"
-          - "SIM"
+        options: ["NAO", "SIM"]
+      so_entrar:
+        description: "So ENTRAR no alvo (nao sai de nada) - bom pra testar entrada"
+        type: choice
+        required: true
+        default: "NAO"
+        options: ["NAO", "SIM"]
+      promo_id:
+        description: "(opcional) forcar promotion_id alvo, ex: P-MLB17755480"
+        type: string
+        required: false
+        default: ""
+      promo_type:
+        description: "(opcional) tipo da promo alvo, ex: SMART"
+        type: string
+        required: false
+        default: ""
 
 concurrency:
   group: ml-puxador
@@ -41,6 +55,9 @@ jobs:
           ML_REFRESH_TOKEN: ${{ secrets.ML_REFRESH_TOKEN }}
           SUPABASE_URL:     ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY:     ${{ secrets.SUPABASE_KEY }}
-          ITEM_ID:  ${{ github.event.inputs.item_id }}
-          CONFIRMA: ${{ github.event.inputs.confirma }}
+          ITEM_ID:    ${{ github.event.inputs.item_id }}
+          CONFIRMA:   ${{ github.event.inputs.confirma }}
+          SO_ENTRAR:  ${{ github.event.inputs.so_entrar }}
+          PROMO_ID:   ${{ github.event.inputs.promo_id }}
+          PROMO_TYPE: ${{ github.event.inputs.promo_type }}
         run: python repricer_aplicar.py
