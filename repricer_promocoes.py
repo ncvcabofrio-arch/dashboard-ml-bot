@@ -1,7 +1,8 @@
 """
-Sonda de PROMOÇÕES (Central de Promoções) — SOMENTE LEITURA.
-Mostra, por conta e por item, quais promoções o Mercado Livre oferece agora —
-destacando as COMPARTILHADAS (onde o ML banca parte do desconto).
+Sonda de PROMOÇÕES COMPARTILHADAS — SOMENTE LEITURA.
+Só itens ATIVOS. Para cada promoção onde o ML banca parte (meli_percentage),
+busca o detalhe da oferta: preço original, preço com desconto, quanto o ML paga
+e quanto VOCÊ recebe — e compara com custo/comissão pra estimar a margem final.
 Nada é aplicado nem alterado.
 """
 import os
@@ -9,10 +10,11 @@ import time
 import json
 import requests
 from supabase import create_client
-from ml_auth import obter_access  # mesma autenticação dos robôs
+from ml_auth import obter_access
 
 API = "https://api.mercadolibre.com"
-AMOSTRA = int(os.environ.get("AMOSTRA", "10"))
+AMOSTRA = int(os.environ.get("AMOSTRA", "20"))
+MARGEM_MIN = float(os.environ.get("MARGEM_MIN", "18"))
 SEED_REFRESH = os.environ.get("ML_REFRESH_TOKEN", "")
 sb = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"])
 
@@ -39,24 +41,30 @@ def contas():
     return cs
 
 
-def resumo_promos(pr):
-    """Extrai um resumo legível das promoções de um item (formato pode variar)."""
-    out = []
-    lista = pr if isinstance(pr, list) else (pr.get("results") if isinstance(pr, dict) else None)
-    for p in (lista or []):
-        if not isinstance(p, dict):
-            continue
-        out.append({
-            "type": p.get("type"),
-            "status": p.get("status"),
-            "id": p.get("id"),
-            "offer_id": p.get("offer_id"),
-            # sinais de custo compartilhado (o ML banca parte):
-            "meli_perc": p.get("meli_percentage"),
-            "rebate_meli": p.get("rebate_meli_percentage") or p.get("rebate_meli"),
-            "benefits": p.get("benefits"),
-        })
-    return out
+def custo_de(sku):
+    if not sku:
+        return None
+    try:
+        r = sb.table("produtos").select("custo").eq("sku", sku).limit(1).execute().data
+        if r and r[0].get("custo") is not None:
+            return float(r[0]["custo"])
+    except Exception:
+        pass
+    return None
+
+
+def comissao(preco, cat, ltid, access):
+    if not preco:
+        return None
+    path = f"/sites/MLB/listing_prices?price={preco}"
+    if ltid:
+        path += f"&listing_type_id={ltid}"
+    if cat:
+        path += f"&category_id={cat}"
+    st, d = get(path, access)
+    if isinstance(d, list) and d:
+        d = d[0]
+    return d.get("sale_fee_amount") if isinstance(d, dict) else None
 
 
 def main():
@@ -64,22 +72,39 @@ def main():
         access, sid, refresh = obter_access(sb, seller_id, refresh)
         print(f"\n===== CONTA {sid} =====", flush=True)
 
-        # 1) campanhas/ofertas disponíveis pra conta inteira
-        st, u = get(f"/seller-promotions/users/{sid}?app_version=v2", access)
-        print(f"[campanhas da conta] status {st}:", json.dumps(u, ensure_ascii=False)[:1500], flush=True)
-
-        # 2) promoções disponíveis por item (amostra)
-        st, busca = get(f"/users/{sid}/items/search?limit={AMOSTRA}", access)
+        st, busca = get(f"/users/{sid}/items/search?status=active&limit={AMOSTRA}", access)
         ids = (busca or {}).get("results", []) if isinstance(busca, dict) else []
-        print(f"[itens] {len(ids)} na amostra (status {st})", flush=True)
-        for k, item_id in enumerate(ids):
-            st, pr = get(f"/seller-promotions/items/{item_id}?app_version=v2", access)
-            print(f"- {item_id} (status {st}): {json.dumps(resumo_promos(pr), ensure_ascii=False)[:500]}", flush=True)
-            if k == 0:
-                print("   (JSON cru do 1o item):", json.dumps(pr, ensure_ascii=False)[:1100], flush=True)
+        print(f"itens ativos na amostra: {len(ids)}", flush=True)
+
+        detalhes_mostrados = 0
+        for item_id in ids:
+            st, promos = get(f"/seller-promotions/items/{item_id}?app_version=v2", access)
+            lista = promos if isinstance(promos, list) else []
+            comp = [p for p in lista if isinstance(p, dict) and p.get("meli_percentage")]
+            if not comp:
+                continue
+
+            st, it = get(f"/items/{item_id}", access)
+            preco = it.get("price") if isinstance(it, dict) else None
+            ltid = it.get("listing_type_id") if isinstance(it, dict) else None
+            cat = it.get("category_id") if isinstance(it, dict) else None
+            sku = (it.get("seller_sku") or it.get("seller_custom_field")) if isinstance(it, dict) else None
+            custo = custo_de(sku)
+
+            nomes = ", ".join(f"{p.get('type')}({p.get('id')}, ML {int((p.get('meli_percentage') or 0)*100)}%)" for p in comp)
+            print(f"\n- {item_id} | {(it.get('title') or '')[:45] if isinstance(it, dict) else ''}", flush=True)
+            print(f"    preço=R${preco}  custo={custo}  compartilhadas: {nomes}", flush=True)
+
+            # detalhe da 1ª compartilhada (preço proposto e quanto você recebe)
+            if detalhes_mostrados < 4:
+                p = comp[0]
+                pid, ptype = p.get("id"), p.get("type")
+                st, det = get(f"/seller-promotions/items/{item_id}?promotion_id={pid}&promotion_type={ptype}&app_version=v2", access)
+                print(f"    detalhe (status {st}):", json.dumps(det, ensure_ascii=False)[:900], flush=True)
+                detalhes_mostrados += 1
             time.sleep(0.2)
 
-    print("\n=== sonda de promoções concluída (nada foi alterado) ===", flush=True)
+    print("\n=== sonda concluída (nada foi alterado) ===", flush=True)
 
 
 if __name__ == "__main__":
