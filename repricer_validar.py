@@ -135,27 +135,57 @@ def validar_conta(seller_id, refresh):
         st_c, sale_fee, raw_com = comissao_para_preco(preco, cat, ltid, access)
         com_pct = (sale_fee / preco) if (sale_fee and preco) else None
 
+        # "recebe" = preço - comissão - frete  (o "receba tanto" do painel do ML)
+        recebe = None
+        if preco is not None and sale_fee is not None:
+            recebe = round(preco - sale_fee - frete, 2)
+
         print(f"\n- {item_id} | {(it.get('title') or '')[:50]}", flush=True)
-        print(f"    SKU={sku}  preço=R${preco}  tipo={ltid}  cat={cat}  catálogo={eh_catalogo}", flush=True)
-        print(f"    custo={custo}  frete_hist={frete}  sale_fee={sale_fee} ({(com_pct*100 if com_pct else 0):.2f}%)", flush=True)
+        print(f"    SKU={sku}  tipo={ltid}  cat={cat}  catálogo={eh_catalogo}", flush=True)
+        print(f"    custo={custo}  frete_hist={frete}  comissao(sale_fee)={sale_fee}", flush=True)
+        if recebe is not None:
+            print(f"    >>> VENDE por R${preco}  ->  RECEBE ~R${recebe}  (já tirando comissão e frete)", flush=True)
+        if custo is not None and recebe is not None:
+            lucro = round(recebe - custo, 2)
+            margem = (lucro / preco * 100) if preco else 0
+            print(f"    >>> lucro atual ~R${lucro}  |  margem atual ~{margem:.2f}%", flush=True)
 
         if custo is not None and com_pct is not None:
             p = piso(custo, frete, com_pct)
-            print(f"    >>> PISO (margem {MARGEM_MIN:.0f}%) = R${p}", flush=True)
+            print(f"    >>> PISO (margem {MARGEM_MIN:.0f}%) = R${p}   (nunca vender abaixo disso)", flush=True)
             if preco is not None and p is not None:
-                folga = preco - p
-                print(f"    >>> folga até o piso = R${folga:.2f}", flush=True)
+                print(f"    >>> folga até o piso = R${preco - p:.2f}", flush=True)
+        elif custo is None:
+            print("    >>> sem custo cadastrado — não dá pra calcular margem/piso deste item", flush=True)
         else:
-            print("    >>> sem custo cadastrado ou comissão indisponível — piso não calculado", flush=True)
+            print("    >>> comissão indisponível — piso não calculado", flush=True)
 
         if eh_catalogo:
             stw, ptw = price_to_win(item_id, access)
             print(f"    catálogo: status_ptw={stw}  produto={cat_prod}", flush=True)
-            if n == 0:  # imprime o JSON cru só do primeiro, pra vermos os campos reais
+
+            # Caminho B: pelo produto de catálogo, tentar ver o vencedor do buy box
+            # e a lista de concorrentes — mesmo sem o item estar 'opted in'.
+            if cat_prod:
+                st_p, prod = get(f"/products/{cat_prod}", access)
+                bbw = prod.get("buy_box_winner") if isinstance(prod, dict) else None
+                pstat = prod.get("status") if isinstance(prod, dict) else None
+                print(f"    produto {cat_prod}: status={st_p}/{pstat}  buy_box_winner={json.dumps(bbw, ensure_ascii=False)[:220] if bbw else None}", flush=True)
+                if n == 0 and isinstance(prod, dict):
+                    print("    /products (campos):", ",".join(prod.keys()), flush=True)
+                    # lista de itens/vendedores competindo nesse produto
+                    st_i, itens_prod = get(f"/products/{cat_prod}/items", access)
+                    print(f"    /products/items (status {st_i}):", json.dumps(itens_prod, ensure_ascii=False)[:600], flush=True)
+
+            if n == 0:
                 print("    price_to_win (JSON cru):", json.dumps(ptw, ensure_ascii=False)[:600], flush=True)
 
-        if n == 0:  # idem pra comissão
-            print("    listing_prices (JSON cru):", json.dumps(raw_com, ensure_ascii=False)[:500], flush=True)
+        if n == 0:  # no primeiro item, despeja os campos crus pra travarmos a fórmula
+            print("    listing_prices (JSON cru):", json.dumps(raw_com, ensure_ascii=False)[:700], flush=True)
+            print("    shipping do item (JSON cru):", json.dumps(it.get("shipping"), ensure_ascii=False)[:500], flush=True)
+            # sonda de custo de envio (pode exigir params; se falhar, só ignoramos)
+            st_s, ship = get(f"/items/{item_id}/shipping_options", access)
+            print(f"    shipping_options (status {st_s}):", json.dumps(ship, ensure_ascii=False)[:500], flush=True)
 
         time.sleep(0.3)
 
