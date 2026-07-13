@@ -1,60 +1,27 @@
-name: Repricer - Desconto individual (teste 1 item)
+name: Repricer - Sonda Competitiva (Fase 1, leitura)
 
-# Cria um DESCONTO PRÓPRIO (PRICE_DISCOUNT) num único anúncio, com o preço
-# calculado pra bater a MARGEM-ALVO. Nunca mexe no preço do anúncio — é oferta
-# na Central de Promoções e some quando expira (máx 14 dias).
-# Padrao = SIMULACAO. So escreve com confirma=SIM.
+# Cruza seus anúncios de CATÁLOGO com a concorrência (price_to_win + concorrentes)
+# e a sua margem, e imprime a DECISÃO que o robô tomaria. NÃO escreve nada.
 on:
   workflow_dispatch:
     inputs:
-      item_id:
-        description: "O anúncio (1 item). VAZIO + seller_id = sonda/busca de candidatos"
-        type: string
-        required: false
-        default: ""
       seller_id:
-        description: "Sonda: conta pra procurar itens que PODEM entrar. Ex: 177795203"
+        description: "Conta a analisar. Ex: 177795203"
         type: string
-        required: false
-        default: ""
-      margem_alvo:
-        description: "Margem % planejada (ex 18). O robô calcula o preço pra bater isso."
-        type: string
-        required: false
-        default: "18"
-      quantos:
-        description: "Sonda: quantos candidatos listar"
-        type: string
-        required: false
-        default: "15"
-      dias:
-        description: "Duração do desconto em dias (máx 14)"
-        type: string
-        required: false
-        default: "14"
-      deal_price:
-        description: "(Opcional) força um preço fixo em vez de calcular pela margem"
-        type: string
-        required: false
-        default: ""
-      top_deal_price:
-        description: "(Opcional) preço menor só p/ clientes nível 3-6 (loyalty)"
-        type: string
-        required: false
-        default: ""
-      confirma:
-        description: "Criar de verdade? (NAO = simulacao)"
-        type: choice
         required: true
-        default: "NAO"
-        options: ["NAO", "SIM"]
+        default: ""
+      max_itens:
+        description: "Quantos anúncios amostrar (comece pequeno, ex 30)"
+        type: string
+        required: false
+        default: "30"
 
 concurrency:
   group: ml-puxador
   cancel-in-progress: false
 
 jobs:
-  desconto:
+  competitivo:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -63,19 +30,13 @@ jobs:
           python-version: '3.11'
       - name: Instalar dependencias
         run: pip install requests supabase
-      - name: Criar desconto (ou simular)
+      - name: Sondar concorrencia (so leitura)
         env:
           ML_CLIENT_ID:     ${{ secrets.ML_CLIENT_ID }}
           ML_CLIENT_SECRET: ${{ secrets.ML_CLIENT_SECRET }}
           ML_REFRESH_TOKEN: ${{ secrets.ML_REFRESH_TOKEN }}
           SUPABASE_URL:     ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY:     ${{ secrets.SUPABASE_KEY }}
-          ITEM_ID:        ${{ github.event.inputs.item_id }}
-          SELLER_ID:      ${{ github.event.inputs.seller_id }}
-          MARGEM_ALVO:    ${{ github.event.inputs.margem_alvo }}
-          QUANTOS:        ${{ github.event.inputs.quantos }}
-          DIAS:           ${{ github.event.inputs.dias }}
-          DEAL_PRICE:     ${{ github.event.inputs.deal_price }}
-          TOP_DEAL_PRICE: ${{ github.event.inputs.top_deal_price }}
-          CONFIRMA:       ${{ github.event.inputs.confirma }}
-        run: python repricer_aplicar.py
+          SELLER_ID:  ${{ github.event.inputs.seller_id }}
+          MAX_ITENS:  ${{ github.event.inputs.max_itens }}
+        run: python repricer_competitivo.py
