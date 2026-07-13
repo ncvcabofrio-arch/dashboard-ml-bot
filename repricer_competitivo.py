@@ -26,6 +26,7 @@ API = rec.API
 DEBUG = (os.environ.get("DEBUG") or "") == "1"
 DEBUG_ITEM = (os.environ.get("DEBUG_ITEM") or "").strip()   # analisa só 1 item, verboso
 NORM_CUSTO = {}   # sku normalizado -> sku original na tabela produtos (só p/ DIAGNÓSTICO)
+MEUS_SELLERS = set()   # TODOS os seus seller_ids (as 3 contas) — nunca competir consigo mesmo
 
 
 def _norm(s):
@@ -64,13 +65,15 @@ def price_to_win(item_id, access):
 
 
 def concorrentes(product_id, sid, access):
-    """Preços dos concorrentes na página de produto (exclui você). Retorna lista de floats."""
+    """Preços dos concorrentes na página de produto. Exclui TODAS as suas contas
+    (MEUS_SELLERS) — nunca conta você mesmo como concorrente. Retorna lista de floats."""
     st, d = rec.get(f"/products/{product_id}/items?limit=50", access)
     res = d.get("results") if isinstance(d, dict) else None
     precos = []
     for r in (res or []):
         try:
-            if str(r.get("seller_id")) != str(sid) and r.get("price"):
+            s = str(r.get("seller_id"))
+            if s not in MEUS_SELLERS and s != str(sid) and r.get("price"):
                 precos.append(float(r["price"]))
         except (TypeError, ValueError):
             pass
@@ -306,14 +309,17 @@ def main():
     if not SELLER_ID:
         print("Defina SELLER_ID (ex 177795203).", flush=True); return
     rec.preload()
-    # acha o access da conta escolhida
+    # autentica TODAS as contas: guarda os seller_ids (p/ não competir consigo) e pega o access da escolhida
     access = sid = None
     for seller_id, refresh in rec.contas():
         a, s, refresh = obter_access(rec.sb, seller_id, refresh)
+        if s:
+            MEUS_SELLERS.add(str(s))
         if str(s) == str(SELLER_ID):
-            access, sid = a, s; break
+            access, sid = a, s
     if not access:
         print(f"não autentiquei a conta {SELLER_ID}.", flush=True); return
+    print(f"suas contas (não contam como concorrente): {', '.join(sorted(MEUS_SELLERS))}", flush=True)
 
     for k in rec.CUSTOS:
         NORM_CUSTO[_norm(k)] = k
