@@ -33,6 +33,12 @@ on:
         required: true
         default: "NAO"
         options: ["NAO", "SIM"]
+      pular_sair:
+        description: "Lote: pular os 'sair' (aplica so ganhos entrar/trocar)?"
+        type: choice
+        required: true
+        default: "NAO"
+        options: ["NAO", "SIM"]
       so_entrar:
         description: "Item: so ENTRAR (nao sai de nada)?"
         type: choice
@@ -76,6 +82,7 @@ jobs:
           LIMITE:     ${{ github.event.inputs.limite }}
           CONFIRMA:   ${{ github.event.inputs.confirma }}
           SO_GANHO:   ${{ github.event.inputs.so_ganho }}
+          PULAR_SAIR: ${{ github.event.inputs.pular_sair }}
           SO_ENTRAR:  ${{ github.event.inputs.so_entrar }}
           PROMO_ID:   ${{ github.event.inputs.promo_id }}
           PROMO_TYPE: ${{ github.event.inputs.promo_type }}
