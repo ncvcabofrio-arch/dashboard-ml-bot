@@ -142,7 +142,7 @@ def _busca_catalogo(q, sid, access, tipo, p0, nome_chave=None):
     st, d = rec.get(url, access)
     prods = (d.get("results") if isinstance(d, dict) else None) or []
     lo, hi = FAIXA_MIN * p0, FAIXA_MAX * p0
-    precos, usados, pulados = [], [], 0
+    precos, usado, pulados = [], None, 0
     for prod in prods[:6]:
         nome = str(prod.get("name") or "")
         if nome_chave and nome_chave.lower() not in nome.lower():
@@ -151,12 +151,17 @@ def _busca_catalogo(q, sid, access, tipo, p0, nome_chave=None):
         if not prod.get("id"):
             continue
         c = [x for x in concorrentes(prod["id"], sid, access) if lo <= x <= hi]
-        precos += c
-        usados.append(f"{prod['id']}({len(c)})")
+        if c:                      # usa só o produto MAIS RELEVANTE que casou (não mistura)
+            precos = c
+            usado = (prod["id"], nome)
+            break
     if DEBUG:
+        alvo = f"{usado[0]} '{usado[1][:45]}'" if usado else "nenhum"
         print(f"    [products/search {tipo}='{str(q)[:40]}'] HTTP {st} | produtos={len(prods)} "
-              f"| usados: {', '.join(usados) or 'nenhum'} | fora-do-modelo: {pulados} "
-              f"| faixa R${lo:.0f}-{hi:.0f} | conc={len(precos)}", flush=True)
+              f"| fora-do-modelo: {pulados} | usado: {alvo} | faixa R${lo:.0f}-{hi:.0f} "
+              f"| conc={len(precos)} menor R${min(precos):.2f}" if precos else
+              f"    [products/search {tipo}='{str(q)[:40]}'] HTTP {st} | produtos={len(prods)} "
+              f"| fora-do-modelo: {pulados} | usado: nenhum | conc=0", flush=True)
     return sorted(precos)
 
 
