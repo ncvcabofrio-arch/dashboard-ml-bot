@@ -29,6 +29,6 @@ jobs:
           ML_REFRESH_TOKEN: ${{ secrets.ML_REFRESH_TOKEN }}
           SUPABASE_URL:     ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY:     ${{ secrets.SUPABASE_KEY }}
-          AMOSTRA: '40'
+          MAX_ITENS: '0'      # 0 = TODOS os ativos (pagina tudo). Ponha 40 pra testar rápido.
           MARGEM_MIN: '18'
         run: python repricer_sugestoes.py
