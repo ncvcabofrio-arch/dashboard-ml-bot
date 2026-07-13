@@ -27,19 +27,30 @@ PISOS = {}           # sku -> (margem_minima, nome_grupo)
 _pct_lock = threading.Lock()
 
 
+def _todas_linhas(tabela, cols, passo=1000):
+    """Lê a tabela INTEIRA paginando (PostgREST devolve no máx 1000 linhas por vez)."""
+    linhas, ini = [], 0
+    while True:
+        lote = (sb.table(tabela).select(cols).range(ini, ini + passo - 1).execute().data) or []
+        linhas += lote
+        if len(lote) < passo:
+            break
+        ini += passo
+    return linhas
+
+
 def preload():
     """Carrega custos e grupos de uma vez só, pra não bater no banco por item."""
     try:
-        rows = sb.table("produtos").select("sku, custo").execute().data or []
-        for r in rows:
+        for r in _todas_linhas("produtos", "sku, custo"):
             if r.get("sku") and r.get("custo") is not None:
                 CUSTOS[r["sku"]] = float(r["custo"])
     except Exception as e:
         print("Aviso: não consegui pré-carregar custos:", e, flush=True)
     try:
         grupos = {g["id"]: (float(g["margem_minima"]), g.get("nome") or "Grupo")
-                  for g in (sb.table("repricer_grupos").select("id, margem_minima, nome").execute().data or [])}
-        for et in (sb.table("repricer_etiquetas").select("sku, grupo_id").execute().data or []):
+                  for g in _todas_linhas("repricer_grupos", "id, margem_minima, nome")}
+        for et in _todas_linhas("repricer_etiquetas", "sku, grupo_id"):
             if et.get("sku") in (None, "") or et.get("grupo_id") not in grupos:
                 continue
             PISOS[et["sku"]] = grupos[et["grupo_id"]]
