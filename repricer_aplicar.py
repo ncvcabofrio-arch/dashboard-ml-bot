@@ -103,10 +103,15 @@ def entrar_body_path(item_id, o):
     body = {"promotion_id": o.get("id"), "promotion_type": o.get("type")}
     if o.get("ref_id"):
         body["offer_id"] = o["ref_id"]
-    if o.get("type") in ("DEAL", "PRICE_DISCOUNT", "LIGHTNING", "DOD"):
+    # tipos com preço/data definidos pelo vendedor: manda preço e as datas do candidato
+    if o.get("type") in ("DEAL", "PRICE_DISCOUNT", "LIGHTNING", "DOD", "VOLUME"):
         preco = o.get("price") or o.get("suggested_discounted_price")
         if preco:
             body["deal_price"] = preco
+        if o.get("start_date"):
+            body["start_date"] = o["start_date"]
+        if o.get("finish_date"):
+            body["finish_date"] = o["finish_date"]
     return f"/seller-promotions/items/{item_id}?app_version=v2", body
 
 
