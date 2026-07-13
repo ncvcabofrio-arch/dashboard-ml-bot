@@ -77,22 +77,26 @@ def analisar(item_id, access, sid):
     cat, ltid = it.get("category_id"), it.get("listing_type_id")
     sku = it.get("seller_sku") or it.get("seller_custom_field")
     pid = it.get("catalog_product_id")
-    catalog = bool(it.get("catalog_listing")) or bool(pid)
+    catalog_listing = bool(it.get("catalog_listing"))   # SÓ True = compete de fato no catálogo
     custo = rec.custo_de(sku)
     if custo is None or not p0:
-        return {"item_id": item_id, "titulo": it.get("title"), "acao": "sem_custo",
-                "detalhe": "sem custo cadastrado ou sem preço"}
+        return {"item_id": item_id, "titulo": it.get("title"), "sku": sku, "acao": "sem_custo",
+                "detalhe": f"sem custo (SKU={sku or '—'}) | cheio R${p0 or '—'}"}
     frete, _ = rec.frete_de(sku, item_id, access)
     piso, grupo = rec.margem_minima_do(sku)
     pmin = preco_piso(piso, cat, ltid, frete, custo, access, p0)
     m_cheio, _, _ = margem_no_preco(p0, cat, ltid, frete, custo, access)
 
-    base = {"item_id": item_id, "titulo": it.get("title"), "grupo": grupo, "piso": piso,
+    base = {"item_id": item_id, "titulo": it.get("title"), "sku": sku, "grupo": grupo, "piso": piso,
             "preco_cheio": round(p0, 2), "margem_cheio": round(m_cheio, 1),
-            "preco_piso": pmin, "catalog": catalog}
+            "preco_piso": pmin, "catalog": catalog_listing}
 
-    if not catalog:
-        base.update({"acao": "sem_concorrencia", "detalhe": "não é catálogo (sem price_to_win)"})
+    if not catalog_listing:
+        if pid:
+            base.update({"acao": "fora_catalogo",
+                         "detalhe": f"elegível ao catálogo (produto {pid}) mas SEM opt-in — não compete"})
+        else:
+            base.update({"acao": "sem_concorrencia", "detalhe": "não é catálogo (sem visão de concorrência)"})
         return base
 
     ptw = price_to_win(item_id, access)
@@ -163,7 +167,7 @@ def main():
         linhas.append(r)
         tag = {"descontar": "🎯", "nao_perseguir": "🛑", "subir_margem": "⬆️",
                "manter_ganhando": "🏆", "perde_nao_preco": "⚠️", "sem_concorrencia": "·",
-               "sem_dado": "?", "sem_custo": "∅"}.get(r["acao"], "·")
+               "fora_catalogo": "📦", "sem_dado": "?", "sem_custo": "∅"}.get(r["acao"], "·")
         print(f"{tag} [{r['acao']}] {item_id} {str(r.get('titulo'))[:34]} "
               f"| cheio R${r.get('preco_cheio')} (margem {r.get('margem_cheio')}%) "
               f"| {r.get('detalhe')}", flush=True)
@@ -171,9 +175,21 @@ def main():
 
     print("\n=== RESUMO: " + ", ".join(f"{k}: {v}" for k, v in cont.items()) + " ===", flush=True)
     cat = sum(1 for l in linhas if l.get("catalog"))
-    print(f"itens de catálogo na amostra: {cat}/{len(linhas)} "
-          f"(só esses têm visão de concorrência).", flush=True)
-    print("Nada foi escrito. É só a leitura da régua competitiva.", flush=True)
+    print(f"competindo no catálogo (opt-in feito): {cat}/{len(linhas)} — só esses têm price_to_win.", flush=True)
+
+    faltando = [l for l in linhas if l["acao"] == "sem_custo"]
+    if faltando:
+        print(f"\n--- {len(faltando)} SEM CUSTO (preencher na tabela 'produtos') ---", flush=True)
+        for l in faltando:
+            print(f"   {l['item_id']} | SKU={l.get('sku') or '—'} | {str(l.get('titulo'))[:45]}", flush=True)
+
+    fora = [l for l in linhas if l["acao"] == "fora_catalogo"]
+    if fora:
+        print(f"\n--- {len(fora)} ELEGÍVEIS AO CATÁLOGO, SEM OPT-IN (oportunidade de competir) ---", flush=True)
+        for l in fora:
+            print(f"   {l['item_id']} | {str(l.get('titulo'))[:50]}", flush=True)
+
+    print("\nNada foi escrito. É só a leitura da régua competitiva.", flush=True)
 
 
 if __name__ == "__main__":
