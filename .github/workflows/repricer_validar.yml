@@ -1,0 +1,37 @@
+name: Repricer - Validar (Fase 0, so leitura)
+
+# Roda só quando você clicar (Actions -> este workflow -> Run workflow).
+# NAO muda preço de nada — apenas lê e imprime no log.
+on:
+  workflow_dispatch: {}
+
+# Mesmo grupo dos robôs de sincronização: garante que este job NUNCA roda ao
+# mesmo tempo que eles, pra não colidir no refresh token compartilhado.
+concurrency:
+  group: ml-puxador
+  cancel-in-progress: false
+
+jobs:
+  validar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Instalar dependencias
+        run: pip install requests supabase
+
+      - name: Rodar validacao
+        env:
+          ML_CLIENT_ID:     ${{ secrets.ML_CLIENT_ID }}
+          ML_CLIENT_SECRET: ${{ secrets.ML_CLIENT_SECRET }}
+          ML_REFRESH_TOKEN: ${{ secrets.ML_REFRESH_TOKEN }}
+          SUPABASE_URL:     ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY:     ${{ secrets.SUPABASE_KEY }}
+          AMOSTRA: '5'
+          MARGEM_MIN: '18'
+          # SO_SELLER: '123456789'   # opcional: validar só uma conta
+        run: python repricer_validar.py
