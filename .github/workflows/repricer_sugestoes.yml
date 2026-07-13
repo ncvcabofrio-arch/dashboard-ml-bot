@@ -1,0 +1,34 @@
+name: Repricer - Sugestoes de promocoes (Fase 1)
+
+# Roda quando você clicar (Actions -> Run workflow). NAO aplica nada no ML —
+# só calcula as recomendações e grava na tabela repricer_sugestoes.
+on:
+  workflow_dispatch: {}
+
+concurrency:
+  group: ml-puxador
+  cancel-in-progress: false
+
+jobs:
+  sugestoes:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Instalar dependencias
+        run: pip install requests supabase
+
+      - name: Rodar recomendacoes
+        env:
+          ML_CLIENT_ID:     ${{ secrets.ML_CLIENT_ID }}
+          ML_CLIENT_SECRET: ${{ secrets.ML_CLIENT_SECRET }}
+          ML_REFRESH_TOKEN: ${{ secrets.ML_REFRESH_TOKEN }}
+          SUPABASE_URL:     ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY:     ${{ secrets.SUPABASE_KEY }}
+          AMOSTRA: '40'
+          MARGEM_MIN: '18'
+        run: python repricer_sugestoes.py
