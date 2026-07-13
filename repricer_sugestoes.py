@@ -178,9 +178,14 @@ def margem_minima_do(sku):
     return MARGEM_PADRAO, "Padrão"
 
 
-def comissao(preco, cat, ltid, access):
-    if not preco:
-        return None
+# comissão = % fixa por (categoria, tipo de anúncio). Acima do "custo fixo"
+# (itens > R$79) a tarifa é só preço × %. Cacheamos a % pra não chamar a API
+# uma vez por oferta — isso derruba MUITO o tempo de execução.
+LIMITE_CUSTO_FIXO = 79.0
+_pct_cache = {}
+
+
+def _consulta_listing(preco, cat, ltid, access):
     path = f"/sites/MLB/listing_prices?price={preco}"
     if ltid:
         path += f"&listing_type_id={ltid}"
@@ -189,7 +194,50 @@ def comissao(preco, cat, ltid, access):
     st, d = get(path, access)
     if isinstance(d, list) and d:
         d = d[0]
-    return d.get("sale_fee_amount") if isinstance(d, dict) else None
+    return d if isinstance(d, dict) else None
+
+
+def _percentual(cat, ltid, access):
+    key = (cat, ltid)
+    if key in _pct_cache:
+        return _pct_cache[key]
+    pct = None
+    d = _consulta_listing(1000, cat, ltid, access)   # 1000 está acima do custo fixo
+    if d:
+        det = d.get("sale_fee_details") or {}
+        pct = det.get("percentage_fee")
+        if pct is None and d.get("sale_fee_amount"):
+            pct = float(d["sale_fee_amount"]) / 1000.0 * 100.0   # deriva a %
+    _pct_cache[key] = pct
+    return pct
+
+
+def comissao(preco, cat, ltid, access):
+    if not preco:
+        return None
+    # itens acima do custo fixo: tarifa = preço × % (cacheado, sem nova chamada)
+    if preco >= LIMITE_CUSTO_FIXO:
+        pct = _percentual(cat, ltid, access)
+        if pct is not None:
+            return round(preco * pct / 100.0, 2)
+    # itens baratos (tem custo fixo por unidade): consulta exata na API
+    d = _consulta_listing(round(preco, 2), cat, ltid, access)
+    return d.get("sale_fee_amount") if d else None
+
+
+def detalhes_itens(ids, access):
+    """Busca detalhes de VÁRIOS itens de uma vez (multiget, 20 por chamada)."""
+    out = {}
+    attrs = "id,price,listing_type_id,category_id,seller_sku,seller_custom_field,title,status"
+    for i in range(0, len(ids), 20):
+        lote = ids[i:i + 20]
+        st, d = get(f"/items?ids={','.join(lote)}&attributes={attrs}", access)
+        if isinstance(d, list):
+            for row in d:
+                b = row.get("body") if isinstance(row, dict) else None
+                if isinstance(b, dict) and b.get("id"):
+                    out[b["id"]] = b
+    return out
 
 
 def ofertas_do_item(item_id, access):
@@ -199,11 +247,65 @@ def ofertas_do_item(item_id, access):
     return resumo if isinstance(resumo, list) else []
 
 
+# Você JÁ está participando quando o status é "started" (confirmado na sonda)
+# ou quando o ref_id começa com "OFFER-" (candidatas vêm como "CANDIDATE-").
+STATUS_ATIVA = {"started", "active", "in_progress", "ongoing"}
+
+
+def eh_ativa(o):
+    if (o.get("status") or "").lower() in STATUS_ATIVA:
+        return True
+    return str(o.get("ref_id") or "").upper().startswith("OFFER-")
+
+
+def preco_oferta(o):
+    """Preço que o comprador paga nessa oferta (candidatas têm 'price';
+    ativas podem trazer o preço aplicado em outro campo)."""
+    for k in ("price", "applied_price", "discounted_price", "deal_price", "new_price"):
+        v = o.get(k)
+        try:
+            v = float(v)
+            if v > 0:
+                return v
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
+def avaliar(o, cat, ltid, access, frete, custo):
+    """Calcula a margem de UMA oferta (candidata ou ativa).
+    Retorna None se não der pra avaliar (sem preço ou sem preço original)."""
+    pb = preco_oferta(o)
+    p0 = o.get("original_price")
+    if not pb or not p0:
+        return None
+    p0 = float(p0)
+    sp = float(o.get("seller_percentage") or 0)
+    mp = float(o.get("meli_percentage") or 0)
+    # comissão cheia sobre o preço em promoção; o ML banca via REDUÇÃO da tarifa
+    # (redução = meli% do preço original), exatamente como o painel mostra.
+    com_cheia = comissao(round(pb, 2), cat, ltid, access) or 0
+    reducao = mp / 100.0 * p0
+    tarifa = max(com_cheia - reducao, 0)
+    recebe = pb - tarifa - frete              # = "Você recebe" do painel
+    margem = ((recebe - custo) / pb * 100) if pb else -999
+    return {"o": o, "pb": round(pb, 2), "sp": sp, "mp": mp,
+            "tarifa": round(tarifa, 2), "frete": round(frete, 2),
+            "recebe": round(recebe, 2), "margem": round(margem, 2)}
+
+
+def _rotulo(a):
+    o = a["o"]
+    return f"{o.get('name') or o.get('type') or '?'} R${a['pb']:.2f}->{a['margem']:.1f}%"
+
+
 def main():
     total_sug = 0
+    contadores = {"entrar": 0, "trocar": 0, "sair": 0, "manter": 0}
     # limpa recomendações antigas ainda pendentes (mantém aprovadas/recusadas no histórico)
     try:
         sb.table("repricer_sugestoes").delete().eq("status", "pendente").execute()
+        sb.table("repricer_sugestoes").delete().eq("status", "ok").execute()
     except Exception as e:
         print("Aviso: não consegui limpar pendentes:", e, flush=True)
 
@@ -213,16 +315,23 @@ def main():
         ids, total = todos_ativos(sid, access)
         cap = f" (varrendo {len(ids)}, limite de teste MAX_ITENS={MAX_ITENS})" if MAX_ITENS else ""
         print(f"itens ativos: {len(ids)} de {total if total is not None else '?'}{cap}", flush=True)
+        detalhes = detalhes_itens(ids, access)   # detalhes em lote (rápido)
 
         for item_id in ids:
             ofertas = ofertas_do_item(item_id, access)
-            # só as compartilhadas (ML banca parte) que dá pra ENTRAR (candidate) e com preço
-            comp = [o for o in ofertas if isinstance(o, dict) and o.get("meli_percentage")
-                    and o.get("status") == "candidate" and o.get("price") and o.get("original_price")]
-            if not comp:
+            if not isinstance(ofertas, list) or not ofertas:
+                continue
+            # ATIVAS (já participando) e CANDIDATAS compartilhadas (ML banca parte)
+            ativas_raw = [o for o in ofertas if isinstance(o, dict) and eh_ativa(o)]
+            cand_raw = [o for o in ofertas if isinstance(o, dict)
+                        and (o.get("status") or "").lower() == "candidate"
+                        and o.get("meli_percentage") and o.get("original_price")]
+            if not ativas_raw and not cand_raw:
                 continue
 
-            st, it = get(f"/items/{item_id}", access)
+            it = detalhes.get(item_id)
+            if not isinstance(it, dict):
+                st, it = get(f"/items/{item_id}", access)
             if not isinstance(it, dict):
                 continue
             preco = it.get("price")
@@ -236,40 +345,51 @@ def main():
             frete, frete_origem = frete_de(sku, item_id, access)
             piso, grupo = margem_minima_do(sku)
 
-            avaliadas = []
-            for o in comp:
-                p0 = float(o["original_price"])          # preço cheio
-                pb = float(o["price"])                    # preço em promoção (comprador paga)
-                sp = float(o.get("seller_percentage") or 0)
-                mp = float(o.get("meli_percentage") or 0)
-                # comissão cheia sobre o preço em promoção; o ML banca via REDUÇÃO da tarifa
-                # (a redução = meli% do preço original), exatamente como o painel mostra.
-                com_cheia = comissao(round(pb, 2), cat, ltid, access) or 0
-                reducao = mp / 100.0 * p0
-                tarifa = max(com_cheia - reducao, 0)
-                recebe = pb - tarifa - frete              # = "Você recebe" do painel
-                lucro = recebe - custo
-                margem = (lucro / pb * 100) if pb else -999
-                avaliadas.append({
-                    "o": o, "pb": pb, "sp": sp, "mp": mp,
-                    "tarifa": round(tarifa, 2), "frete": round(frete, 2),
-                    "recebe": round(recebe, 2), "margem": round(margem, 2),
-                })
+            # avalia a ATIVA (se houver) e as CANDIDATAS
+            ativa = None
+            for o in ativas_raw:
+                ev = avaliar(o, cat, ltid, access, frete, custo)
+                if ev:
+                    ativa = ev
+                    break
+            cand = [avaliar(o, cat, ltid, access, frete, custo) for o in cand_raw]
+            cand = [c for c in cand if c]
+            seguras = [c for c in cand if c["margem"] >= piso]
 
-            seguras = [a for a in avaliadas if a["margem"] >= piso]
-            if not seguras:
-                continue
-            # melhor = maior desconto pro comprador (menor preço) que mantém a margem
-            melhor = min(seguras, key=lambda a: a["pb"])
-            o = melhor["o"]
+            # ---- decide a ação segundo a sua regra ----
+            alerta = None
+            alvo = None
+            if ativa:
+                if ativa["margem"] < piso:
+                    # ATIVA abaixo do piso: recuperar margem já
+                    alerta = "ativa_abaixo_piso"
+                    if seguras:
+                        acao = "trocar"
+                        alvo = max(seguras, key=lambda a: a["recebe"])   # a que te paga mais
+                    else:
+                        acao = "sair"   # nenhuma compartilhada segura o piso -> voltar ao cheio
+                else:
+                    # ATIVA ok: só troca se alguma te faz RECEBER MAIS (recuperar margem)
+                    melhores = [a for a in seguras if a["recebe"] > ativa["recebe"] + 0.01]
+                    if melhores:
+                        acao = "trocar"
+                        alvo = max(melhores, key=lambda a: a["recebe"])
+                    else:
+                        acao = "manter"
+            else:
+                # sem ativa: entrar na de maior desconto (mais visibilidade) que segura o piso
+                if seguras:
+                    acao = "entrar"
+                    alvo = min(seguras, key=lambda a: a["pb"])
+                else:
+                    continue  # sem ativa e nenhuma candidata segura o piso -> nada a fazer
 
-            # resumo das OUTRAS opções compartilhadas e por que não foram escolhidas
-            def _fmt(a):
-                nm = a["o"].get("name") or a["o"].get("type") or "?"
-                flag = "ok" if a["margem"] >= piso else f"< {piso:.0f}%"
-                return f"{nm} R${a['pb']:.2f}->{a['margem']:.1f}% ({flag})"
+            contadores[acao] = contadores.get(acao, 0) + 1
+
+            # opções compartilhadas recusadas (pra você ver o porquê)
             rejeitadas = " | ".join(
-                _fmt(a) for a in sorted(avaliadas, key=lambda x: x["pb"]) if a is not melhor
+                _rotulo(a) + (" (ok)" if a["margem"] >= piso else f" (<{piso:.0f}%)")
+                for a in sorted(cand, key=lambda x: x["pb"]) if a is not alvo
             )
 
             sug = {
@@ -278,34 +398,59 @@ def main():
                 "sku": sku,
                 "titulo": titulo,
                 "preco_atual": preco,
-                "promocao_id": o.get("id"),
-                "promocao_ref_id": o.get("ref_id"),
-                "promocao_nome": o.get("name"),
-                "promocao_tipo": o.get("type"),
-                "preco_comprador": melhor["pb"],
-                "seller_percentage": melhor["sp"],
-                "meli_percentage": melhor["mp"],
-                "tarifa_venda": melhor["tarifa"],
-                "custo_envio": melhor["frete"],
-                "custo_envio_origem": frete_origem,
-                "recebe_liquido": melhor["recebe"],
+                "acao": acao,
+                "alerta": alerta,
+                "tem_ativa": bool(ativa),
+                "ativa_nome": (ativa["o"].get("name") if ativa else None),
+                "ativa_preco": (ativa["pb"] if ativa else None),
+                "ativa_margem": (ativa["margem"] if ativa else None),
                 "custo": custo,
-                "margem_resultante": melhor["margem"],
+                "custo_envio": frete,
+                "custo_envio_origem": frete_origem,
                 "grupo": grupo,
                 "margem_minima": piso,
-                "alternativas": len(seguras) - 1,
+                "alternativas": max(len(seguras) - (1 if alvo in seguras else 0), 0),
                 "rejeitadas": rejeitadas,
-                "status": "pendente",
+                "status": "ok" if acao == "manter" else "pendente",
             }
+            # dados da promoção RECOMENDADA (quando há um alvo)
+            if alvo:
+                o = alvo["o"]
+                sug.update({
+                    "promocao_id": o.get("id"),
+                    "promocao_ref_id": o.get("ref_id"),
+                    "promocao_nome": o.get("name"),
+                    "promocao_tipo": o.get("type"),
+                    "preco_comprador": alvo["pb"],
+                    "seller_percentage": alvo["sp"],
+                    "meli_percentage": alvo["mp"],
+                    "tarifa_venda": alvo["tarifa"],
+                    "recebe_liquido": alvo["recebe"],
+                    "margem_resultante": alvo["margem"],
+                })
+            elif acao == "manter" and ativa:
+                sug.update({
+                    "promocao_nome": ativa["o"].get("name"),
+                    "promocao_tipo": ativa["o"].get("type"),
+                    "preco_comprador": ativa["pb"],
+                    "recebe_liquido": ativa["recebe"],
+                    "margem_resultante": ativa["margem"],
+                })
+
             try:
                 sb.table("repricer_sugestoes").insert(sug).execute()
                 total_sug += 1
-                print(f"+ {item_id} {str(titulo)[:30]} -> {o.get('name')} | comprador R${melhor['pb']} | recebe R${melhor['recebe']} | margem {melhor['margem']}% (piso {piso})", flush=True)
+                at = f" | ATIVA {ativa['o'].get('name')} R${ativa['pb']} margem {ativa['margem']}%" if ativa else ""
+                alvo_txt = (f" -> {alvo['o'].get('name')} R${alvo['pb']} recebe R${alvo['recebe']} ({alvo['margem']}%)"
+                            if alvo else "")
+                flag = " ⚠️ABAIXO DO PISO" if alerta else ""
+                print(f"[{acao}]{flag} {item_id} {str(titulo)[:26]}{at}{alvo_txt} (piso {piso})", flush=True)
             except Exception as e:
                 print(f"  erro ao gravar sugestão {item_id}: {e}", flush=True)
-            time.sleep(0.2)
+            time.sleep(0.05)
 
-    print(f"\n=== {total_sug} recomendações gravadas (nada foi aplicado no ML) ===", flush=True)
+    resumo = ", ".join(f"{k}: {v}" for k, v in contadores.items())
+    print(f"\n=== {total_sug} registros gravados ({resumo}) — nada foi aplicado no ML ===", flush=True)
 
 
 if __name__ == "__main__":
