@@ -82,23 +82,36 @@ def sugestao_aprovada(item_id):
         return None
 
 
+def offer_id_de(o):
+    """O offer_id é o número final do ref_id (ex.: OFFER-MLB..-13220117030 -> 13220117030,
+    CANDIDATE-MLB..-76554657872 -> 76554657872)."""
+    ref = str(o.get("ref_id") or "")
+    if "-" in ref:
+        tail = ref.rsplit("-", 1)[-1]
+        if tail.isdigit():
+            return tail
+    return None
+
+
 def chamada_sair(item_id, o):
     """Monta a DELETE pra sair de uma promoção (não executa)."""
     ptype = o.get("type")
     params = [f"promotion_type={ptype}", "app_version=v2"]
     if o.get("id"):
         params.append(f"promotion_id={o['id']}")
-    ref = str(o.get("ref_id") or "")
-    if ref.startswith("OFFER-"):
-        params.append(f"offer_id={ref}")   # a doc pede offer_id; confirmamos na resposta
+    oid = offer_id_de(o)
+    if oid:
+        params.append(f"offer_id={oid}")
     return f"/seller-promotions/items/{item_id}?" + "&".join(params)
 
 
 def chamada_entrar(item_id, o):
-    """Monta a POST pra entrar numa promoção (path, body)."""
+    """Monta a POST pra entrar numa promoção (path, body). SMART exige offer_id."""
     body = {"promotion_id": o.get("id"), "promotion_type": o.get("type")}
+    oid = offer_id_de(o)
+    if oid:
+        body["offer_id"] = oid
     if o.get("type") in ("DEAL", "PRICE_DISCOUNT", "LIGHTNING"):
-        # tipos de faixa: manda o preço-alvo (usa o sugerido do painel se houver)
         preco = o.get("price") or o.get("suggested_discounted_price")
         if preco:
             body["deal_price"] = preco
@@ -159,22 +172,32 @@ def main():
         return
 
     # ---- EXECUÇÃO REAL ----
+    # ORDEM SEGURA: ENTRAR no alvo primeiro; só saio das outras se o entrar der certo.
     print("\n----- EXECUTANDO -----", flush=True)
+    if not ja_no_alvo:
+        path, body = chamada_entrar(ITEM_ID, alvo)
+        st, resp = req("POST", path, access, body=body)
+        print(f"  ENTRAR {alvo.get('name') or alvo.get('id')} → HTTP {st}: {json.dumps(resp, ensure_ascii=False)[:400]}", flush=True)
+        if not (200 <= st < 300):
+            print("\n⚠️  ENTRAR falhou — NÃO vou sair de nenhuma promoção. Item fica como está.", flush=True)
+            return
+    else:
+        print("  (alvo já estava ativo — sigo só saindo das outras)", flush=True)
+
     for o in sair:
         p = chamada_sair(ITEM_ID, o)
         st, resp = req("DELETE", p, access)
         print(f"  SAIR {o.get('name') or o.get('type')} → HTTP {st}: {json.dumps(resp, ensure_ascii=False)[:300]}", flush=True)
         time.sleep(0.4)
-    if not ja_no_alvo:
-        path, body = chamada_entrar(ITEM_ID, alvo)
-        st, resp = req("POST", path, access, body=body)
-        print(f"  ENTRAR {alvo.get('name') or alvo.get('id')} → HTTP {st}: {json.dumps(resp, ensure_ascii=False)[:400]}", flush=True)
 
-    time.sleep(1.0)
-    print("\n----- ESTADO DEPOIS -----", flush=True)
-    for o in promos_do_item(ITEM_ID, access):
-        if eh_ativa(o):
-            print(f"  ATIVA agora: {o.get('name') or o.get('type')} R${o.get('price')} (id={o.get('id')})", flush=True)
+    time.sleep(4.0)   # a API demora uns segundos pra refletir; espera antes de reler
+    print("\n----- ESTADO DEPOIS (pode levar alguns segundos pra estabilizar) -----", flush=True)
+    depois = promos_do_item(ITEM_ID, access)
+    ativas2 = [o for o in depois if eh_ativa(o)]
+    if not ativas2:
+        print("  (nenhuma ativa ainda — reveja no painel em ~1 min)", flush=True)
+    for o in ativas2:
+        print(f"  ativa/enrolada: {o.get('name') or o.get('type')} R${o.get('price')} (id={o.get('id')} ref={o.get('ref_id')})", flush=True)
     print("\n=== fim. Confira no painel do ML se a ATIVA e o 'Você recebe' mudaram. ===", flush=True)
 
 
