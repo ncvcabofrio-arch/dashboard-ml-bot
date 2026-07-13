@@ -139,18 +139,10 @@ def comissao(preco, cat, ltid, access):
 
 
 def ofertas_do_item(item_id, access):
-    """Lista as promoções do item COM preços (detalhe). Retorna [] se não houver."""
+    """Lista as promoções do item. O RESUMO já traz preço, original e percentuais
+    de cada oferta — o 'detalhe' devolvia a mesma lista, então uma chamada basta."""
     st, resumo = get(f"/seller-promotions/items/{item_id}?app_version=v2", access)
-    if not isinstance(resumo, list) or not resumo:
-        return []
-    # pega um id/tipo qualquer pra chamar o detalhe (que traz todas com preço)
-    pid = resumo[0].get("id")
-    ptype = resumo[0].get("type")
-    path = f"/seller-promotions/items/{item_id}?app_version=v2"
-    if pid and ptype:
-        path += f"&promotion_id={pid}&promotion_type={ptype}"
-    st, det = get(path, access)
-    return det if isinstance(det, list) else []
+    return resumo if isinstance(resumo, list) else []
 
 
 def main():
@@ -217,6 +209,15 @@ def main():
             melhor = min(seguras, key=lambda a: a["pb"])
             o = melhor["o"]
 
+            # resumo das OUTRAS opções compartilhadas e por que não foram escolhidas
+            def _fmt(a):
+                nm = a["o"].get("name") or a["o"].get("type") or "?"
+                flag = "ok" if a["margem"] >= piso else f"< {piso:.0f}%"
+                return f"{nm} R${a['pb']:.2f}->{a['margem']:.1f}% ({flag})"
+            rejeitadas = " | ".join(
+                _fmt(a) for a in sorted(avaliadas, key=lambda x: x["pb"]) if a is not melhor
+            )
+
             sug = {
                 "seller_id": str(sid),
                 "item_id": item_id,
@@ -224,6 +225,7 @@ def main():
                 "titulo": titulo,
                 "preco_atual": preco,
                 "promocao_id": o.get("id"),
+                "promocao_ref_id": o.get("ref_id"),
                 "promocao_nome": o.get("name"),
                 "promocao_tipo": o.get("type"),
                 "preco_comprador": melhor["pb"],
@@ -238,6 +240,7 @@ def main():
                 "grupo": grupo,
                 "margem_minima": piso,
                 "alternativas": len(seguras) - 1,
+                "rejeitadas": rejeitadas,
                 "status": "pendente",
             }
             try:
