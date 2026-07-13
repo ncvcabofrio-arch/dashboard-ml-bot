@@ -1,35 +1,51 @@
 name: Repricer - Aplicador (Fase 2)
 
 # ESCREVE na Central de Promoções. Roda só quando voce clicar.
-# Padrao = SIMULACAO (nao escreve). Para aplicar de verdade, mude 'confirma' pra SIM.
-# So mexe no item_id informado. Nunca em lote.
+# 3 modos: item_id (um item) | seller_id (lote) | nenhum (descoberta).
+# Padrao = SIMULACAO. So escreve com confirma=SIM.
 on:
   workflow_dispatch:
     inputs:
       item_id:
-        description: "Item MLB"
+        description: "UM item (modo teste). Ex: MLB4214321589"
         type: string
-        required: true
-        default: MLB4214321589
+        required: false
+        default: ""
+      seller_id:
+        description: "Conta pro LOTE (aprovadas). Vazio + item vazio = so listar contas"
+        type: string
+        required: false
+        default: ""
+      limite:
+        description: "Lote: quantas aprovadas por rodada"
+        type: string
+        required: false
+        default: "5"
       confirma:
         description: "Escrever de verdade? (NAO = simulacao)"
         type: choice
         required: true
         default: "NAO"
         options: ["NAO", "SIM"]
+      so_ganho:
+        description: "Lote: so trocas 'dinheiro na mesa' (acao=trocar)?"
+        type: choice
+        required: true
+        default: "NAO"
+        options: ["NAO", "SIM"]
       so_entrar:
-        description: "So ENTRAR no alvo (nao sai de nada) - bom pra testar entrada"
+        description: "Item: so ENTRAR (nao sai de nada)?"
         type: choice
         required: true
         default: "NAO"
         options: ["NAO", "SIM"]
       promo_id:
-        description: "(opcional) forcar promotion_id alvo, ex: P-MLB17755480"
+        description: "Item (opcional): forcar promotion_id alvo"
         type: string
         required: false
         default: ""
       promo_type:
-        description: "(opcional) tipo da promo alvo, ex: SMART"
+        description: "Item (opcional): tipo do alvo, ex SMART"
         type: string
         required: false
         default: ""
@@ -56,7 +72,10 @@ jobs:
           SUPABASE_URL:     ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY:     ${{ secrets.SUPABASE_KEY }}
           ITEM_ID:    ${{ github.event.inputs.item_id }}
+          SELLER_ID:  ${{ github.event.inputs.seller_id }}
+          LIMITE:     ${{ github.event.inputs.limite }}
           CONFIRMA:   ${{ github.event.inputs.confirma }}
+          SO_GANHO:   ${{ github.event.inputs.so_ganho }}
           SO_ENTRAR:  ${{ github.event.inputs.so_entrar }}
           PROMO_ID:   ${{ github.event.inputs.promo_id }}
           PROMO_TYPE: ${{ github.event.inputs.promo_type }}
