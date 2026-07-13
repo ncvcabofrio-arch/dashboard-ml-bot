@@ -5,12 +5,16 @@ Segurança:
   - Por padrão roda em SIMULAÇÃO (dry-run): apenas MOSTRA as chamadas que faria.
   - Só executa de verdade se CONFIRMA=SIM.
   - Nunca toca no preço do anúncio — só entra/sai de promoções (sua regra de ouro).
+  - SO_ENTRAR=SIM: só ENTRA no alvo, não sai de nada (pra testar a entrada isolada).
 
-Estratégia (validada no painel): o ML aplica só UMA promoção por vez (a ATIVA),
-e a API não diz qual é a vencedora. Então a jogada é deixar o anúncio enrolado
-SÓ na melhor: sair de todas as promoções ativas que não são o alvo, e entrar no alvo.
+Escrita pela API correta (docs de campanhas co-financiadas):
+  POST/DELETE  /marketplace/seller-promotions/items/{item_id}?user_id={seller_id}
+  headers: version: v2, X-Client-Id, X-Caller-Id
+  entrar: body {promotion_id, promotion_type}   (SEM offer_id; o ML gera)
+  sair:   query promotion_id, promotion_type, offer_id, user_id
 
-O alvo vem da sua sugestão APROVADA (repricer_sugestoes), ou de PROMO_ID/PROMO_TYPE.
+Leitura continua na API pública normal (/seller-promotions/items/{id}?app_version=v2).
+O alvo vem da sugestão APROVADA (repricer_sugestoes) ou de PROMO_ID/PROMO_TYPE.
 """
 import os
 import json
@@ -22,17 +26,23 @@ from ml_auth import obter_access
 API = "https://api.mercadolibre.com"
 ITEM_ID = (os.environ.get("ITEM_ID") or "").strip()
 CONFIRMA = (os.environ.get("CONFIRMA") or "").strip().upper() == "SIM"
-PROMO_ID = (os.environ.get("PROMO_ID") or "").strip()          # opcional: forçar alvo
+SO_ENTRAR = (os.environ.get("SO_ENTRAR") or "").strip().upper() == "SIM"
+PROMO_ID = (os.environ.get("PROMO_ID") or "").strip()
 PROMO_TYPE = (os.environ.get("PROMO_TYPE") or "").strip()
+CLIENT_ID = os.environ.get("ML_CLIENT_ID", "").strip()
+# X-Caller-Id: por padrão o seller_id (padrão da API). Dá pra forçar via CALLER_ID.
+CALLER_ID_ENV = os.environ.get("CALLER_ID", "").strip()
 sb = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"])
 SEED = os.environ.get("ML_REFRESH_TOKEN", "")
 
 STATUS_ATIVA = {"started", "active", "in_progress", "ongoing"}
 
 
-def req(method, path, access, body=None, tent=2):
+def req(method, path, access, body=None, headers=None, tent=2):
     url = API + path
     h = {"Authorization": "Bearer " + access, "Content-Type": "application/json"}
+    if headers:
+        h.update(headers)
     r = None
     for i in range(tent):
         r = requests.request(method, url, headers=h, json=body, timeout=25)
@@ -43,6 +53,12 @@ def req(method, path, access, body=None, tent=2):
         return r.status_code, r.json()
     except Exception:
         return r.status_code, (r.text if r is not None else None)
+
+
+def wheaders(sid):
+    """Cabeçalhos exigidos pela escrita em /marketplace/seller-promotions."""
+    caller = CALLER_ID_ENV or str(sid)
+    return {"version": "v2", "X-Client-Id": CLIENT_ID, "X-Caller-Id": caller}
 
 
 def contas():
@@ -68,6 +84,15 @@ def eh_ativa(o):
     return str(o.get("ref_id") or "").upper().startswith("OFFER-")
 
 
+def offer_id_de(o):
+    ref = str(o.get("ref_id") or "")
+    if "-" in ref:
+        tail = ref.rsplit("-", 1)[-1]
+        if tail.isdigit():
+            return tail
+    return None
+
+
 def promos_do_item(item_id, access):
     st, d = req("GET", f"/seller-promotions/items/{item_id}?app_version=v2", access)
     return d if isinstance(d, list) else []
@@ -82,61 +107,50 @@ def sugestao_aprovada(item_id):
         return None
 
 
-def offer_id_de(o):
-    """O offer_id é o número final do ref_id (ex.: OFFER-MLB..-13220117030 -> 13220117030,
-    CANDIDATE-MLB..-76554657872 -> 76554657872)."""
-    ref = str(o.get("ref_id") or "")
-    if "-" in ref:
-        tail = ref.rsplit("-", 1)[-1]
-        if tail.isdigit():
-            return tail
-    return None
-
-
-def chamada_sair(item_id, o):
-    """Monta a DELETE pra sair de uma promoção (não executa)."""
-    ptype = o.get("type")
-    params = [f"promotion_type={ptype}", "app_version=v2"]
+def path_sair(item_id, sid, o):
+    params = [f"promotion_type={o.get('type')}", f"user_id={sid}"]
     if o.get("id"):
         params.append(f"promotion_id={o['id']}")
     oid = offer_id_de(o)
     if oid:
         params.append(f"offer_id={oid}")
-    return f"/seller-promotions/items/{item_id}?" + "&".join(params)
+    return f"/marketplace/seller-promotions/items/{item_id}?" + "&".join(params)
 
 
-def chamada_entrar(item_id, o):
-    """Monta a POST pra entrar numa promoção (path, body). SMART exige offer_id."""
+def entrar_body_path(item_id, sid, o):
+    path = f"/marketplace/seller-promotions/items/{item_id}?user_id={sid}"
     body = {"promotion_id": o.get("id"), "promotion_type": o.get("type")}
-    oid = offer_id_de(o)
-    if oid:
-        body["offer_id"] = oid
     if o.get("type") in ("DEAL", "PRICE_DISCOUNT", "LIGHTNING"):
         preco = o.get("price") or o.get("suggested_discounted_price")
         if preco:
             body["deal_price"] = preco
-    return f"/seller-promotions/items/{item_id}?app_version=v2", body
+    return path, body
 
 
 def main():
     if not ITEM_ID:
         print("Defina ITEM_ID.", flush=True); return
+    if not CLIENT_ID:
+        print("Falta ML_CLIENT_ID no ambiente (necessário pro X-Client-Id).", flush=True); return
     access, sid, it = dono(ITEM_ID)
     if not access:
         print(f"não achei o item {ITEM_ID}.", flush=True); return
 
+    modo = "SIMULAÇÃO (dry-run)"
+    if CONFIRMA:
+        modo = "⚠️ EXECUTAR (só entrar)" if SO_ENTRAR else "⚠️ EXECUTAR"
     print(f"===== APLICADOR | {ITEM_ID} | conta {sid} =====", flush=True)
     print(f"título: {it.get('title')}", flush=True)
-    print(f"MODO: {'⚠️  EXECUTAR (CONFIRMA=SIM)' if CONFIRMA else 'SIMULAÇÃO (dry-run) — nada será escrito'}", flush=True)
+    print(f"MODO: {modo}", flush=True)
+    print(f"escrita em: /marketplace/seller-promotions (X-Caller-Id={CALLER_ID_ENV or sid})", flush=True)
 
     promos = promos_do_item(ITEM_ID, access)
     ativas = [o for o in promos if isinstance(o, dict) and eh_ativa(o)]
-    print(f"\nPromoções ATIVAS/enroladas agora ({len(ativas)}):", flush=True)
+    print(f"\nAtivas/enroladas agora ({len(ativas)}):", flush=True)
     for o in ativas:
         print(f"  - {o.get('name') or o.get('type')} | id={o.get('id')} type={o.get('type')} "
-              f"preço R${o.get('price')} ref={o.get('ref_id')}", flush=True)
+              f"R${o.get('price')} ref={o.get('ref_id')}", flush=True)
 
-    # alvo: da sugestão aprovada ou de PROMO_ID/PROMO_TYPE
     alvo = None
     sug = sugestao_aprovada(ITEM_ID)
     alvo_id = PROMO_ID or (sug.get("promocao_id") if sug else None)
@@ -146,59 +160,48 @@ def main():
         if not alvo and alvo_type:
             alvo = {"id": alvo_id, "type": alvo_type}
     if not alvo:
-        print("\nSem alvo definido (nenhuma sugestão aprovada e sem PROMO_ID). "
-              "Só listei o estado atual — nada a fazer.", flush=True)
+        print("\nSem alvo (nenhuma sugestão aprovada e sem PROMO_ID). Nada a fazer.", flush=True)
         return
     print(f"\nALVO (entrar): {alvo.get('name') or alvo.get('id')} | id={alvo.get('id')} type={alvo.get('type')}", flush=True)
-    if sug:
-        print(f"  (sugestão aprovada: {sug.get('acao')} · você recebe R${sug.get('recebe_liquido')} · "
-              f"ativa atual pagava R${sug.get('ativa_preco')} margem {sug.get('ativa_margem')}%)", flush=True)
 
-    # plano: sair de todas as ativas que NÃO são o alvo; entrar no alvo se ainda não estiver
-    sair = [o for o in ativas if o.get("id") != alvo.get("id")]
     ja_no_alvo = any(o.get("id") == alvo.get("id") for o in ativas)
+    sair = [] if SO_ENTRAR else [o for o in ativas if o.get("id") != alvo.get("id")]
 
     print("\n----- PLANO -----", flush=True)
-    for o in sair:
-        print(f"  SAIR  → DELETE {chamada_sair(ITEM_ID, o)}", flush=True)
     if not ja_no_alvo:
-        path, body = chamada_entrar(ITEM_ID, alvo)
+        path, body = entrar_body_path(ITEM_ID, sid, alvo)
         print(f"  ENTRAR→ POST {path}\n           body {json.dumps(body, ensure_ascii=False)}", flush=True)
     else:
-        print("  (o alvo já está entre as ativas — só sairia das outras)", flush=True)
+        print("  (alvo já ativo — não entra de novo)", flush=True)
+    for o in sair:
+        print(f"  SAIR  → DELETE {path_sair(ITEM_ID, sid, o)}", flush=True)
+    if SO_ENTRAR:
+        print("  (SO_ENTRAR: não sai de nada)", flush=True)
 
     if not CONFIRMA:
-        print("\n=== SIMULAÇÃO: nada foi escrito. Rode com CONFIRMA=SIM pra aplicar. ===", flush=True)
+        print("\n=== SIMULAÇÃO: nada foi escrito. CONFIRMA=SIM pra aplicar. ===", flush=True)
         return
 
-    # ---- EXECUÇÃO REAL ----
-    # ORDEM SEGURA: ENTRAR no alvo primeiro; só saio das outras se o entrar der certo.
+    # ---- EXECUÇÃO: entrar primeiro; só sai depois se entrar der certo ----
     print("\n----- EXECUTANDO -----", flush=True)
     if not ja_no_alvo:
-        path, body = chamada_entrar(ITEM_ID, alvo)
-        st, resp = req("POST", path, access, body=body)
-        print(f"  ENTRAR {alvo.get('name') or alvo.get('id')} → HTTP {st}: {json.dumps(resp, ensure_ascii=False)[:400]}", flush=True)
+        path, body = entrar_body_path(ITEM_ID, sid, alvo)
+        st, resp = req("POST", path, access, body=body, headers=wheaders(sid))
+        print(f"  ENTRAR → HTTP {st}: {json.dumps(resp, ensure_ascii=False)[:500]}", flush=True)
         if not (200 <= st < 300):
-            print("\n⚠️  ENTRAR falhou — NÃO vou sair de nenhuma promoção. Item fica como está.", flush=True)
+            print("\n⚠️ ENTRAR falhou — não saio de nada. Item fica como está.", flush=True)
             return
-    else:
-        print("  (alvo já estava ativo — sigo só saindo das outras)", flush=True)
-
     for o in sair:
-        p = chamada_sair(ITEM_ID, o)
-        st, resp = req("DELETE", p, access)
+        st, resp = req("DELETE", path_sair(ITEM_ID, sid, o), access, headers=wheaders(sid))
         print(f"  SAIR {o.get('name') or o.get('type')} → HTTP {st}: {json.dumps(resp, ensure_ascii=False)[:300]}", flush=True)
         time.sleep(0.4)
 
-    time.sleep(4.0)   # a API demora uns segundos pra refletir; espera antes de reler
-    print("\n----- ESTADO DEPOIS (pode levar alguns segundos pra estabilizar) -----", flush=True)
-    depois = promos_do_item(ITEM_ID, access)
-    ativas2 = [o for o in depois if eh_ativa(o)]
-    if not ativas2:
-        print("  (nenhuma ativa ainda — reveja no painel em ~1 min)", flush=True)
-    for o in ativas2:
-        print(f"  ativa/enrolada: {o.get('name') or o.get('type')} R${o.get('price')} (id={o.get('id')} ref={o.get('ref_id')})", flush=True)
-    print("\n=== fim. Confira no painel do ML se a ATIVA e o 'Você recebe' mudaram. ===", flush=True)
+    time.sleep(4.0)
+    print("\n----- ESTADO DEPOIS -----", flush=True)
+    for o in promos_do_item(ITEM_ID, access):
+        if eh_ativa(o):
+            print(f"  ativa/enrolada: {o.get('name') or o.get('type')} R${o.get('price')} (id={o.get('id')})", flush=True)
+    print("\n=== fim. Confira no painel. ===", flush=True)
 
 
 if __name__ == "__main__":
