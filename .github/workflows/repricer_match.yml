@@ -1,0 +1,49 @@
+name: Repricer - Coletor de Match (mapeamento)
+
+# Junta, por anúncio, os candidatos de produto de catálogo (API sancionada) e
+# imprime em JSONL pra a IA julgar o match certo. NÃO escreve nada.
+on:
+  workflow_dispatch:
+    inputs:
+      seller_id:
+        description: "Conta. Ex: 177795203"
+        type: string
+        required: true
+        default: ""
+      limite:
+        description: "Quantos anúncios coletar"
+        type: string
+        required: false
+        default: "15"
+      modo:
+        description: "amostra (primeiros N ativos) ou sem_match (os difíceis)"
+        type: choice
+        required: true
+        default: "amostra"
+        options: ["amostra", "sem_match"]
+
+concurrency:
+  group: ml-puxador
+  cancel-in-progress: false
+
+jobs:
+  match:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Instalar dependencias
+        run: pip install requests supabase
+      - name: Coletar candidatos (so leitura)
+        env:
+          ML_CLIENT_ID:     ${{ secrets.ML_CLIENT_ID }}
+          ML_CLIENT_SECRET: ${{ secrets.ML_CLIENT_SECRET }}
+          ML_REFRESH_TOKEN: ${{ secrets.ML_REFRESH_TOKEN }}
+          SUPABASE_URL:     ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY:     ${{ secrets.SUPABASE_KEY }}
+          SELLER_ID: ${{ github.event.inputs.seller_id }}
+          LIMITE:    ${{ github.event.inputs.limite }}
+          MODO:      ${{ github.event.inputs.modo }}
+        run: python repricer_match.py
