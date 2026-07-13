@@ -23,6 +23,8 @@ import repricer_sugestoes as rec
 from ml_auth import obter_access
 
 API = rec.API
+DEBUG = (os.environ.get("DEBUG") or "") == "1"
+DEBUG_ITEM = (os.environ.get("DEBUG_ITEM") or "").strip()   # analisa só 1 item, verboso
 NORM_CUSTO = {}   # sku normalizado -> sku original na tabela produtos (só p/ DIAGNÓSTICO)
 
 
@@ -102,14 +104,22 @@ def _preco_seller(r):
 def _site_search(q, sid, access):
     from urllib.parse import quote
     st, s = rec.get(f"/sites/MLB/search?q={quote(str(q))}&condition=new&limit=50", access)
+    raw = (s.get("results") if isinstance(s, dict) else None) or []
     out = []
-    for r in ((s.get("results") if isinstance(s, dict) else None) or []):
+    for r in raw:
         seller, preco = _preco_seller(r)
         try:
             if str(seller) != str(sid) and preco:
                 out.append(float(preco))
         except (TypeError, ValueError):
             pass
+    if DEBUG:
+        obs = ""
+        if isinstance(s, dict) and st >= 400:
+            obs = str({k: s.get(k) for k in ("message", "error", "status", "cause")})[:180]
+        elif not isinstance(s, dict):
+            obs = str(s)[:180]
+        print(f"    [site q='{str(q)[:45]}'] HTTP {st} | resultados={len(raw)} conc={len(out)} {obs}", flush=True)
     return out
 
 
@@ -121,9 +131,16 @@ def concorrencia_mercado(ean, titulo, sid, access):
     if ean:
         precos = []
         st, d = rec.get(f"/products/search?status=active&site_id=MLB&product_identifier={ean}", access)
-        for prod in ((d.get("results") if isinstance(d, dict) else None) or [])[:3]:
+        prods = (d.get("results") if isinstance(d, dict) else None) or []
+        if DEBUG:
+            obs = str(d)[:180] if (not isinstance(d, dict) or st >= 400) else ""
+            print(f"    [products/search EAN {ean}] HTTP {st} | produtos={len(prods)} {obs}", flush=True)
+        for prod in prods[:3]:
             if prod.get("id"):
-                precos += concorrentes(prod["id"], sid, access)
+                c = concorrentes(prod["id"], sid, access)
+                if DEBUG:
+                    print(f"      produto {prod['id']} -> {len(c)} concorrentes", flush=True)
+                precos += c
         precos += _site_search(ean, sid, access)
         if precos:
             return sorted(precos), f"EAN {ean}"
@@ -257,8 +274,11 @@ def main():
     amostra = ", ".join(list(rec.CUSTOS.keys())[:15])
     print(f"amostra de SKUs na tabela 'produtos': {amostra}\n", flush=True)
 
-    ids, total = rec.todos_ativos(sid, access)
-    ids = ids[:MAX_ITENS]
+    if DEBUG_ITEM:
+        ids, total = [DEBUG_ITEM], "?"
+    else:
+        ids, total = rec.todos_ativos(sid, access)
+        ids = ids[:MAX_ITENS]
     print(f"===== SONDA COMPETITIVA | conta {sid} | amostra {len(ids)} de {total} (só leitura, pula estoque 0) =====\n", flush=True)
 
     cont = {}
