@@ -257,7 +257,8 @@ def analisar(item_id, access, sid):
             desc = (1 - alvo / p0) * 100
             base.update({"acao": "descontar_ean", "alvo": alvo, "margem_alvo": round(m_alvo, 1),
                          "detalhe": f"[{origem}] {len(precos)} conc, menor R${menor:.2f} -> "
-                                    f"descontar p/ R${alvo:.2f} ({desc:.1f}% off, margem {m_alvo:.1f}%)"})
+                                    f"descontar p/ R${alvo:.2f} ({desc:.1f}% off, margem {m_alvo:.1f}%) "
+                                    f"[piso={piso}% pmin=R${pmin}]"})
         else:
             # mercado abaixo do piso: desconta até o PISO (mantém 18%, o mais competitivo possível)
             alvo = round(pmin, 2)
@@ -319,7 +320,7 @@ def analisar(item_id, access, sid):
 def main():
     if not SELLER_ID:
         print("Defina SELLER_ID (ex 177795203).", flush=True); return
-    print(">>> SONDA v3 (piso por fórmula fechada + paralelo) <<<", flush=True)
+    print(">>> SONDA v4 (diagnóstico piso/pmin) <<<", flush=True)
     rec.preload()
     # autentica TODAS as contas: guarda os seller_ids (p/ não competir consigo) e pega o access da escolhida
     access = sid = None
