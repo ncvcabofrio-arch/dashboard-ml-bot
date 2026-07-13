@@ -141,22 +141,27 @@ def entrar_body_path(item_id, o, extra=None):
     return f"/seller-promotions/items/{item_id}?app_version=v2", body
 
 
-def detalhe_promo(pid, ptype, access):
-    st, d = req("GET", f"/seller-promotions/promotions/{pid}?promotion_type={ptype}&app_version=v2", access)
-    return d if isinstance(d, dict) else {}
+def datas_do_item(pid, ptype, item_id, access):
+    """Janela (start_date/finish_date) daquele item na promoção — vem do endpoint de itens."""
+    st, d = req("GET", f"/seller-promotions/promotions/{pid}/items?promotion_type={ptype}&item_id={item_id}&app_version=v2", access)
+    results = d.get("results") if isinstance(d, dict) else None
+    if results:
+        r = results[0]
+        return r.get("start_date"), (r.get("finish_date") or r.get("end_date"))
+    return None, None
 
 
 def fazer_entrar(item_id, o, access):
-    """Entra na promoção; se reclamar de START_DATE, busca as datas no detalhe e reenvia."""
+    """Entra na promoção; se reclamar de START_DATE, busca a janela do item e reenvia com as datas."""
     path, body = entrar_body_path(item_id, o)
     st, resp = req("POST", path, access, body=body)
     if st == 400 and "START_DATE" in json.dumps(resp, ensure_ascii=False):
-        det = detalhe_promo(o.get("id"), o.get("type"), access)
+        sd, fd = datas_do_item(o.get("id"), o.get("type"), item_id, access)
         extra = {}
-        if det.get("start_date"):
-            extra["start_date"] = det["start_date"]
-        if det.get("finish_date"):
-            extra["finish_date"] = det["finish_date"]
+        if sd:
+            extra["start_date"] = sd
+        if fd:
+            extra["finish_date"] = fd
         if extra:
             path, body = entrar_body_path(item_id, o, extra)
             st, resp = req("POST", path, access, body=body)
