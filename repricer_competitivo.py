@@ -127,9 +127,13 @@ def consulta_do_item(it):
     return " ".join(sig) if sig else (titulo[:40] or None)
 
 
-def _busca_catalogo(q, sid, access, tipo):
+FAIXA_MIN, FAIXA_MAX = 0.40, 3.0   # concorrente crível: entre 40% e 300% do seu preço
+
+
+def _busca_catalogo(q, sid, access, tipo, p0, nome_chave=None):
     """Acha produto(s) de catálogo (por EAN ou por texto) e lista os concorrentes deles.
-    Substitui /sites/search, que o ML bloqueia (403) para o app. Exclui você."""
+    Substitui /sites/search (bloqueado, 403). Filtra por nome do produto (modelo) e por
+    faixa de preço sã, pra não pegar produto/acessório errado. Exclui você."""
     from urllib.parse import quote
     if tipo == "ean":
         url = f"/products/search?status=active&site_id=MLB&product_identifier={q}"
@@ -137,30 +141,37 @@ def _busca_catalogo(q, sid, access, tipo):
         url = f"/products/search?status=active&site_id=MLB&q={quote(str(q))}"
     st, d = rec.get(url, access)
     prods = (d.get("results") if isinstance(d, dict) else None) or []
-    precos = []
-    usados = []
-    for prod in prods[:2]:   # os 2 produtos mais relevantes
-        if prod.get("id"):
-            c = concorrentes(prod["id"], sid, access)
-            precos += c
-            usados.append(f"{prod['id']}({len(c)})")
+    lo, hi = FAIXA_MIN * p0, FAIXA_MAX * p0
+    precos, usados, pulados = [], [], 0
+    for prod in prods[:6]:
+        nome = str(prod.get("name") or "")
+        if nome_chave and nome_chave.lower() not in nome.lower():
+            pulados += 1
+            continue   # produto não bate com o modelo -> ignora
+        if not prod.get("id"):
+            continue
+        c = [x for x in concorrentes(prod["id"], sid, access) if lo <= x <= hi]
+        precos += c
+        usados.append(f"{prod['id']}({len(c)})")
     if DEBUG:
         print(f"    [products/search {tipo}='{str(q)[:40]}'] HTTP {st} | produtos={len(prods)} "
-              f"-> {', '.join(usados) or 'nenhum'} | conc={len(precos)}", flush=True)
+              f"| usados: {', '.join(usados) or 'nenhum'} | fora-do-modelo: {pulados} "
+              f"| faixa R${lo:.0f}-{hi:.0f} | conc={len(precos)}", flush=True)
     return sorted(precos)
 
 
-def concorrencia_mercado(ean, consulta, titulo, sid, access):
+def concorrencia_mercado(ean, consulta, titulo, sid, access, p0):
     """Concorrentes via CATÁLOGO (a busca de listagens /sites/search é bloqueada pelo ML):
        1) EAN -> produto de catálogo -> concorrentes
-       2) marca+modelo (texto) -> produto de catálogo -> concorrentes
+       2) marca+modelo (texto) -> produto cujo NOME contém o modelo -> concorrentes
        Retorna (precos_ordenados, origem). Exclui você."""
     if ean:
-        precos = _busca_catalogo(ean, sid, access, "ean")
+        precos = _busca_catalogo(ean, sid, access, "ean", p0)
         if precos:
             return precos, f"EAN {ean}"
     if consulta:
-        precos = _busca_catalogo(consulta, sid, access, "q")
+        chave = consulta.split()[0] if consulta else None   # 1º token = modelo (ex.: 'Mininova')
+        precos = _busca_catalogo(consulta, sid, access, "q", p0, nome_chave=chave)
         if precos:
             return precos, f"busca '{consulta}'"
     return [], None
@@ -205,7 +216,7 @@ def analisar(item_id, access, sid):
         # Fora do catálogo -> busca concorrência por EAN (e por título como plano B)
         ean = gtin_do_item(it)
         consulta = consulta_do_item(it)
-        precos, origem = concorrencia_mercado(ean, consulta, it.get("title"), sid, access)
+        precos, origem = concorrencia_mercado(ean, consulta, it.get("title"), sid, access, p0)
         ctx = "elegível ao catálogo, sem opt-in" if pid else "fora do catálogo"
         if not precos:
             base.update({"acao": "sem_match",
