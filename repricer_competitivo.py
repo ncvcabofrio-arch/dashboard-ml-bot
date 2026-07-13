@@ -69,8 +69,68 @@ def concorrentes(product_id, sid, access):
     return sorted(precos)
 
 
+def gtin_do_item(it):
+    """Extrai o primeiro EAN/GTIN do anúncio (atributos ou variações)."""
+    def _busca(attrs):
+        for a in (attrs or []):
+            if a.get("id") == "GTIN" and a.get("value_name"):
+                return str(a["value_name"]).split(",")[0].strip()
+        return None
+    g = _busca(it.get("attributes"))
+    if g:
+        return g
+    for v in (it.get("variations") or []):
+        g = _busca(v.get("attributes"))
+        if g:
+            return g
+    return None
+
+
+def _preco_seller(r):
+    s = r.get("seller_id")
+    if s is None:
+        s = (r.get("seller") or {}).get("id")
+    return s, r.get("price")
+
+
+def _site_search(q, sid, access):
+    from urllib.parse import quote
+    st, s = rec.get(f"/sites/MLB/search?q={quote(str(q))}&condition=new&limit=50", access)
+    out = []
+    for r in ((s.get("results") if isinstance(s, dict) else None) or []):
+        seller, preco = _preco_seller(r)
+        try:
+            if str(seller) != str(sid) and preco:
+                out.append(float(preco))
+        except (TypeError, ValueError):
+            pass
+    return out
+
+
+def concorrencia_mercado(ean, titulo, sid, access):
+    """Concorrentes para itens FORA do catálogo. Ordem de preferência:
+       1) EAN: /products/search?product_identifier=EAN -> itens do produto  +  /sites/MLB/search?q=EAN
+       2) Título (plano B, aproximado): /sites/MLB/search?q=TÍTULO
+       Retorna (precos_ordenados, origem). Exclui você."""
+    if ean:
+        precos = []
+        st, d = rec.get(f"/products/search?status=active&site_id=MLB&product_identifier={ean}", access)
+        for prod in ((d.get("results") if isinstance(d, dict) else None) or [])[:3]:
+            if prod.get("id"):
+                precos += concorrentes(prod["id"], sid, access)
+        precos += _site_search(ean, sid, access)
+        if precos:
+            return sorted(precos), f"EAN {ean}"
+    # plano B: título (aproximado)
+    if titulo:
+        precos = _site_search(titulo, sid, access)
+        if precos:
+            return sorted(precos), "título (aprox.)"
+    return [], None
+
+
 def analisar(item_id, access, sid):
-    st, it = rec.get(f"/items/{item_id}", access)
+    st, it = rec.get(f"/items/{item_id}?include_attributes=all", access)
     if not isinstance(it, dict):
         return None
     p0 = float(it.get("price") or 0)
@@ -92,11 +152,31 @@ def analisar(item_id, access, sid):
             "preco_piso": pmin, "catalog": catalog_listing}
 
     if not catalog_listing:
-        if pid:
-            base.update({"acao": "fora_catalogo",
-                         "detalhe": f"elegível ao catálogo (produto {pid}) mas SEM opt-in — não compete"})
+        # Fora do catálogo -> busca concorrência por EAN (e por título como plano B)
+        ean = gtin_do_item(it)
+        precos, origem = concorrencia_mercado(ean, it.get("title"), sid, access)
+        ctx = "elegível ao catálogo, sem opt-in" if pid else "fora do catálogo"
+        if not precos:
+            base.update({"acao": "sem_match",
+                         "detalhe": f"{ctx}; sem concorrente encontrado"
+                                    f"{' (sem EAN e sem match por título)' if not ean else f' (EAN {ean})'}"})
+            return base
+        menor = precos[0]
+        base.update({"origem": origem, "n_conc": len(precos), "conc_min": round(menor, 2)})
+        if menor > p0 + EPS:
+            base.update({"acao": "ja_competitivo",
+                         "detalhe": f"[{origem}] já é o mais barato: seu R${p0:.2f} < menor conc. "
+                                    f"R${menor:.2f} ({len(precos)} conc)"})
+        elif pmin is not None and (menor - EPS) >= pmin:
+            alvo = round(menor - EPS, 2)
+            m_alvo, _, _ = margem_no_preco(alvo, cat, ltid, frete, custo, access)
+            desc = (1 - alvo / p0) * 100
+            base.update({"acao": "descontar_ean", "alvo": alvo, "margem_alvo": round(m_alvo, 1),
+                         "detalhe": f"[{origem}] {len(precos)} conc, menor R${menor:.2f} -> "
+                                    f"descontar p/ R${alvo:.2f} ({desc:.1f}% off, margem {m_alvo:.1f}%)"})
         else:
-            base.update({"acao": "sem_concorrencia", "detalhe": "não é catálogo (sem visão de concorrência)"})
+            base.update({"acao": "nao_perseguir_ean",
+                         "detalhe": f"[{origem}] menor conc. R${menor:.2f} fura o piso (R${pmin}) -> não perseguir"})
         return base
 
     ptw = price_to_win(item_id, access)
@@ -165,9 +245,10 @@ def main():
             continue
         cont[r["acao"]] = cont.get(r["acao"], 0) + 1
         linhas.append(r)
-        tag = {"descontar": "🎯", "nao_perseguir": "🛑", "subir_margem": "⬆️",
-               "manter_ganhando": "🏆", "perde_nao_preco": "⚠️", "sem_concorrencia": "·",
-               "fora_catalogo": "📦", "sem_dado": "?", "sem_custo": "∅"}.get(r["acao"], "·")
+        tag = {"descontar": "🎯", "descontar_ean": "🎯", "nao_perseguir": "🛑",
+               "nao_perseguir_ean": "🛑", "subir_margem": "⬆️", "manter_ganhando": "🏆",
+               "ja_competitivo": "✅", "perde_nao_preco": "⚠️", "sem_concorrencia": "·",
+               "sem_match": "🔍", "sem_dado": "?", "sem_custo": "∅"}.get(r["acao"], "·")
         print(f"{tag} [{r['acao']}] {item_id} {str(r.get('titulo'))[:34]} "
               f"| cheio R${r.get('preco_cheio')} (margem {r.get('margem_cheio')}%) "
               f"| {r.get('detalhe')}", flush=True)
@@ -182,12 +263,6 @@ def main():
         print(f"\n--- {len(faltando)} SEM CUSTO (preencher na tabela 'produtos') ---", flush=True)
         for l in faltando:
             print(f"   {l['item_id']} | SKU={l.get('sku') or '—'} | {str(l.get('titulo'))[:45]}", flush=True)
-
-    fora = [l for l in linhas if l["acao"] == "fora_catalogo"]
-    if fora:
-        print(f"\n--- {len(fora)} ELEGÍVEIS AO CATÁLOGO, SEM OPT-IN (oportunidade de competir) ---", flush=True)
-        for l in fora:
-            print(f"   {l['item_id']} | {str(l.get('titulo'))[:50]}", flush=True)
 
     print("\nNada foi escrito. É só a leitura da régua competitiva.", flush=True)
 
