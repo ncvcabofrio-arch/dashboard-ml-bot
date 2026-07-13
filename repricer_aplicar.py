@@ -30,6 +30,7 @@ SELLER_ID = (os.environ.get("SELLER_ID") or "").strip()
 CONFIRMA = (os.environ.get("CONFIRMA") or "").strip().upper() == "SIM"
 SO_ENTRAR = (os.environ.get("SO_ENTRAR") or "").strip().upper() == "SIM"
 SO_GANHO = (os.environ.get("SO_GANHO") or "").strip().upper() == "SIM"
+PULAR_SAIR = (os.environ.get("PULAR_SAIR") or "").strip().upper() == "SIM"
 PROMO_ID = (os.environ.get("PROMO_ID") or "").strip()
 PROMO_TYPE = (os.environ.get("PROMO_TYPE") or "").strip()
 LIMITE = int(os.environ.get("LIMITE", "5"))
@@ -210,12 +211,14 @@ def modo_lote():
          .eq("seller_id", str(SELLER_ID)).eq("status", "aprovada"))
     if SO_GANHO:
         q = q.eq("acao", "trocar")
+    elif PULAR_SAIR:
+        q = q.neq("acao", "sair")   # aplica só ganhos (entrar/trocar); segura os "sair"
     aprovadas = q.limit(LIMITE).execute().data or []
 
+    filtro = " | só trocas dinheiro-na-mesa" if SO_GANHO else (" | pulando os 'sair'" if PULAR_SAIR else "")
     modo = "⚠️ EXECUTAR" if CONFIRMA else "SIMULAÇÃO (dry-run)"
     print(f"===== APLICADOR LOTE | conta {sid} | {modo} =====", flush=True)
-    print(f"aprovadas a processar (limite {LIMITE}): {len(aprovadas)}"
-          f"{' | só trocas dinheiro-na-mesa' if SO_GANHO else ''}\n", flush=True)
+    print(f"aprovadas a processar (limite {LIMITE}): {len(aprovadas)}{filtro}\n", flush=True)
 
     cont = {}
     for sug in aprovadas:
