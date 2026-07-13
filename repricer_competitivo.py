@@ -133,6 +133,13 @@ def analisar(item_id, access, sid):
     st, it = rec.get(f"/items/{item_id}?include_attributes=all", access)
     if not isinstance(it, dict):
         return None
+    try:
+        aq = int(it.get("available_quantity"))
+    except (TypeError, ValueError):
+        aq = None
+    if aq is not None and aq <= 0:
+        return {"item_id": item_id, "titulo": it.get("title"), "acao": "sem_estoque",
+                "detalhe": "estoque zero"}
     p0 = float(it.get("price") or 0)
     cat, ltid = it.get("category_id"), it.get("listing_type_id")
     sku = it.get("seller_sku") or it.get("seller_custom_field")
@@ -233,9 +240,12 @@ def main():
     if not access:
         print(f"não autentiquei a conta {SELLER_ID}.", flush=True); return
 
+    amostra = ", ".join(list(rec.CUSTOS.keys())[:15])
+    print(f"amostra de SKUs na tabela 'produtos': {amostra}\n", flush=True)
+
     ids, total = rec.todos_ativos(sid, access)
     ids = ids[:MAX_ITENS]
-    print(f"===== SONDA COMPETITIVA | conta {sid} | amostra {len(ids)} de {total} (só leitura) =====\n", flush=True)
+    print(f"===== SONDA COMPETITIVA | conta {sid} | amostra {len(ids)} de {total} (só leitura, pula estoque 0) =====\n", flush=True)
 
     cont = {}
     linhas = []
@@ -245,6 +255,8 @@ def main():
             continue
         cont[r["acao"]] = cont.get(r["acao"], 0) + 1
         linhas.append(r)
+        if r["acao"] == "sem_estoque":
+            continue   # não polui a saída; conta no resumo
         tag = {"descontar": "🎯", "descontar_ean": "🎯", "nao_perseguir": "🛑",
                "nao_perseguir_ean": "🛑", "subir_margem": "⬆️", "manter_ganhando": "🏆",
                "ja_competitivo": "✅", "perde_nao_preco": "⚠️", "sem_concorrencia": "·",
