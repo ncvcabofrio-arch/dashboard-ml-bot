@@ -1,0 +1,46 @@
+name: Repricer - Aplicador (Fase 2)
+
+# ESCREVE na Central de Promoções. Roda só quando voce clicar.
+# Padrao = SIMULACAO (nao escreve nada). Para aplicar de verdade, mude 'confirma' pra SIM.
+# So mexe no item_id informado. Nunca em lote.
+on:
+  workflow_dispatch:
+    inputs:
+      item_id:
+        description: "Item MLB a aplicar"
+        type: string
+        required: true
+        default: MLB4214321589
+      confirma:
+        description: "Escrever de verdade? (NAO = simulacao)"
+        type: choice
+        required: true
+        default: "NAO"
+        options:
+          - "NAO"
+          - "SIM"
+
+concurrency:
+  group: ml-puxador
+  cancel-in-progress: false
+
+jobs:
+  aplicar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Instalar dependencias
+        run: pip install requests supabase
+      - name: Aplicar (ou simular)
+        env:
+          ML_CLIENT_ID:     ${{ secrets.ML_CLIENT_ID }}
+          ML_CLIENT_SECRET: ${{ secrets.ML_CLIENT_SECRET }}
+          ML_REFRESH_TOKEN: ${{ secrets.ML_REFRESH_TOKEN }}
+          SUPABASE_URL:     ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY:     ${{ secrets.SUPABASE_KEY }}
+          ITEM_ID:  ${{ github.event.inputs.item_id }}
+          CONFIRMA: ${{ github.event.inputs.confirma }}
+        run: python repricer_aplicar.py
