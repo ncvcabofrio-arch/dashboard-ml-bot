@@ -94,6 +94,39 @@ def gtin_do_item(it):
     return None
 
 
+# palavras genéricas que não ajudam a busca (categoria, ligações, cores, qualificadores)
+_GENERICO = {
+    "de", "da", "do", "com", "sem", "para", "por", "e", "ou", "a", "o", "em", "no", "na",
+    "c/", "p/", "kit", "conjunto", "set",
+    "sintetizador", "teclado", "teclados", "teclas", "tecla", "piano", "controlador",
+    "violao", "violão", "guitarra", "contrabaixo", "baixo", "cavaco", "cavaquinho", "ukulele",
+    "microfone", "mic", "fone", "fones", "ouvido", "headset", "headphone", "auricular",
+    "interface", "placa", "audio", "áudio", "caixa", "som", "ativa", "passiva", "amplificador",
+    "cabecote", "cabeçote", "pedal", "pedaleira", "prato", "pratos", "bateria", "mesa", "mixer",
+    "estante", "suporte", "capa", "bag", "case", "cabo", "sistema", "fio", "arranjador",
+    "profissional", "digital", "eletronico", "eletrônico", "eletroacustico", "eletroacústico",
+    "acustico", "acústico", "eletrico", "elétrico", "portatil", "portátil", "compacto", "compacta",
+    "novo", "nova", "original", "premium", "dinamico", "dinâmico", "condensador", "duplo", "mao", "mão",
+    "preto", "preta", "branco", "branca", "azul", "vermelho", "vermelha", "rosa", "cinza", "prata",
+    "polegadas", "pol", "w", "watts",
+}
+
+
+def consulta_do_item(it):
+    """Busca curta (marca+modelo) extraída do TÍTULO: tira genéricos e números soltos,
+    mantém as ~5 palavras que importam. Ex.: 'Teclado Casio Ct-x800 61 Teclas' -> 'Casio Ct-x800'."""
+    titulo = it.get("title") or ""
+    sig = []
+    for t in re.findall(r"[0-9A-Za-zÀ-ÿ/\-]+", titulo):
+        tl = t.lower().strip("/-")
+        if not tl or len(tl) <= 1 or tl in _GENERICO or tl.isdigit():
+            continue
+        sig.append(t)
+        if len(sig) >= 5:
+            break
+    return " ".join(sig) if sig else (titulo[:40] or None)
+
+
 def _preco_seller(r):
     s = r.get("seller_id")
     if s is None:
@@ -123,10 +156,11 @@ def _site_search(q, sid, access):
     return out
 
 
-def concorrencia_mercado(ean, titulo, sid, access):
+def concorrencia_mercado(ean, consulta, titulo, sid, access):
     """Concorrentes para itens FORA do catálogo. Ordem de preferência:
        1) EAN: /products/search?product_identifier=EAN -> itens do produto  +  /sites/MLB/search?q=EAN
-       2) Título (plano B, aproximado): /sites/MLB/search?q=TÍTULO
+       2) Marca+modelo (como um humano busca): /sites/MLB/search?q=MARCA MODELO
+       3) Título completo (último recurso, aproximado)
        Retorna (precos_ordenados, origem). Exclui você."""
     if ean:
         precos = []
@@ -144,7 +178,12 @@ def concorrencia_mercado(ean, titulo, sid, access):
         precos += _site_search(ean, sid, access)
         if precos:
             return sorted(precos), f"EAN {ean}"
-    # plano B: título (aproximado)
+    # 2) marca + modelo (curto, como o usuário busca no site)
+    if consulta:
+        precos = _site_search(consulta, sid, access)
+        if precos:
+            return sorted(precos), f"marca+modelo '{consulta}'"
+    # 3) título completo (aproximado, último recurso)
     if titulo:
         precos = _site_search(titulo, sid, access)
         if precos:
@@ -190,7 +229,8 @@ def analisar(item_id, access, sid):
     if not catalog_listing:
         # Fora do catálogo -> busca concorrência por EAN (e por título como plano B)
         ean = gtin_do_item(it)
-        precos, origem = concorrencia_mercado(ean, it.get("title"), sid, access)
+        consulta = consulta_do_item(it)
+        precos, origem = concorrencia_mercado(ean, consulta, it.get("title"), sid, access)
         ctx = "elegível ao catálogo, sem opt-in" if pid else "fora do catálogo"
         if not precos:
             base.update({"acao": "sem_match",
