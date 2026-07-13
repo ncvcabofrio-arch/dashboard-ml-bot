@@ -1,21 +1,31 @@
-name: Repricer - Promocoes (sonda, so leitura)
+name: Repricer - Sonda (so leitura)
 
-# Roda so quando voce clicar (Actions -> este workflow -> Run workflow).
-# Sonda descartavel: hoje despeja o JSON cru das promocoes de UM item. Nao altera nada.
+# Ferramenta de diagnostico. Escolha o MODO no menu e preencha o item.
+# NAO altera nada no Mercado Livre.
 on:
   workflow_dispatch:
     inputs:
+      modo:
+        description: "O que a sonda faz"
+        type: choice
+        required: true
+        default: promocoes
+        options:
+          - promocoes    # lista todas as promocoes do item (status/preco/percentuais)
+          - frete        # custo de envio do anuncio (base_cost / list_cost)
+          - item         # dados crus do anuncio (preco, categoria, sku, envio)
       item_id:
-        description: "Item MLB a diagnosticar"
-        required: false
-        default: "MLB6415054256"
+        description: "Item MLB (ex.: MLB4126262466)"
+        type: string
+        required: true
+        default: MLB4126262466
 
 concurrency:
   group: ml-puxador
   cancel-in-progress: false
 
 jobs:
-  promocoes:
+  sonda:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -27,12 +37,13 @@ jobs:
       - name: Instalar dependencias
         run: pip install requests supabase
 
-      - name: Rodar sonda de promocoes
+      - name: Rodar sonda
         env:
           ML_CLIENT_ID:     ${{ secrets.ML_CLIENT_ID }}
           ML_CLIENT_SECRET: ${{ secrets.ML_CLIENT_SECRET }}
           ML_REFRESH_TOKEN: ${{ secrets.ML_REFRESH_TOKEN }}
           SUPABASE_URL:     ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY:     ${{ secrets.SUPABASE_KEY }}
+          MODO:    ${{ github.event.inputs.modo }}
           ITEM_ID: ${{ github.event.inputs.item_id }}
         run: python repricer_promocoes.py
