@@ -8,7 +8,9 @@ Grava as recomendações na tabela 'repricer_sugestoes' pra você aprovar no app
 """
 import os
 import time
+import threading
 import requests
+from concurrent.futures import ThreadPoolExecutor
 from supabase import create_client
 from ml_auth import obter_access
 
@@ -16,7 +18,34 @@ API = "https://api.mercadolibre.com"
 # 0 = TODOS os ativos (pagina tudo). Ponha um número só pra testar rápido (ex.: 40).
 MAX_ITENS = int(os.environ.get("MAX_ITENS", os.environ.get("AMOSTRA", "0")))
 MARGEM_PADRAO = float(os.environ.get("MARGEM_MIN", "18"))
+WORKERS = int(os.environ.get("WORKERS", "8"))   # itens processados em paralelo
 sb = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"])
+
+# caches pré-carregados (evitam ida ao banco por item; seguros entre threads)
+CUSTOS = {}          # sku -> custo
+PISOS = {}           # sku -> (margem_minima, nome_grupo)
+_pct_lock = threading.Lock()
+
+
+def preload():
+    """Carrega custos e grupos de uma vez só, pra não bater no banco por item."""
+    try:
+        rows = sb.table("produtos").select("sku, custo").execute().data or []
+        for r in rows:
+            if r.get("sku") and r.get("custo") is not None:
+                CUSTOS[r["sku"]] = float(r["custo"])
+    except Exception as e:
+        print("Aviso: não consegui pré-carregar custos:", e, flush=True)
+    try:
+        grupos = {g["id"]: (float(g["margem_minima"]), g.get("nome") or "Grupo")
+                  for g in (sb.table("repricer_grupos").select("id, margem_minima, nome").execute().data or [])}
+        for et in (sb.table("repricer_etiquetas").select("sku, grupo_id").execute().data or []):
+            if et.get("sku") in (None, "") or et.get("grupo_id") not in grupos:
+                continue
+            PISOS[et["sku"]] = grupos[et["grupo_id"]]
+    except Exception as e:
+        print("Aviso: não consegui pré-carregar grupos:", e, flush=True)
+    print(f"pré-carregado: {len(CUSTOS)} custos, {len(PISOS)} etiquetas de grupo", flush=True)
 
 
 def get(path, access, tent=3):
@@ -96,15 +125,7 @@ def todos_ativos(sid, access):
 
 
 def custo_de(sku):
-    if not sku:
-        return None
-    try:
-        r = sb.table("produtos").select("custo").eq("sku", sku).limit(1).execute().data
-        if r and r[0].get("custo"):
-            return float(r[0]["custo"])
-    except Exception:
-        pass
-    return None
+    return CUSTOS.get(sku) if sku else None
 
 
 CEP = os.environ.get("CEP", "01310100")   # destino de referência (Av. Paulista, SP)
@@ -141,41 +162,18 @@ def frete_anuncio(item_id, access):
     return None, None
 
 
-def frete_historico(sku, item_id):
-    """Frete médio histórico (por sku; se não tiver, por item) — só fallback."""
-    for campo, val in (("sku", sku), ("item_id", item_id)):
-        if not val:
-            continue
-        try:
-            r = (sb.table("vendas").select("frete").eq(campo, val)
-                 .not_.is_("frete", "null").limit(30).execute().data)
-            fs = [float(x["frete"]) for x in (r or []) if x.get("frete")]
-            if fs:
-                return round(sum(fs) / len(fs), 2)
-        except Exception:
-            pass
-    return 0.0
-
-
 def frete_de(sku, item_id, access):
-    """Frete do anúncio (preferido); cai pro histórico se a API não trouxer."""
+    """Frete do anúncio (list_cost do shipping_options). Se a API não trouxer,
+    usa 0.0 (não bate no banco aqui pra ser seguro entre threads)."""
     custo, origem = frete_anuncio(item_id, access)
     if custo is not None:
         return custo, origem
-    return frete_historico(sku, item_id), "historico"
+    return 0.0, "indisponivel"
 
 
 def margem_minima_do(sku):
-    """Piso do grupo do produto (etiqueta -> grupo); senão, padrão."""
-    try:
-        et = sb.table("repricer_etiquetas").select("grupo_id").eq("sku", sku).limit(1).execute().data
-        if et:
-            g = sb.table("repricer_grupos").select("margem_minima, nome").eq("id", et[0]["grupo_id"]).limit(1).execute().data
-            if g:
-                return float(g[0]["margem_minima"]), g[0]["nome"]
-    except Exception:
-        pass
-    return MARGEM_PADRAO, "Padrão"
+    """Piso do grupo do produto (etiqueta -> grupo, pré-carregado); senão, padrão."""
+    return PISOS.get(sku, (MARGEM_PADRAO, "Padrão"))
 
 
 # comissão = % fixa por (categoria, tipo de anúncio). Acima do "custo fixo"
@@ -208,7 +206,8 @@ def _percentual(cat, ltid, access):
         pct = det.get("percentage_fee")
         if pct is None and d.get("sale_fee_amount"):
             pct = float(d["sale_fee_amount"]) / 1000.0 * 100.0   # deriva a %
-    _pct_cache[key] = pct
+    with _pct_lock:
+        _pct_cache[key] = pct
     return pct
 
 
@@ -299,10 +298,148 @@ def _rotulo(a):
     return f"{o.get('name') or o.get('type') or '?'} R${a['pb']:.2f}->{a['margem']:.1f}%"
 
 
+def processar_item(item_id, access, sid, detalhes):
+    """Processa UM anúncio (só leitura) e devolve o dict da sugestão, ou None.
+    Sem gravar no banco — é chamado em paralelo por várias threads."""
+    try:
+        ofertas = ofertas_do_item(item_id, access)
+        if not isinstance(ofertas, list) or not ofertas:
+            return None
+        ativas_raw = [o for o in ofertas if isinstance(o, dict) and eh_ativa(o)]
+        cand_raw = [o for o in ofertas if isinstance(o, dict)
+                    and (o.get("status") or "").lower() == "candidate"
+                    and o.get("meli_percentage") and o.get("original_price")]
+        if not ativas_raw and not cand_raw:
+            return None
+
+        it = detalhes.get(item_id)
+        if not isinstance(it, dict):
+            st, it = get(f"/items/{item_id}", access)
+        if not isinstance(it, dict):
+            return None
+        preco = it.get("price")
+        ltid = it.get("listing_type_id")
+        cat = it.get("category_id")
+        sku = it.get("seller_sku") or it.get("seller_custom_field")
+        titulo = it.get("title")
+        custo = custo_de(sku)
+        if custo is None:
+            return None  # sem custo não dá pra avaliar margem
+        frete, frete_origem = frete_de(sku, item_id, access)
+        piso, grupo = margem_minima_do(sku)
+
+        ativa = None
+        for o in ativas_raw:
+            ev = avaliar(o, cat, ltid, access, frete, custo)
+            if ev:
+                ativa = ev
+                break
+        cand = [avaliar(o, cat, ltid, access, frete, custo) for o in cand_raw]
+        cand = [c for c in cand if c]
+        seguras = [c for c in cand if c["margem"] >= piso]
+
+        # ---- decide a ação segundo a sua regra ----
+        alerta = None
+        alvo = None
+        if ativa:
+            if ativa["margem"] < piso:
+                alerta = "ativa_abaixo_piso"
+                if seguras:
+                    acao = "trocar"
+                    alvo = max(seguras, key=lambda a: a["recebe"])
+                else:
+                    acao = "sair"
+            else:
+                melhores = [a for a in seguras if a["recebe"] > ativa["recebe"] + 0.01]
+                if melhores:
+                    acao = "trocar"
+                    alvo = max(melhores, key=lambda a: a["recebe"])
+                else:
+                    acao = "manter"
+        else:
+            if seguras:
+                acao = "entrar"
+                alvo = min(seguras, key=lambda a: a["pb"])
+            else:
+                return None
+
+        rejeitadas = " | ".join(
+            _rotulo(a) + (" (ok)" if a["margem"] >= piso else f" (<{piso:.0f}%)")
+            for a in sorted(cand, key=lambda x: x["pb"]) if a is not alvo
+        )
+
+        sug = {
+            "seller_id": str(sid),
+            "item_id": item_id,
+            "sku": sku,
+            "titulo": titulo,
+            "preco_atual": preco,
+            "acao": acao,
+            "alerta": alerta,
+            "tem_ativa": bool(ativa),
+            "ativa_nome": (ativa["o"].get("name") if ativa else None),
+            "ativa_preco": (ativa["pb"] if ativa else None),
+            "ativa_margem": (ativa["margem"] if ativa else None),
+            "custo": custo,
+            "custo_envio": frete,
+            "custo_envio_origem": frete_origem,
+            "grupo": grupo,
+            "margem_minima": piso,
+            "alternativas": max(len(seguras) - (1 if alvo in seguras else 0), 0),
+            "rejeitadas": rejeitadas,
+            "status": "ok" if acao == "manter" else "pendente",
+        }
+        if alvo:
+            o = alvo["o"]
+            sug.update({
+                "promocao_id": o.get("id"),
+                "promocao_ref_id": o.get("ref_id"),
+                "promocao_nome": o.get("name"),
+                "promocao_tipo": o.get("type"),
+                "preco_comprador": alvo["pb"],
+                "seller_percentage": alvo["sp"],
+                "meli_percentage": alvo["mp"],
+                "tarifa_venda": alvo["tarifa"],
+                "recebe_liquido": alvo["recebe"],
+                "margem_resultante": alvo["margem"],
+            })
+        elif acao == "manter" and ativa:
+            sug.update({
+                "promocao_nome": ativa["o"].get("name"),
+                "promocao_tipo": ativa["o"].get("type"),
+                "preco_comprador": ativa["pb"],
+                "recebe_liquido": ativa["recebe"],
+                "margem_resultante": ativa["margem"],
+            })
+        return sug
+    except Exception as e:
+        print(f"  erro ao processar {item_id}: {e}", flush=True)
+        return None
+
+
+def _linha_log(s):
+    at = (f" | ATIVA {s.get('ativa_nome')} R${s.get('ativa_preco')} margem {s.get('ativa_margem')}%"
+          if s.get("tem_ativa") else "")
+    alvo_txt = ""
+    if s["acao"] in ("entrar", "trocar") and s.get("promocao_nome"):
+        alvo_txt = (f" -> {s['promocao_nome']} R${s.get('preco_comprador')} "
+                    f"recebe R${s.get('recebe_liquido')} ({s.get('margem_resultante')}%)")
+    flag = " ⚠️ABAIXO DO PISO" if s.get("alerta") else ""
+    return f"[{s['acao']}]{flag} {s['item_id']} {str(s.get('titulo'))[:26]}{at}{alvo_txt} (piso {s['margem_minima']})"
+
+
+def gravar_em_lote(sugs, tam=200):
+    for i in range(0, len(sugs), tam):
+        try:
+            sb.table("repricer_sugestoes").insert(sugs[i:i + tam]).execute()
+        except Exception as e:
+            print(f"  erro ao gravar lote {i}: {e}", flush=True)
+
+
 def main():
+    preload()
     total_sug = 0
     contadores = {"entrar": 0, "trocar": 0, "sair": 0, "manter": 0}
-    # limpa recomendações antigas ainda pendentes (mantém aprovadas/recusadas no histórico)
     try:
         sb.table("repricer_sugestoes").delete().eq("status", "pendente").execute()
         sb.table("repricer_sugestoes").delete().eq("status", "ok").execute()
@@ -315,139 +452,22 @@ def main():
         ids, total = todos_ativos(sid, access)
         cap = f" (varrendo {len(ids)}, limite de teste MAX_ITENS={MAX_ITENS})" if MAX_ITENS else ""
         print(f"itens ativos: {len(ids)} de {total if total is not None else '?'}{cap}", flush=True)
-        detalhes = detalhes_itens(ids, access)   # detalhes em lote (rápido)
+        detalhes = detalhes_itens(ids, access)
 
-        for item_id in ids:
-            ofertas = ofertas_do_item(item_id, access)
-            if not isinstance(ofertas, list) or not ofertas:
-                continue
-            # ATIVAS (já participando) e CANDIDATAS compartilhadas (ML banca parte)
-            ativas_raw = [o for o in ofertas if isinstance(o, dict) and eh_ativa(o)]
-            cand_raw = [o for o in ofertas if isinstance(o, dict)
-                        and (o.get("status") or "").lower() == "candidate"
-                        and o.get("meli_percentage") and o.get("original_price")]
-            if not ativas_raw and not cand_raw:
-                continue
+        # processa os itens em paralelo (só leitura); grava em lote no fim
+        sugs = []
+        with ThreadPoolExecutor(max_workers=WORKERS) as ex:
+            for sug in ex.map(lambda i: processar_item(i, access, sid, detalhes), ids):
+                if sug:
+                    sugs.append(sug)
 
-            it = detalhes.get(item_id)
-            if not isinstance(it, dict):
-                st, it = get(f"/items/{item_id}", access)
-            if not isinstance(it, dict):
-                continue
-            preco = it.get("price")
-            ltid = it.get("listing_type_id")
-            cat = it.get("category_id")
-            sku = it.get("seller_sku") or it.get("seller_custom_field")
-            titulo = it.get("title")
-            custo = custo_de(sku)
-            if custo is None:
-                continue  # sem custo não dá pra avaliar margem
-            frete, frete_origem = frete_de(sku, item_id, access)
-            piso, grupo = margem_minima_do(sku)
+        for s in sugs:
+            contadores[s["acao"]] = contadores.get(s["acao"], 0) + 1
+            print(_linha_log(s), flush=True)
 
-            # avalia a ATIVA (se houver) e as CANDIDATAS
-            ativa = None
-            for o in ativas_raw:
-                ev = avaliar(o, cat, ltid, access, frete, custo)
-                if ev:
-                    ativa = ev
-                    break
-            cand = [avaliar(o, cat, ltid, access, frete, custo) for o in cand_raw]
-            cand = [c for c in cand if c]
-            seguras = [c for c in cand if c["margem"] >= piso]
-
-            # ---- decide a ação segundo a sua regra ----
-            alerta = None
-            alvo = None
-            if ativa:
-                if ativa["margem"] < piso:
-                    # ATIVA abaixo do piso: recuperar margem já
-                    alerta = "ativa_abaixo_piso"
-                    if seguras:
-                        acao = "trocar"
-                        alvo = max(seguras, key=lambda a: a["recebe"])   # a que te paga mais
-                    else:
-                        acao = "sair"   # nenhuma compartilhada segura o piso -> voltar ao cheio
-                else:
-                    # ATIVA ok: só troca se alguma te faz RECEBER MAIS (recuperar margem)
-                    melhores = [a for a in seguras if a["recebe"] > ativa["recebe"] + 0.01]
-                    if melhores:
-                        acao = "trocar"
-                        alvo = max(melhores, key=lambda a: a["recebe"])
-                    else:
-                        acao = "manter"
-            else:
-                # sem ativa: entrar na de maior desconto (mais visibilidade) que segura o piso
-                if seguras:
-                    acao = "entrar"
-                    alvo = min(seguras, key=lambda a: a["pb"])
-                else:
-                    continue  # sem ativa e nenhuma candidata segura o piso -> nada a fazer
-
-            contadores[acao] = contadores.get(acao, 0) + 1
-
-            # opções compartilhadas recusadas (pra você ver o porquê)
-            rejeitadas = " | ".join(
-                _rotulo(a) + (" (ok)" if a["margem"] >= piso else f" (<{piso:.0f}%)")
-                for a in sorted(cand, key=lambda x: x["pb"]) if a is not alvo
-            )
-
-            sug = {
-                "seller_id": str(sid),
-                "item_id": item_id,
-                "sku": sku,
-                "titulo": titulo,
-                "preco_atual": preco,
-                "acao": acao,
-                "alerta": alerta,
-                "tem_ativa": bool(ativa),
-                "ativa_nome": (ativa["o"].get("name") if ativa else None),
-                "ativa_preco": (ativa["pb"] if ativa else None),
-                "ativa_margem": (ativa["margem"] if ativa else None),
-                "custo": custo,
-                "custo_envio": frete,
-                "custo_envio_origem": frete_origem,
-                "grupo": grupo,
-                "margem_minima": piso,
-                "alternativas": max(len(seguras) - (1 if alvo in seguras else 0), 0),
-                "rejeitadas": rejeitadas,
-                "status": "ok" if acao == "manter" else "pendente",
-            }
-            # dados da promoção RECOMENDADA (quando há um alvo)
-            if alvo:
-                o = alvo["o"]
-                sug.update({
-                    "promocao_id": o.get("id"),
-                    "promocao_ref_id": o.get("ref_id"),
-                    "promocao_nome": o.get("name"),
-                    "promocao_tipo": o.get("type"),
-                    "preco_comprador": alvo["pb"],
-                    "seller_percentage": alvo["sp"],
-                    "meli_percentage": alvo["mp"],
-                    "tarifa_venda": alvo["tarifa"],
-                    "recebe_liquido": alvo["recebe"],
-                    "margem_resultante": alvo["margem"],
-                })
-            elif acao == "manter" and ativa:
-                sug.update({
-                    "promocao_nome": ativa["o"].get("name"),
-                    "promocao_tipo": ativa["o"].get("type"),
-                    "preco_comprador": ativa["pb"],
-                    "recebe_liquido": ativa["recebe"],
-                    "margem_resultante": ativa["margem"],
-                })
-
-            try:
-                sb.table("repricer_sugestoes").insert(sug).execute()
-                total_sug += 1
-                at = f" | ATIVA {ativa['o'].get('name')} R${ativa['pb']} margem {ativa['margem']}%" if ativa else ""
-                alvo_txt = (f" -> {alvo['o'].get('name')} R${alvo['pb']} recebe R${alvo['recebe']} ({alvo['margem']}%)"
-                            if alvo else "")
-                flag = " ⚠️ABAIXO DO PISO" if alerta else ""
-                print(f"[{acao}]{flag} {item_id} {str(titulo)[:26]}{at}{alvo_txt} (piso {piso})", flush=True)
-            except Exception as e:
-                print(f"  erro ao gravar sugestão {item_id}: {e}", flush=True)
-            time.sleep(0.05)
+        gravar_em_lote(sugs)
+        total_sug += len(sugs)
+        print(f"--- conta {sid}: {len(sugs)} registros gravados ---", flush=True)
 
     resumo = ", ".join(f"{k}: {v}" for k, v in contadores.items())
     print(f"\n=== {total_sug} registros gravados ({resumo}) — nada foi aplicado no ML ===", flush=True)
