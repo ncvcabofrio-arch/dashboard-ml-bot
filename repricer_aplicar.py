@@ -110,9 +110,11 @@ def entrar_body_path(item_id, o):
     return f"/seller-promotions/items/{item_id}?app_version=v2", body
 
 
-def marcar_aplicada(sug_id):
+def marcar_aplicada(item_id):
+    """Marca TODAS as linhas aprovadas desse item como aplicadas (limpa duplicatas)."""
     try:
-        sb.table("repricer_sugestoes").update({"status": "aplicada"}).eq("id", sug_id).execute()
+        (sb.table("repricer_sugestoes").update({"status": "aplicada"})
+         .eq("item_id", item_id).eq("status", "aprovada").execute())
     except Exception as e:
         print(f"   (aviso: não marquei aplicada: {e})", flush=True)
 
@@ -213,7 +215,16 @@ def modo_lote():
         q = q.eq("acao", "trocar")
     elif PULAR_SAIR:
         q = q.neq("acao", "sair")   # aplica só ganhos (entrar/trocar); segura os "sair"
-    aprovadas = q.limit(LIMITE).execute().data or []
+    todas = q.limit(500).execute().data or []
+    # de-duplica por anúncio (linhas repetidas de rodadas diferentes) e corta no LIMITE
+    seen = set()
+    aprovadas = []
+    for s in todas:
+        if s["item_id"] in seen:
+            continue
+        seen.add(s["item_id"]); aprovadas.append(s)
+        if len(aprovadas) >= LIMITE:
+            break
 
     filtro = " | só trocas dinheiro-na-mesa" if SO_GANHO else (" | pulando os 'sair'" if PULAR_SAIR else "")
     modo = "⚠️ EXECUTAR" if CONFIRMA else "SIMULAÇÃO (dry-run)"
@@ -235,7 +246,7 @@ def modo_lote():
         else:
             ok, log = executar(sug["item_id"], access, entrar, sair)
             if ok:
-                marcar_aplicada(sug["id"]); res = "aplicado"
+                marcar_aplicada(sug["item_id"]); res = "aplicado"
             else:
                 res = "erro_entrar"
             det = " | ".join(log)
