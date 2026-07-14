@@ -67,19 +67,42 @@ def _model_code(titulo):
     return best or None
 
 
+def _variantes_codigo(code):
+    """Formas do código pro buscador de catálogo — o ML acha 'ct-x800' também por
+    'ctx800' e 'ct x800'. Ex.: 'ct-x800' -> ['ct-x800','ctx800','ct x800','ctx 800']."""
+    if not code:
+        return []
+    c = code.strip()
+    base = c.replace("-", "")
+    espac = re.sub(r"(?<=[A-Za-z])(?=\d)|(?<=\d)(?=[A-Za-z])", " ", base)   # letras|dígitos
+    out = []
+    for v in (c, base, c.replace("-", " "), espac):
+        v = re.sub(r"\s+", " ", v).strip()
+        if v and v.lower() not in [o.lower() for o in out]:
+            out.append(v)
+    return out
+
+
 def candidatos(reg, access):
-    """Junta candidatos de VÁRIAS queries (título limpo + marca+código + EAN), dedup por pid."""
+    """Junta candidatos de VÁRIAS queries, dedup por pid. Além do título e do EAN,
+    tenta o código do modelo em formas normalizadas (com/sem hífen, espaçado) e puro
+    (Part Number) — o /products/search aceita q=PART_NUMBER como recurso oficial."""
+    marca = (reg.get("marca") or "").strip()
     queries = []
     if reg.get("consulta"):
         queries.append(("q", reg["consulta"]))
-    code = _model_code(reg.get("titulo"))
-    if code:
-        queries.append(("q", f"{(reg.get('marca') or '').strip()} {code}".strip()))
+    for v in _variantes_codigo(_model_code(reg.get("titulo"))):
+        queries.append(("q", f"{marca} {v}".strip()))
+        queries.append(("q", v))          # Part Number puro (ML: q=PART_NUMBER)
     if reg.get("gtin"):
         queries.append(("ean", reg["gtin"]))
 
-    vistos, out = set(), []
+    vistos, out, qvistos = set(), [], set()
     for tipo, q in queries:
+        chave_q = (tipo, str(q).lower())
+        if chave_q in qvistos:
+            continue                      # não repete a mesma query
+        qvistos.add(chave_q)
         if tipo == "ean":
             url = f"/products/search?status=active&site_id=MLB&product_identifier={q}"
         else:
