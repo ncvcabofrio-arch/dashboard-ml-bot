@@ -25,14 +25,33 @@ from ml_auth import obter_access
 
 API = rec.API
 WORKERS = int(os.environ.get("WORKERS", "8"))   # itens processados em paralelo
+# TRAVA DE SEGURANÇA (gatilho): piso absoluto que nenhuma etiqueta pode furar.
+# Vazio = desligada (respeita as etiquetas como estão, mesmo negativas).
+_pmin_abs = (os.environ.get("PISO_MIN_ABS") or "").strip()
+PISO_MIN_ABS = float(_pmin_abs) if _pmin_abs else None
 DEBUG = (os.environ.get("DEBUG") or "") == "1"
 DEBUG_ITEM = (os.environ.get("DEBUG_ITEM") or "").strip()   # analisa só 1 item, verboso
 NORM_CUSTO = {}   # sku normalizado -> sku original na tabela produtos (só p/ DIAGNÓSTICO)
 MEUS_SELLERS = set()   # TODOS os seus seller_ids (as 3 contas) — nunca competir consigo mesmo
+MATCH = {}             # item_id -> {product_ids, confianca, tipo} (mapa confirmado com IA)
 
 
 def _norm(s):
     return re.sub(r"\s+", "", str(s)).upper() if s else ""
+
+
+def _parece_kit(titulo):
+    """Título com 'kit' ou 'set' => conjunto (não casa com página de produto avulso)."""
+    return bool(re.search(r"\bkit\b|\bset\b", (titulo or "").lower()))
+
+
+def carregar_match():
+    """Carrega o mapa item->produto(s) confirmado. Silencioso se a tabela não existir."""
+    try:
+        for r in (rec.sb.table("repricer_match").select("*").execute().data or []):
+            MATCH[r["item_id"]] = r
+    except Exception as e:
+        print(f"(aviso: sem tabela repricer_match ainda: {e})", flush=True)
 SELLER_ID = (os.environ.get("SELLER_ID") or "").strip()
 MAX_ITENS = int(os.environ.get("MAX_ITENS", "30"))
 EPS = 0.01
@@ -224,23 +243,43 @@ def analisar(item_id, access, sid):
                 "acao": "sem_custo", "detalhe": f"sem custo (SKU={sku or '—'}){extra}"}
     frete, _ = rec.frete_de(sku, item_id, access)
     piso, grupo = rec.margem_minima_do(sku)
+    piso_orig = piso
+    if PISO_MIN_ABS is not None:                 # trava de segurança ligada
+        piso = max(piso, PISO_MIN_ABS)
     pmin = preco_piso(piso, cat, ltid, frete, custo, access, p0)
     m_cheio, _, _ = margem_no_preco(p0, cat, ltid, frete, custo, access)
 
     base = {"item_id": item_id, "titulo": it.get("title"), "sku": sku, "aq": raw_aq,
-            "grupo": grupo, "piso": piso, "preco_cheio": round(p0, 2),
+            "grupo": grupo, "piso": piso, "piso_orig": piso_orig, "preco_cheio": round(p0, 2),
             "margem_cheio": round(m_cheio, 1), "preco_piso": pmin, "catalog": catalog_listing}
 
     if not catalog_listing:
-        # Fora do catálogo -> busca concorrência por EAN (e por título como plano B)
-        ean = gtin_do_item(it)
-        consulta = consulta_do_item(it)
-        precos, origem = concorrencia_mercado(ean, consulta, it.get("title"), sid, access, p0)
+        m = MATCH.get(item_id)
+        if m:
+            # ITEM MAPEADO (match confirmado) -> exato, agrega páginas duplicadas
+            if (m.get("confianca") == "nenhum") or (m.get("tipo") in ("kit", "sem_concorrente")):
+                base.update({"acao": "sem_match",
+                             "detalhe": f"mapeado ({m.get('tipo')}) — não precifica por catálogo"})
+                return base
+            pids = m.get("product_ids") or []
+            lo, hi = FAIXA_MIN * p0, FAIXA_MAX * p0
+            precos = sorted([x for pid in pids for x in concorrentes(pid, sid, access) if lo <= x <= hi])
+            origem = f"mapa ({len(pids)}p)"
+        else:
+            # NÃO mapeado -> trava anti-kit + busca fuzzy (estimativa)
+            if _parece_kit(it.get("title")):
+                base.update({"acao": "sem_match",
+                             "detalhe": "parece kit/conjunto — não precifica por catálogo (não mapeado)"})
+                return base
+            ean = gtin_do_item(it)
+            consulta = consulta_do_item(it)
+            precos, origem = concorrencia_mercado(ean, consulta, it.get("title"), sid, access, p0)
+            if origem:
+                origem += " (estimativa)"
         ctx = "elegível ao catálogo, sem opt-in" if pid else "fora do catálogo"
         if not precos:
             base.update({"acao": "sem_match",
-                         "detalhe": f"{ctx}; sem concorrente encontrado"
-                                    f"{' (sem EAN e sem match por título)' if not ean else f' (EAN {ean})'}"})
+                         "detalhe": f"{ctx}; sem concorrente encontrado"})
             return base
         menor = precos[0]
         base.update({"origem": origem, "n_conc": len(precos), "conc_min": round(menor, 2)})
@@ -320,8 +359,10 @@ def analisar(item_id, access, sid):
 def main():
     if not SELLER_ID:
         print("Defina SELLER_ID (ex 177795203).", flush=True); return
-    print(">>> SONDA v4 (diagnóstico piso/pmin) <<<", flush=True)
+    print(">>> SONDA v6 (mapa de match + anti-kit) <<<", flush=True)
     rec.preload()
+    carregar_match()
+    print(f"mapa de match carregado: {len(MATCH)} itens", flush=True)
     # autentica TODAS as contas: guarda os seller_ids (p/ não competir consigo) e pega o access da escolhida
     access = sid = None
     for seller_id, refresh in rec.contas():
@@ -379,6 +420,15 @@ def main():
         print(f"\n--- {len(faltando)} SEM CUSTO (preencher na tabela 'produtos') ---", flush=True)
         for l in faltando:
             print(f"   {l['item_id']} | SKU={l.get('sku') or '—'} | {str(l.get('titulo'))[:45]}", flush=True)
+
+    baixos = [l for l in linhas if (l.get("piso_orig") is not None and l["piso_orig"] < 0)]
+    if PISO_MIN_ABS is not None:
+        print(f"\n🔒 trava de segurança LIGADA: piso nunca abaixo de {PISO_MIN_ABS:.0f}%.", flush=True)
+    elif baixos:
+        grupos = sorted({f"{l.get('grupo')} ({l['piso_orig']:.0f}%)" for l in baixos})
+        print(f"\n⚠️ LEMBRETE: trava de segurança DESLIGADA e {len(baixos)} item(ns) com piso NEGATIVO "
+              f"— grupo(s): {', '.join(grupos)}. Esses podem descontar até dar prejuízo.\n"
+              f"   Pra proteger: rode com piso_minimo (ex. 18) OU corrija o grupo em 'repricer_grupos'.", flush=True)
 
     print("\nNada foi escrito. É só a leitura da régua competitiva.", flush=True)
 
