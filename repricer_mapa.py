@@ -13,9 +13,14 @@ Uso: [CONFIRMA=SIM]. Secrets: ML_* e SUPABASE_*.
 """
 import os
 import repricer_sugestoes as rec
+import repricer_match as coll
 from ml_auth import obter_access
 
 CONFIRMA = (os.environ.get("CONFIRMA") or "").strip().upper() == "SIM"
+# chaves a NÃO gravar no reparo (id nativo suspeito). Ex.: "CF2000EQ,OUTRO"
+EXCLUIR = {x.strip() for x in (os.environ.get("EXCLUIR") or "").split(",") if x.strip()}
+# RESEARCH=SIM: roda a busca (melhorada) nos avulsos e mostra páginas candidatas (só leitura)
+RESEARCH = (os.environ.get("RESEARCH") or "").strip().upper() == "SIM"
 
 
 def carregar_mapa():
@@ -107,6 +112,9 @@ def main():
         preco = f"R${mn:.2f}" if mn else "—"
         print(f"  ✅ {rot:20} -> {v['cpid']:16} menor={preco:>12} cl={v['cl']} | pág: {str(nome)[:38]}", flush=True)
         print(f"       (meu anúncio: {str(v['titulo'])[:58]})", flush=True)
+        if rot in EXCLUIR:
+            print("       (PULADO por EXCLUIR — mantido como sem_concorrente)", flush=True)
+            continue
         if CONFIRMA:
             try:
                 gravar(rot, v["cpid"], nome); n += 1
@@ -119,6 +127,21 @@ def main():
         print(f"  ∅ {rot:20} item={v['item_id']} conta={v['conta']} | {str(v['titulo'])[:42]}", flush=True)
     if nao_achei:
         print(f"\n(sem anúncio ativo p/ {len(nao_achei)} chaves — ex.: {sorted(nao_achei)[:8]})", flush=True)
+
+    # ---------- 2b) REBUSCA dos avulsos (busca melhorada, só leitura) ----------
+    if RESEARCH and avulso:
+        print(f"\n>>> REBUSCA dos {len(avulso)} avulsos com a busca melhorada (só leitura) <<<", flush=True)
+        for v in sorted(avulso, key=lambda x: str(x["titulo"])):
+            rot = v["sku"] or v["item_id"]
+            reg = coll.coletar(v["item_id"], v["access"])
+            cands = [c for c in ((reg or {}).get("candidatos") or []) if c.get("n_anuncios")]
+            if not cands:
+                print(f"  ∅ {rot:18} | {str(v['titulo'])[:40]} -> nada", flush=True)
+                continue
+            print(f"  ? {rot:18} | {str(v['titulo'])[:40]}", flush=True)
+            for c in cands[:4]:
+                print(f"       {c['pid']} n={c['n_anuncios']} "
+                      f"R${c.get('preco_min')}–{c.get('preco_max')} | {str(c.get('nome'))[:44]}", flush=True)
 
     # ---------- 3) fecho ----------
     if CONFIRMA:
