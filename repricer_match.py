@@ -16,6 +16,7 @@ import os
 import re
 import json
 from urllib.parse import quote
+from concurrent.futures import ThreadPoolExecutor
 import repricer_sugestoes as rec
 import repricer_competitivo as comp
 from ml_auth import obter_access
@@ -24,6 +25,7 @@ SELLER_ID = (os.environ.get("SELLER_ID") or "").strip()
 LIMITE = int(os.environ.get("LIMITE", "15"))
 MODO = (os.environ.get("MODO") or "amostra").strip().lower()
 N_CAND = int(os.environ.get("N_CAND", "6"))   # candidatos de catálogo por item
+WORKERS = int(os.environ.get("WORKERS", "8"))
 
 
 def attrs_do_item(it):
@@ -141,9 +143,10 @@ def main():
         ids = ids[:LIMITE]
 
     print(f">>> COLETOR DE MATCH | conta {sid} | {len(ids)} itens | (cole tudo abaixo pro Claude) <<<", flush=True)
+    with ThreadPoolExecutor(max_workers=WORKERS) as ex:
+        regs = list(ex.map(lambda i: coletar(i, access), ids))
     print("=====BEGIN_MATCH_JSONL=====", flush=True)
-    for item_id in ids:
-        reg = coletar(item_id, access)
+    for reg in regs:
         if reg:
             print(json.dumps(reg, ensure_ascii=False), flush=True)
     print("=====END_MATCH_JSONL=====", flush=True)
