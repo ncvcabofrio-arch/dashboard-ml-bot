@@ -57,10 +57,11 @@ def _parece_bundle(nome):
 
 
 def carregar_match():
-    """Carrega o mapa item->produto(s) confirmado. Silencioso se a tabela não existir."""
+    """Carrega o mapa SKU->produto(s) confirmado. Silencioso se a tabela não existir."""
     try:
         for r in (rec.sb.table("repricer_match").select("*").execute().data or []):
-            MATCH[r["item_id"]] = r
+            if r.get("sku"):
+                MATCH[r["sku"]] = r
     except Exception as e:
         print(f"(aviso: sem tabela repricer_match ainda: {e})", flush=True)
 SELLER_ID = (os.environ.get("SELLER_ID") or "").strip()
@@ -268,7 +269,7 @@ def analisar(item_id, access, sid):
             "margem_cheio": round(m_cheio, 1), "preco_piso": pmin, "catalog": catalog_listing}
 
     if not catalog_listing:
-        m = MATCH.get(item_id)
+        m = MATCH.get(sku)
         if m:
             # ITEM MAPEADO (match confirmado) -> exato, agrega páginas duplicadas
             if (m.get("confianca") == "nenhum") or (m.get("tipo") in ("kit", "sem_concorrente")):
@@ -373,7 +374,7 @@ def analisar(item_id, access, sid):
 def main():
     if not SELLER_ID:
         print("Defina SELLER_ID (ex 177795203).", flush=True); return
-    print(">>> SONDA v6 (mapa de match + anti-kit) <<<", flush=True)
+    print(">>> SONDA v7 (mapa por SKU + anti-bundle) <<<", flush=True)
     rec.preload()
     carregar_match()
     print(f"mapa de match carregado: {len(MATCH)} itens", flush=True)
