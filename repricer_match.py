@@ -1,137 +1,152 @@
 """
-COLETOR DE MATCH (Fase de mapeamento) — só leitura.
-Para uma amostra de anúncios seus, junta os CANDIDATOS de produto de catálogo
-(via API sancionada /products/search + /products/{id}/items) e imprime tudo
-estruturado (JSONL) pra a IA (Claude) julgar qual é o produto certo, com confiança.
+AUTO-MATCHER — constrói o mapa (SKU -> produto de catálogo) sozinho.
+Heurística resolve os fáceis (regra do código do modelo + guardas); a IA do Claude
+julga os ambíguos. Escreve em repricer_match por SKU. Padrão = SIMULAÇÃO.
 
-Depois o match confirmado vira uma tabela 'repricer_match' (meu item -> product_id),
-e a sonda passa a usar o mapa em vez de re-adivinhar.
+Fluxo por SKU novo:
+  1) coleta candidatos de catálogo (multi-query, sem bundle) — reusa o coletor.
+  2) HEURÍSTICA: mantém páginas cujo NOME contém o código do modelo, na faixa de
+     preço, mesma "mão" (canhoto/destro). Se sobra match limpo -> confiança ALTA (auto).
+  3) Caso contrário -> IA do Claude decide (produto/kit/sem_concorrente/revisar) c/ confiança.
+  4) grava upsert em repricer_match (só com CONFIRMA=SIM).
 
-Uso: SELLER_ID=<conta>  [LIMITE=15]  [MODO=amostra|sem_match]
-  - MODO=amostra (padrão): primeiros LIMITE anúncios ativos (pula estoque 0).
-  - MODO=sem_match: só os que a sonda marcou como difíceis (lê de repricer_sugestoes se houver).
-Não escreve nada.
+Uso: SELLER_ID=<conta> [LIMITE=40] [CONFIRMA=SIM] [MODEL_IA=...] [SO_IA=SIM]
+Secrets: ANTHROPIC_API_KEY (a mesma chave do Claude que você já usa).
 """
 import os
 import re
 import json
-from urllib.parse import quote
+import time
+import requests
 from concurrent.futures import ThreadPoolExecutor
 import repricer_sugestoes as rec
 import repricer_competitivo as comp
+import repricer_match as coll
 from ml_auth import obter_access
 
 SELLER_ID = (os.environ.get("SELLER_ID") or "").strip()
-LIMITE = int(os.environ.get("LIMITE", "15"))
-MODO = (os.environ.get("MODO") or "amostra").strip().lower()
-N_CAND = int(os.environ.get("N_CAND", "6"))   # candidatos de catálogo por item
+LIMITE = int(os.environ.get("LIMITE", "40"))
 WORKERS = int(os.environ.get("WORKERS", "8"))
+CONFIRMA = (os.environ.get("CONFIRMA") or "").strip().upper() == "SIM"
+SO_IA = (os.environ.get("SO_IA") or "").strip().upper() == "SIM"   # manda TUDO pra IA (máx acerto)
+MODEL_IA = (os.environ.get("MODEL_IA") or "claude-haiku-4-5").strip()
+ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+FAIXA_MIN, FAIXA_MAX = 0.40, 3.0
 
 
-def attrs_do_item(it):
-    a = {}
-    for x in (it.get("attributes") or []):
-        if x.get("id") and x.get("value_name"):
-            a[x["id"]] = str(x["value_name"])
-    return a
+def norm(s):
+    return re.sub(r"[^0-9a-z]", "", str(s or "").lower())
 
 
-def precos_produto(pid, access):
-    st, d = rec.get(f"/products/{pid}/items?limit=50", access)
-    precos = []
-    for r in ((d.get("results") if isinstance(d, dict) else None) or []):
-        try:
-            if r.get("price"):
-                precos.append(float(r["price"]))
-        except (TypeError, ValueError):
-            pass
-    return sorted(precos)
+def _mao_esq(txt):
+    return bool(re.search(r"canhoto|left|\blh\b", (txt or "").lower()))
 
 
-_VOLT_RE = re.compile(r"^\d{2,3}v$|^bivolt$|^\d{2,3}v[-/]\d{2,3}v$", re.I)   # 220v, bivolt, 110v-120v
-_NAO_MODELO = {"b20", "b8", "b10", "b12", "b15", "mg", "ns", "eq"}          # ligas/acabamentos comuns
-
-
-def _model_code(titulo):
-    """Maior token do título que parece CÓDIGO de modelo (letra+dígito), ignorando
-    voltagem (220v/bivolt) e ligas/acabamentos (b20, mg...) que davam match errado."""
-    best = ""
-    for t in re.findall(r"[0-9A-Za-zÀ-ÿ\-]+", titulo or ""):
-        tl = t.lower()
-        if not (re.search(r"\d", t) and re.search(r"[A-Za-z]", t)):
-            continue
-        if _VOLT_RE.match(tl) or tl in _NAO_MODELO:
-            continue
-        if len(t) > len(best):
-            best = t
-    return best or None
-
-
-def candidatos(reg, access):
-    """Junta candidatos de VÁRIAS queries (título limpo + marca+código + EAN), dedup por pid."""
-    queries = []
-    if reg.get("consulta"):
-        queries.append(("q", reg["consulta"]))
-    code = _model_code(reg.get("titulo"))
-    if code:
-        queries.append(("q", f"{(reg.get('marca') or '').strip()} {code}".strip()))
-    if reg.get("gtin"):
-        queries.append(("ean", reg["gtin"]))
-
-    vistos, out = set(), []
-    for tipo, q in queries:
-        if tipo == "ean":
-            url = f"/products/search?status=active&site_id=MLB&product_identifier={q}"
-        else:
-            url = f"/products/search?status=active&site_id=MLB&q={quote(str(q))}"
-        st, d = rec.get(url, access)
-        for p in ((d.get("results") if isinstance(d, dict) else None) or [])[:15]:
-            pid = p.get("id")
-            if not pid or pid in vistos:
-                continue
-            vistos.add(pid)
-            if comp._parece_bundle(p.get("name")):
-                continue   # bundle (item+extras) -> não é concorrente do item pelado
-            ps = precos_produto(pid, access)
-            out.append({"pid": pid, "nome": p.get("name"), "via": str(q)[:32],
-                        "preco_min": (ps[0] if ps else None),
-                        "preco_max": (ps[-1] if ps else None), "n_anuncios": len(ps)})
-            if len(out) >= 20:
-                break
-        if len(out) >= 20:
-            break
-    return out
-
-
-def coletar(item_id, access):
-    st, it = rec.get(f"/items/{item_id}?include_attributes=all", access)
-    if not isinstance(it, dict):
+def heuristica(reg):
+    """Retorna decisão (dict) se o match for LIMPO; senão None (=manda pra IA)."""
+    tit = reg.get("titulo") or ""
+    p0 = float(reg.get("preco") or 0)
+    cands = [c for c in reg.get("candidatos", []) if c.get("n_anuncios")]
+    code = coll._model_code(tit)
+    if not p0:
         return None
-    try:
-        if int(it.get("available_quantity")) <= 0:
-            return None
-    except (TypeError, ValueError):
-        pass
-    a = attrs_do_item(it)
-    consulta = comp.consulta_do_item(it)
-    reg = {
-        "item_id": item_id,
-        "sku": it.get("seller_sku") or it.get("seller_custom_field"),
-        "titulo": it.get("title"),
-        "marca": a.get("BRAND"),
-        "modelo": a.get("MODEL") or a.get("ALPHANUMERIC_MODEL") or a.get("LINE"),
-        "gtin": comp.gtin_do_item(it),
-        "preco": it.get("price"),
-        "catalog_listing": bool(it.get("catalog_listing")),
-        "consulta": consulta,
-    }
-    reg["candidatos"] = candidatos(reg, access)
-    return reg
+    if not cands:
+        return {"product_ids": [], "confianca": "nenhum", "tipo": "sem_concorrente",
+                "motivo": "sem página de catálogo com anúncios"}
+    if not code:
+        return None  # modelo sem código (ex.: 'Mininova') -> IA
+    nc = norm(code)
+    esq = _mao_esq(tit)
+    lo, hi = FAIXA_MIN * p0, FAIXA_MAX * p0
+    kept = []
+    for c in cands:
+        nome = c.get("nome") or ""
+        mn = c.get("preco_min")
+        if nc not in norm(nome):
+            continue                      # código do modelo não bate -> outro produto
+        if mn is None or not (lo <= mn <= hi):
+            continue                      # fora da faixa -> variante/errado
+        if _mao_esq(nome) != esq:
+            continue                      # canhoto vs destro
+        kept.append(c["pid"])
+    if kept:
+        return {"product_ids": kept, "confianca": "alta", "tipo": "produto",
+                "motivo": f"código '{code}' bate em {len(kept)} página(s)"}
+    return None   # nada bateu limpo -> IA decide
+
+
+def ia_match(reg):
+    """Chama o Claude pra julgar o match. Retorna dict decisão."""
+    cands = [{"pid": c["pid"], "nome": c.get("nome"), "min": c.get("preco_min"),
+              "max": c.get("preco_max"), "n": c.get("n_anuncios")}
+             for c in reg.get("candidatos", []) if c.get("n_anuncios")]
+    prompt = (
+        "Você casa o PRODUTO de um vendedor com páginas de produto do catálogo do Mercado Livre.\n"
+        "Retorne SÓ um JSON: {\"product_ids\":[...],\"confianca\":\"alta|media|nenhum\","
+        "\"tipo\":\"produto|kit|sem_concorrente|revisar\",\"motivo\":\"...\"}.\n"
+        "Regras:\n"
+        "- INCLUA TODAS as páginas que forem o MESMO produto. Páginas DUPLICADAS (preços, número de "
+        "anúncios ou descrições diferentes) são NORMAIS e devem TODAS entrar em product_ids — a gente "
+        "agrega os concorrentes de todas. Diferença de PREÇO entre páginas do mesmo produto NÃO é "
+        "motivo pra excluir nem pra 'revisar'.\n"
+        "- EXCLUA só página de produto DIFERENTE: outro tamanho/polegada, outra cor, outro acabamento, "
+        "outra versão (ex.: V2), canhoto vs destro, ou modelo diferente. Também exclua bundle "
+        "(item+capa/suporte/pedal/boné), kit e acessório.\n"
+        "- Se o anúncio é um KIT/conjunto: tipo='kit', product_ids=[].\n"
+        "- Se NENHUMA página é o mesmo produto: tipo='sem_concorrente', product_ids=[].\n"
+        "- Use 'revisar' SÓ quando houver dúvida REAL de variante (ex.: não dá pra saber a cor/acabamento). "
+        "Nunca use 'revisar' por causa de preço.\n\n"
+        f"MEU PRODUTO: {json.dumps({k: reg.get(k) for k in ('titulo','marca','modelo','gtin','preco')}, ensure_ascii=False)}\n"
+        f"CANDIDATOS: {json.dumps(cands, ensure_ascii=False)}\n"
+    )
+    body = {"model": MODEL_IA, "max_tokens": 400,
+            "messages": [{"role": "user", "content": prompt}]}
+    h = {"x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01",
+         "content-type": "application/json"}
+    for tent in range(3):
+        try:
+            r = requests.post("https://api.anthropic.com/v1/messages", headers=h, json=body, timeout=40)
+            if r.status_code >= 500 or r.status_code == 429:
+                time.sleep(1.2 * (tent + 1)); continue
+            txt = "".join(b.get("text", "") for b in r.json().get("content", []))
+            m = re.search(r"\{.*\}", txt, re.S)
+            d = json.loads(m.group(0)) if m else {}
+            d["motivo"] = "IA: " + str(d.get("motivo", ""))[:120]
+            d.setdefault("product_ids", []); d.setdefault("confianca", "nenhum")
+            d.setdefault("tipo", "revisar")
+            return d
+        except Exception as e:
+            if tent == 2:
+                return {"product_ids": [], "confianca": "nenhum", "tipo": "revisar",
+                        "motivo": f"IA falhou: {e}"}
+            time.sleep(1.0)
+
+
+def decidir(reg):
+    if comp._parece_kit(reg.get("titulo")):
+        return {"product_ids": [], "confianca": "nenhum", "tipo": "kit", "motivo": "título é kit/conjunto"}
+    d = None if SO_IA else heuristica(reg)
+    via = "heurística"
+    if d is None:
+        if not ANTHROPIC_KEY:
+            return {"product_ids": [], "confianca": "nenhum", "tipo": "revisar",
+                    "motivo": "sem ANTHROPIC_API_KEY; ambíguo -> revisar", "_via": "sem-ia"}
+        d = ia_match(reg); via = "IA"
+    d["_via"] = via
+    return d
+
+
+def gravar(sku, d):
+    row = {"sku": sku, "product_ids": d.get("product_ids") or [],
+           "confianca": d.get("confianca"), "tipo": d.get("tipo"), "nota": d.get("motivo")}
+    rec.sb.table("repricer_match").upsert(row, on_conflict="sku").execute()
 
 
 def main():
     if not SELLER_ID:
         print("Defina SELLER_ID.", flush=True); return
+    if not ANTHROPIC_KEY:
+        print("(aviso: sem ANTHROPIC_API_KEY — só a heurística resolve; ambíguos viram 'revisar')", flush=True)
     rec.preload()
     access = sid = None
     for seller_id, refresh in rec.contas():
@@ -141,54 +156,53 @@ def main():
     if not access:
         print(f"não autentiquei a conta {SELLER_ID}.", flush=True); return
 
-    if MODO == "sem_match":
-        try:
-            rows = (rec.sb.table("repricer_sugestoes").select("item_id")
-                    .eq("seller_id", str(SELLER_ID)).eq("acao", "sem_match")
-                    .limit(LIMITE).execute().data) or []
-            ids = [r["item_id"] for r in rows]
-        except Exception:
-            ids = []
-        if not ids:
-            print("Sem itens 'sem_match' no banco; use MODO=amostra.", flush=True); return
-    else:
-        # SKUs já mapeados (pra pular e trazer só produtos NOVOS a cada lote)
-        mapeados = set()
-        try:
-            for r in (rec.sb.table("repricer_match").select("sku").execute().data or []):
-                if r.get("sku"):
-                    mapeados.add(r["sku"])
-        except Exception:
-            pass
-        todos, _ = rec.todos_ativos(sid, access)
-        det = rec.detalhes_itens(todos, access)   # multiget: pega seller_sku barato
-        vistos, ids = set(), []
-        for iid in todos:
-            b = det.get(iid) or {}
-            sku = b.get("seller_sku") or b.get("seller_custom_field")
-            key = sku or iid
-            if key in vistos or (sku and sku in mapeados):
-                continue                # dedup por SKU + pula os já confirmados
-            vistos.add(key)
-            ids.append(iid)
-            if len(ids) >= LIMITE:
-                break
-        print(f"(SKUs já mapeados: {len(mapeados)}; coletando {len(ids)} produtos novos)", flush=True)
-
-    print(f">>> COLETOR DE MATCH | conta {sid} | {len(ids)} itens | (cole tudo abaixo pro Claude) <<<", flush=True)
-    with ThreadPoolExecutor(max_workers=WORKERS) as ex:
-        regs = list(ex.map(lambda i: coletar(i, access), ids))
-    print("=====BEGIN_MATCH_JSONL=====", flush=True)
-    for reg in regs:
-        if not reg:
+    mapeados = set()
+    try:
+        for r in (rec.sb.table("repricer_match").select("sku").execute().data or []):
+            if r.get("sku"):
+                mapeados.add(r["sku"])
+    except Exception:
+        pass
+    todos, _ = rec.todos_ativos(sid, access)
+    det = rec.detalhes_itens(todos, access)
+    vistos, ids = set(), []
+    for iid in todos:
+        b = det.get(iid) or {}
+        sku = b.get("seller_sku") or b.get("seller_custom_field")
+        key = sku or iid
+        if key in vistos or (sku and sku in mapeados):
             continue
-        # COMPACTO: só candidatos COM anúncios (os que valem pra preço), nomes curtos.
-        cand = [[c["pid"], (c.get("nome") or "")[:48], c.get("preco_min"), c.get("preco_max"), c.get("n_anuncios")]
-                for c in reg.get("candidatos", []) if c.get("n_anuncios")]
-        slim = {"i": reg["item_id"], "s": reg.get("sku"), "t": (reg.get("titulo") or "")[:48],
-                "p": reg.get("preco"), "kit": comp._parece_kit(reg.get("titulo")), "c": cand}
-        print(json.dumps(slim, ensure_ascii=False), flush=True)
-    print("=====END_MATCH_JSONL=====", flush=True)
+        vistos.add(key); ids.append(iid)
+        if len(ids) >= LIMITE:
+            break
+
+    modo = "⚠️ ESCREVER" if CONFIRMA else "SIMULAÇÃO"
+    print(f">>> AUTO-MATCH | conta {sid} | {len(ids)} produtos novos | {modo} | "
+          f"IA={'todos' if SO_IA else 'só ambíguos'} ({MODEL_IA if ANTHROPIC_KEY else 'sem chave'}) <<<", flush=True)
+    print(f"(SKUs já mapeados: {len(mapeados)})\n", flush=True)
+
+    regs = []
+    with ThreadPoolExecutor(max_workers=WORKERS) as ex:
+        regs = [r for r in ex.map(lambda i: coll.coletar(i, access), ids) if r]
+
+    cont = {}
+    for reg in regs:
+        sku = reg.get("sku")
+        d = decidir(reg)
+        cont[d["tipo"]] = cont.get(d["tipo"], 0) + 1
+        pids = ",".join(d.get("product_ids") or []) or "—"
+        tag = {"produto": "✅", "kit": "📦", "sem_concorrente": "∅", "revisar": "❓"}.get(d["tipo"], "·")
+        print(f"{tag} SKU={sku} [{d['tipo']}/{d['confianca']}] via {d.get('_via')} "
+              f"| {str(reg.get('titulo'))[:34]} -> {pids} | {d.get('motivo')}", flush=True)
+        if CONFIRMA and sku:
+            try:
+                gravar(sku, d)
+            except Exception as e:
+                print(f"   (erro ao gravar {sku}: {e})", flush=True)
+
+    print("\n=== " + ", ".join(f"{k}: {v}" for k, v in cont.items()) + " ===", flush=True)
+    if not CONFIRMA:
+        print("SIMULAÇÃO: nada gravado. Rode com CONFIRMA=SIM pra escrever o mapa.", flush=True)
 
 
 if __name__ == "__main__":
