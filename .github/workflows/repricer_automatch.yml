@@ -3,12 +3,14 @@ name: Repricer - Auto-Match (heurística + IA)
 # Constrói o mapa SKU->produto sozinho: heurística nos fáceis, IA do Claude nos ambíguos.
 # Padrao = SIMULACAO. So escreve com confirma=SIM.
 on:
+  schedule:
+    - cron: '23 */2 * * *'   # a cada 2h: constrói o mapa sozinho (todas as contas, grava)
   workflow_dispatch:
     inputs:
       seller_id:
-        description: "Conta. Ex: 177795203"
+        description: "Conta (vazio = TODAS). Ex: 177795203"
         type: string
-        required: true
+        required: false
         default: ""
       limite:
         description: "Quantos produtos NOVOS por rodada"
@@ -28,10 +30,10 @@ on:
         default: "NAO"
         options: ["NAO", "SIM"]
       model_ia:
-        description: "Modelo do Claude (deixe o mesmo dos seus bots). Ex: claude-3-5-haiku-latest"
+        description: "Modelo do Claude (o mesmo dos seus bots)."
         type: string
         required: false
-        default: "claude-3-5-haiku-latest"
+        default: "claude-haiku-4-5"
 
 concurrency:
   group: ml-puxador
@@ -56,9 +58,10 @@ jobs:
           SUPABASE_KEY:     ${{ secrets.SUPABASE_KEY }}
           # >>> se sua chave do Claude tem OUTRO nome no secrets, troque o lado direito abaixo <<<
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Agendado (inputs vazios) usa os padrões: TODAS as contas, grava, heurística+IA-ambíguos.
           SELLER_ID: ${{ github.event.inputs.seller_id }}
-          LIMITE:    ${{ github.event.inputs.limite }}
-          CONFIRMA:  ${{ github.event.inputs.confirma }}
-          SO_IA:     ${{ github.event.inputs.so_ia }}
-          MODEL_IA:  ${{ github.event.inputs.model_ia }}
+          LIMITE:    ${{ github.event.inputs.limite || '60' }}
+          CONFIRMA:  ${{ github.event.inputs.confirma || 'SIM' }}
+          SO_IA:     ${{ github.event.inputs.so_ia || 'NAO' }}
+          MODEL_IA:  ${{ github.event.inputs.model_ia || 'claude-haiku-4-5' }}
         run: python repricer_automatch.py
