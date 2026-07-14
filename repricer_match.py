@@ -80,6 +80,8 @@ def candidatos(reg, access):
             if not pid or pid in vistos:
                 continue
             vistos.add(pid)
+            if comp._parece_bundle(p.get("name")):
+                continue   # bundle (item+extras) -> não é concorrente do item pelado
             ps = precos_produto(pid, access)
             out.append({"pid": pid, "nome": p.get("name"), "via": str(q)[:32],
                         "preco_min": (ps[0] if ps else None),
