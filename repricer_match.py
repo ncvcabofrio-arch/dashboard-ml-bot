@@ -13,6 +13,7 @@ Uso: SELLER_ID=<conta>  [LIMITE=15]  [MODO=amostra|sem_match]
 Não escreve nada.
 """
 import os
+import re
 import json
 from urllib.parse import quote
 import repricer_sugestoes as rec
@@ -45,18 +46,46 @@ def precos_produto(pid, access):
     return sorted(precos)
 
 
-def candidatos(consulta, access):
-    st, d = rec.get(f"/products/search?status=active&site_id=MLB&q={quote(str(consulta))}", access)
-    prods = (d.get("results") if isinstance(d, dict) else None) or []
-    out = []
-    for p in prods[:N_CAND]:
-        pid = p.get("id")
-        if not pid:
-            continue
-        ps = precos_produto(pid, access)
-        out.append({"pid": pid, "nome": p.get("name"),
-                    "preco_min": (ps[0] if ps else None),
-                    "preco_max": (ps[-1] if ps else None), "n_anuncios": len(ps)})
+def _model_code(titulo):
+    """Maior token do título que mistura letra+dígito (ex.: 'Umc204hd', 'Cb-30bk', 'Zcc19')."""
+    best = ""
+    for t in re.findall(r"[0-9A-Za-zÀ-ÿ\-]+", titulo or ""):
+        if re.search(r"\d", t) and re.search(r"[A-Za-z]", t) and len(t) > len(best):
+            best = t
+    return best or None
+
+
+def candidatos(reg, access):
+    """Junta candidatos de VÁRIAS queries (título limpo + marca+código + EAN), dedup por pid."""
+    queries = []
+    if reg.get("consulta"):
+        queries.append(("q", reg["consulta"]))
+    code = _model_code(reg.get("titulo"))
+    if code:
+        queries.append(("q", f"{(reg.get('marca') or '').strip()} {code}".strip()))
+    if reg.get("gtin"):
+        queries.append(("ean", reg["gtin"]))
+
+    vistos, out = set(), []
+    for tipo, q in queries:
+        if tipo == "ean":
+            url = f"/products/search?status=active&site_id=MLB&product_identifier={q}"
+        else:
+            url = f"/products/search?status=active&site_id=MLB&q={quote(str(q))}"
+        st, d = rec.get(url, access)
+        for p in ((d.get("results") if isinstance(d, dict) else None) or [])[:8]:
+            pid = p.get("id")
+            if not pid or pid in vistos:
+                continue
+            vistos.add(pid)
+            ps = precos_produto(pid, access)
+            out.append({"pid": pid, "nome": p.get("name"), "via": str(q)[:32],
+                        "preco_min": (ps[0] if ps else None),
+                        "preco_max": (ps[-1] if ps else None), "n_anuncios": len(ps)})
+            if len(out) >= 12:
+                break
+        if len(out) >= 12:
+            break
     return out
 
 
@@ -80,8 +109,8 @@ def coletar(item_id, access):
         "preco": it.get("price"),
         "catalog_listing": bool(it.get("catalog_listing")),
         "consulta": consulta,
-        "candidatos": candidatos(consulta, access) if consulta else [],
     }
+    reg["candidatos"] = candidatos(reg, access)
     return reg
 
 
