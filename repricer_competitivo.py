@@ -34,6 +34,7 @@ DEBUG_ITEM = (os.environ.get("DEBUG_ITEM") or "").strip()   # analisa só 1 item
 NORM_CUSTO = {}   # sku normalizado -> sku original na tabela produtos (só p/ DIAGNÓSTICO)
 MEUS_SELLERS = set()   # TODOS os seus seller_ids (as 3 contas) — nunca competir consigo mesmo
 MATCH = {}             # item_id -> {product_ids, confianca, tipo} (mapa confirmado com IA)
+CONTROLE = {}          # item_id -> {ativo, piso_override, undercut_override, pma, preco_manual} (painel)
 
 
 def _norm(s):
@@ -73,9 +74,33 @@ def carregar_match():
         if len(lote) < 1000:
             break
         ini += 1000
+
+
+def carregar_controle():
+    """Carrega o controle por anúncio (painel): liga/desliga, regra individual, PMA.
+    Silencioso se a tabela não existir. Linha ausente = usa as regras globais."""
+    ini = 0
+    while True:
+        try:
+            lote = (rec.sb.table("repricer_controle").select("*")
+                    .range(ini, ini + 999).execute().data) or []
+        except Exception as e:
+            print(f"(aviso: sem tabela repricer_controle ainda: {e})", flush=True)
+            return
+        for r in lote:
+            if r.get("item_id"):
+                CONTROLE[r["item_id"]] = r
+        if len(lote) < 1000:
+            break
+        ini += 1000
+
+
 SELLER_ID = (os.environ.get("SELLER_ID") or "").strip()
 MAX_ITENS = int(os.environ.get("MAX_ITENS", "30"))
 EPS = 0.01
+# Quanto ficar ABAIXO do alvo (mais barato que o menor concorrente / abaixo do 2º lugar).
+# Antes era 1 centavo; agora R$5 por padrão pra ficar claramente na frente. Editável por env.
+UNDERCUT = float(os.environ.get("UNDERCUT", "5"))
 
 
 def _pct_cat(cat, ltid, access):
@@ -256,6 +281,12 @@ def analisar(item_id, access, sid):
     sku = it.get("seller_sku") or it.get("seller_custom_field")
     pid = it.get("catalog_product_id")
     catalog_listing = bool(it.get("catalog_listing"))   # SÓ True = compete de fato no catálogo
+    ctl = CONTROLE.get(item_id) or {}
+    if ctl.get("ativo") is False:                        # liga/desliga por anúncio (painel)
+        return {"item_id": item_id, "titulo": it.get("title"), "sku": sku, "aq": raw_aq,
+                "acao": "desligado", "detalhe": "robô desligado neste anúncio (controle)"}
+    uc = float(ctl["undercut_override"]) if ctl.get("undercut_override") is not None else UNDERCUT
+    pma = float(ctl["pma"]) if ctl.get("pma") is not None else None
     custo = rec.custo_de(sku)
     if custo is None or not p0:
         nk = _norm(sku)
@@ -267,15 +298,19 @@ def analisar(item_id, access, sid):
                 "acao": "sem_custo", "detalhe": f"sem custo (SKU={sku or '—'}){extra}"}
     frete, _ = rec.frete_de(sku, item_id, access)
     piso, grupo = rec.margem_minima_do(sku)
+    if ctl.get("piso_override") is not None:     # regra individual do item (painel)
+        piso = float(ctl["piso_override"])
     piso_orig = piso
     if PISO_MIN_ABS is not None:                 # trava de segurança ligada
         piso = max(piso, PISO_MIN_ABS)
     pmin = preco_piso(piso, cat, ltid, frete, custo, access, p0)
+    if pma is not None:                          # PMA (MAP): nunca anuncia abaixo disso
+        pmin = pma if pmin is None else max(pmin, pma)
     m_cheio, _, _ = margem_no_preco(p0, cat, ltid, frete, custo, access)
 
     base = {"item_id": item_id, "titulo": it.get("title"), "sku": sku, "aq": raw_aq,
             "grupo": grupo, "piso": piso, "piso_orig": piso_orig, "preco_cheio": round(p0, 2),
-            "margem_cheio": round(m_cheio, 1), "preco_piso": pmin, "catalog": catalog_listing}
+            "margem_cheio": round(m_cheio, 1), "preco_piso": pmin, "pma": pma, "catalog": catalog_listing}
 
     if not catalog_listing:
         m = MATCH.get(sku) or MATCH.get(item_id)   # sem SKU -> busca pelo item_id
@@ -314,14 +349,14 @@ def analisar(item_id, access, sid):
         elif pmin is None:
             base.update({"acao": "nao_perseguir_ean",
                          "detalhe": f"[{origem}] já abaixo do piso no preço cheio -> não dá pra descontar"})
-        elif (menor - EPS) >= pmin:
-            alvo = round(menor - EPS, 2)
+        elif (menor - uc) >= pmin:
+            alvo = round(menor - uc, 2)
             m_alvo, _, _ = margem_no_preco(alvo, cat, ltid, frete, custo, access)
             desc = (1 - alvo / p0) * 100
             base.update({"acao": "descontar_ean", "alvo": alvo, "margem_alvo": round(m_alvo, 1),
                          "detalhe": f"[{origem}] {len(precos)} conc, menor R${menor:.2f} -> "
-                                    f"descontar p/ R${alvo:.2f} ({desc:.1f}% off, margem {m_alvo:.1f}%) "
-                                    f"[piso={piso}% pmin=R${pmin}]"})
+                                    f"descontar p/ R${alvo:.2f} (R${uc:.0f} abaixo; {desc:.1f}% off, "
+                                    f"margem {m_alvo:.1f}%) [piso={piso}% pmin=R${pmin}]"})
         else:
             # mercado abaixo do piso: desconta até o PISO (mantém 18%, o mais competitivo possível)
             alvo = round(pmin, 2)
@@ -347,11 +382,13 @@ def analisar(item_id, access, sid):
         precos = concorrentes(pid, sid, access)
         segundo = precos[0] if precos else None
         base["segundo"] = segundo
-        if segundo and segundo - EPS > p0 + EPS:
-            m_seg, _, _ = margem_no_preco(segundo - EPS, cat, ltid, frete, custo, access)
-            base.update({"acao": "subir_margem",
+        if segundo and (segundo - uc) > p0 + EPS:
+            alvo_subir = round(segundo - uc, 2)
+            m_seg, _, _ = margem_no_preco(alvo_subir, cat, ltid, frete, custo, access)
+            base.update({"acao": "subir_margem", "alvo_subir": alvo_subir,
                          "detalhe": f"ganhando; 2º lugar R${segundo:.2f} > seu R${p0:.2f} "
-                                    f"-> pode subir até ~R${segundo - EPS:.2f} (margem {m_seg:.1f}%)"})
+                                    f"-> pode subir até R${alvo_subir:.2f} (R${uc:.0f} abaixo do 2º, "
+                                    f"margem {m_seg:.1f}%)"})
         else:
             base.update({"acao": "manter_ganhando", "detalhe": "ganhando, sem folga p/ subir"})
         return base
