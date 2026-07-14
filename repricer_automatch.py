@@ -29,7 +29,7 @@ LIMITE = int(os.environ.get("LIMITE", "40"))
 WORKERS = int(os.environ.get("WORKERS", "8"))
 CONFIRMA = (os.environ.get("CONFIRMA") or "").strip().upper() == "SIM"
 SO_IA = (os.environ.get("SO_IA") or "").strip().upper() == "SIM"   # manda TUDO pra IA (máx acerto)
-MODEL_IA = (os.environ.get("MODEL_IA") or "claude-3-5-haiku-latest").strip()
+MODEL_IA = (os.environ.get("MODEL_IA") or "claude-haiku-4-5").strip()
 ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 FAIXA_MIN, FAIXA_MAX = 0.40, 3.0
 
@@ -84,11 +84,18 @@ def ia_match(reg):
         "Você casa o PRODUTO de um vendedor com páginas de produto do catálogo do Mercado Livre.\n"
         "Retorne SÓ um JSON: {\"product_ids\":[...],\"confianca\":\"alta|media|nenhum\","
         "\"tipo\":\"produto|kit|sem_concorrente|revisar\",\"motivo\":\"...\"}.\n"
-        "Regras: escolha as páginas que são EXATAMENTE o mesmo produto (mesmo modelo, tamanho, "
-        "acabamento/cor e mão canhoto/destro). NUNCA inclua bundle (item+capa/suporte/pedal/boné), "
-        "kit, tamanho/modelo diferente, ou acessório. Se o anúncio é um KIT/conjunto, tipo='kit' e "
-        "product_ids=[]. Se nenhuma página bate, tipo='sem_concorrente' e product_ids=[]. Se estiver "
-        "em dúvida entre variantes, tipo='revisar'.\n\n"
+        "Regras:\n"
+        "- INCLUA TODAS as páginas que forem o MESMO produto. Páginas DUPLICADAS (preços, número de "
+        "anúncios ou descrições diferentes) são NORMAIS e devem TODAS entrar em product_ids — a gente "
+        "agrega os concorrentes de todas. Diferença de PREÇO entre páginas do mesmo produto NÃO é "
+        "motivo pra excluir nem pra 'revisar'.\n"
+        "- EXCLUA só página de produto DIFERENTE: outro tamanho/polegada, outra cor, outro acabamento, "
+        "outra versão (ex.: V2), canhoto vs destro, ou modelo diferente. Também exclua bundle "
+        "(item+capa/suporte/pedal/boné), kit e acessório.\n"
+        "- Se o anúncio é um KIT/conjunto: tipo='kit', product_ids=[].\n"
+        "- Se NENHUMA página é o mesmo produto: tipo='sem_concorrente', product_ids=[].\n"
+        "- Use 'revisar' SÓ quando houver dúvida REAL de variante (ex.: não dá pra saber a cor/acabamento). "
+        "Nunca use 'revisar' por causa de preço.\n\n"
         f"MEU PRODUTO: {json.dumps({k: reg.get(k) for k in ('titulo','marca','modelo','gtin','preco')}, ensure_ascii=False)}\n"
         f"CANDIDATOS: {json.dumps(cands, ensure_ascii=False)}\n"
     )
@@ -135,27 +142,8 @@ def gravar(sku, d):
     rec.sb.table("repricer_match").upsert(row, on_conflict="sku").execute()
 
 
-def main():
-    if not SELLER_ID:
-        print("Defina SELLER_ID.", flush=True); return
-    if not ANTHROPIC_KEY:
-        print("(aviso: sem ANTHROPIC_API_KEY — só a heurística resolve; ambíguos viram 'revisar')", flush=True)
-    rec.preload()
-    access = sid = None
-    for seller_id, refresh in rec.contas():
-        a, s, refresh = obter_access(rec.sb, seller_id, refresh)
-        if str(s) == str(SELLER_ID):
-            access, sid = a, s; break
-    if not access:
-        print(f"não autentiquei a conta {SELLER_ID}.", flush=True); return
-
-    mapeados = set()
-    try:
-        for r in (rec.sb.table("repricer_match").select("sku").execute().data or []):
-            if r.get("sku"):
-                mapeados.add(r["sku"])
-    except Exception:
-        pass
+def processar_conta(access, sid, mapeados):
+    """Mapeia até LIMITE SKUs NOVOS de uma conta. Atualiza 'mapeados' com os gravados."""
     todos, _ = rec.todos_ativos(sid, access)
     det = rec.detalhes_itens(todos, access)
     vistos, ids = set(), []
@@ -172,9 +160,9 @@ def main():
     modo = "⚠️ ESCREVER" if CONFIRMA else "SIMULAÇÃO"
     print(f">>> AUTO-MATCH | conta {sid} | {len(ids)} produtos novos | {modo} | "
           f"IA={'todos' if SO_IA else 'só ambíguos'} ({MODEL_IA if ANTHROPIC_KEY else 'sem chave'}) <<<", flush=True)
-    print(f"(SKUs já mapeados: {len(mapeados)})\n", flush=True)
+    if not ids:
+        return 0
 
-    regs = []
     with ThreadPoolExecutor(max_workers=WORKERS) as ex:
         regs = [r for r in ex.map(lambda i: coll.coletar(i, access), ids) if r]
 
@@ -190,12 +178,47 @@ def main():
         if CONFIRMA and sku:
             try:
                 gravar(sku, d)
+                mapeados.add(sku)   # não repetir na próxima conta/rodada
             except Exception as e:
                 print(f"   (erro ao gravar {sku}: {e})", flush=True)
+    print("=== " + ", ".join(f"{k}: {v}" for k, v in cont.items()) + " ===\n", flush=True)
+    return len(ids)
 
-    print("\n=== " + ", ".join(f"{k}: {v}" for k, v in cont.items()) + " ===", flush=True)
+
+def main():
+    if not ANTHROPIC_KEY:
+        print("(aviso: sem ANTHROPIC_API_KEY — só a heurística resolve; ambíguos viram 'revisar')", flush=True)
+    rec.preload()
+
+    mapeados = set()
+    try:
+        for r in (rec.sb.table("repricer_match").select("sku").execute().data or []):
+            if r.get("sku"):
+                mapeados.add(r["sku"])
+    except Exception:
+        pass
+    print(f"(SKUs já mapeados: {len(mapeados)})", flush=True)
+
+    # SELLER_ID definido = só ela; VAZIO (agendado) = TODAS as contas
+    alvos = []
+    for seller_id, refresh in rec.contas():
+        a, s, refresh = obter_access(rec.sb, seller_id, refresh)
+        if not s:
+            continue
+        if SELLER_ID and str(s) != str(SELLER_ID):
+            continue
+        alvos.append((a, s))
+    if not alvos:
+        print(f"nenhuma conta pra processar (SELLER_ID={SELLER_ID or 'todas'}).", flush=True); return
+
+    total = 0
+    for access, sid in alvos:
+        total += processar_conta(access, sid, mapeados)
+
     if not CONFIRMA:
         print("SIMULAÇÃO: nada gravado. Rode com CONFIRMA=SIM pra escrever o mapa.", flush=True)
+    elif total == 0:
+        print("Nenhum SKU novo — mapa em dia. ✅", flush=True)
 
 
 if __name__ == "__main__":
