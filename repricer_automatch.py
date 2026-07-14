@@ -150,8 +150,8 @@ def processar_conta(access, sid, mapeados):
     for iid in todos:
         b = det.get(iid) or {}
         sku = b.get("seller_sku") or b.get("seller_custom_field")
-        key = sku or iid
-        if key in vistos or (sku and sku in mapeados):
+        key = sku or iid   # sem SKU -> usa item_id como chave
+        if key in vistos or key in mapeados:
             continue
         vistos.add(key); ids.append(iid)
         if len(ids) >= LIMITE:
@@ -169,18 +169,20 @@ def processar_conta(access, sid, mapeados):
     cont = {}
     for reg in regs:
         sku = reg.get("sku")
+        chave = sku or reg.get("item_id")   # sem SKU -> grava pelo item_id (chave única do anúncio)
         d = decidir(reg)
         cont[d["tipo"]] = cont.get(d["tipo"], 0) + 1
         pids = ",".join(d.get("product_ids") or []) or "—"
         tag = {"produto": "✅", "kit": "📦", "sem_concorrente": "∅", "revisar": "❓"}.get(d["tipo"], "·")
-        print(f"{tag} SKU={sku} [{d['tipo']}/{d['confianca']}] via {d.get('_via')} "
+        rot = f"SKU={sku}" if sku else f"ITEM={chave}"
+        print(f"{tag} {rot} [{d['tipo']}/{d['confianca']}] via {d.get('_via')} "
               f"| {str(reg.get('titulo'))[:34]} -> {pids} | {d.get('motivo')}", flush=True)
-        if CONFIRMA and sku:
+        if CONFIRMA and chave:
             try:
-                gravar(sku, d)
-                mapeados.add(sku)   # não repetir na próxima conta/rodada
+                gravar(chave, d)
+                mapeados.add(chave)   # não repetir na próxima conta/rodada
             except Exception as e:
-                print(f"   (erro ao gravar {sku}: {e})", flush=True)
+                print(f"   (erro ao gravar {chave}: {e})", flush=True)
     print("=== " + ", ".join(f"{k}: {v}" for k, v in cont.items()) + " ===\n", flush=True)
     return len(ids)
 
@@ -191,13 +193,20 @@ def main():
     rec.preload()
 
     mapeados = set()
-    try:
-        for r in (rec.sb.table("repricer_match").select("sku").execute().data or []):
+    ini = 0
+    while True:
+        try:
+            lote = (rec.sb.table("repricer_match").select("sku")
+                    .range(ini, ini + 999).execute().data) or []
+        except Exception:
+            break
+        for r in lote:
             if r.get("sku"):
                 mapeados.add(r["sku"])
-    except Exception:
-        pass
-    print(f"(SKUs já mapeados: {len(mapeados)})", flush=True)
+        if len(lote) < 1000:
+            break
+        ini += 1000
+    print(f"(chaves já mapeadas: {len(mapeados)})", flush=True)
 
     # SELLER_ID definido = só ela; VAZIO (agendado) = TODAS as contas
     alvos = []
