@@ -134,14 +134,21 @@ def main():
         for v in sorted(avulso, key=lambda x: str(x["titulo"])):
             rot = v["sku"] or v["item_id"]
             reg = coll.coletar(v["item_id"], v["access"])
-            cands = [c for c in ((reg or {}).get("candidatos") or []) if c.get("n_anuncios")]
-            if not cands:
-                print(f"  ∅ {rot:18} | {str(v['titulo'])[:40]} -> nada", flush=True)
-                continue
+            texto = [c for c in ((reg or {}).get("candidatos") or []) if c.get("n_anuncios")]
+            attr = coll.candidatos_por_atributos(reg, v["access"]) if reg else []
             print(f"  ? {rot:18} | {str(v['titulo'])[:40]}", flush=True)
-            for c in cands[:4]:
-                print(f"       {c['pid']} n={c['n_anuncios']} "
-                      f"R${c.get('preco_min')}–{c.get('preco_max')} | {str(c.get('nome'))[:44]}", flush=True)
+            if texto:
+                for c in texto[:3]:
+                    print(f"     [texto] {c['pid']} n={c['n_anuncios']} "
+                          f"R${c.get('preco_min')}–{c.get('preco_max')} | {str(c.get('nome'))[:40]}", flush=True)
+            else:
+                print("     [texto] nada", flush=True)
+            if attr:
+                for c in attr[:3]:
+                    print(f"     [attr]  {c['pid']} n={c['n_anuncios']} "
+                          f"R${c.get('preco_min')}–{c.get('preco_max')} | {str(c.get('nome'))[:40]}", flush=True)
+            else:
+                print("     [attr]  nada", flush=True)
 
     # ---------- 3) fecho ----------
     if CONFIRMA:
