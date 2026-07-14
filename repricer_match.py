@@ -15,6 +15,8 @@ Não escreve nada.
 import os
 import re
 import json
+import time
+import requests
 from urllib.parse import quote
 from concurrent.futures import ThreadPoolExecutor
 import repricer_sugestoes as rec
@@ -126,6 +128,69 @@ def candidatos(reg, access):
     return out
 
 
+# Atributos identificadores (pra busca POST por atributos), em ordem de prioridade.
+_ATTR_PRIOR = ["BRAND", "LINE", "MODEL", "ALPHANUMERIC_MODEL", "MODEL_NAME",
+               "ITEM_MODEL", "MODEL_CODE", "PART_NUMBER", "FORMAT", "COLOR"]
+
+
+def _post_search(body, access):
+    """POST /products/search (busca por atributos). Retorna (status, json)."""
+    for i in range(3):
+        try:
+            r = requests.post(rec.API + "/products/search",
+                              headers={"Authorization": "Bearer " + access,
+                                       "Content-Type": "application/json"},
+                              json=body, timeout=25)
+            if r.status_code == 429 or r.status_code >= 500:
+                time.sleep(0.6 * (i + 1)); continue
+            return r.status_code, (r.json() if r.content else {})
+        except Exception:
+            time.sleep(0.5)
+    return 0, {}
+
+
+def candidatos_por_atributos(reg, access, n_attrs=4):
+    """Busca POST /products/search por domínio + atributos (BRAND/MODEL/LINE...).
+    Recurso oficial e mais específico que o texto — pode achar páginas que a busca
+    por q= não indexa. Retorna candidatos no mesmo formato de candidatos()."""
+    dom = reg.get("domain")
+    attrs = reg.get("attrs_full") or []
+    if not dom or len(attrs) < 3:
+        return []
+
+    def rank(a):
+        try:
+            return _ATTR_PRIOR.index(a.get("id"))
+        except ValueError:
+            return 99
+
+    body_attrs = []
+    for a in sorted(attrs, key=rank)[:n_attrs]:
+        one = {"id": a["id"]}
+        if a.get("value_id"):
+            one["value_id"] = a["value_id"]
+        elif a.get("value_name"):
+            one["value_name"] = a["value_name"]
+        else:
+            continue
+        body_attrs.append(one)
+    if len(body_attrs) < 3:
+        return []
+
+    body = {"site_id": "MLB", "status": "active", "domain_id": dom, "attributes": body_attrs}
+    st, d = _post_search(body, access)
+    out = []
+    for p in ((d.get("results") if isinstance(d, dict) else None) or [])[:15]:
+        pid = p.get("id")
+        if not pid or comp._parece_bundle(p.get("name")):
+            continue
+        ps = precos_produto(pid, access)
+        out.append({"pid": pid, "nome": p.get("name"), "via": "attr",
+                    "preco_min": (ps[0] if ps else None),
+                    "preco_max": (ps[-1] if ps else None), "n_anuncios": len(ps)})
+    return out
+
+
 def coletar(item_id, access):
     st, it = rec.get(f"/items/{item_id}?include_attributes=all", access)
     if not isinstance(it, dict):
@@ -147,6 +212,11 @@ def coletar(item_id, access):
         "preco": it.get("price"),
         "catalog_listing": bool(it.get("catalog_listing")),
         "consulta": consulta,
+        "domain": it.get("domain_id"),
+        "attrs_full": [{"id": x.get("id"), "value_id": x.get("value_id"),
+                        "value_name": x.get("value_name")}
+                       for x in (it.get("attributes") or [])
+                       if x.get("id") and (x.get("value_id") or x.get("value_name"))],
     }
     reg["candidatos"] = candidatos(reg, access)
     return reg
