@@ -1,0 +1,64 @@
+name: Repricer - Auto-Match (heurística + IA)
+
+# Constrói o mapa SKU->produto sozinho: heurística nos fáceis, IA do Claude nos ambíguos.
+# Padrao = SIMULACAO. So escreve com confirma=SIM.
+on:
+  workflow_dispatch:
+    inputs:
+      seller_id:
+        description: "Conta. Ex: 177795203"
+        type: string
+        required: true
+        default: ""
+      limite:
+        description: "Quantos produtos NOVOS por rodada"
+        type: string
+        required: false
+        default: "40"
+      confirma:
+        description: "Gravar o mapa? (NAO = simulacao)"
+        type: choice
+        required: true
+        default: "NAO"
+        options: ["NAO", "SIM"]
+      so_ia:
+        description: "Mandar TUDO pra IA (máx acerto, mais custo)?"
+        type: choice
+        required: true
+        default: "NAO"
+        options: ["NAO", "SIM"]
+      model_ia:
+        description: "Modelo do Claude (deixe o mesmo dos seus bots). Ex: claude-3-5-haiku-latest"
+        type: string
+        required: false
+        default: "claude-3-5-haiku-latest"
+
+concurrency:
+  group: ml-puxador
+  cancel-in-progress: false
+
+jobs:
+  automatch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Instalar dependencias
+        run: pip install requests supabase
+      - name: Auto-match (heuristica + IA)
+        env:
+          ML_CLIENT_ID:     ${{ secrets.ML_CLIENT_ID }}
+          ML_CLIENT_SECRET: ${{ secrets.ML_CLIENT_SECRET }}
+          ML_REFRESH_TOKEN: ${{ secrets.ML_REFRESH_TOKEN }}
+          SUPABASE_URL:     ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY:     ${{ secrets.SUPABASE_KEY }}
+          # >>> se sua chave do Claude tem OUTRO nome no secrets, troque o lado direito abaixo <<<
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SELLER_ID: ${{ github.event.inputs.seller_id }}
+          LIMITE:    ${{ github.event.inputs.limite }}
+          CONFIRMA:  ${{ github.event.inputs.confirma }}
+          SO_IA:     ${{ github.event.inputs.so_ia }}
+          MODEL_IA:  ${{ github.event.inputs.model_ia }}
+        run: python repricer_automatch.py
