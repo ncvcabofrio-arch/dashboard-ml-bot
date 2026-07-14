@@ -48,11 +48,21 @@ def precos_produto(pid, access):
     return sorted(precos)
 
 
+_VOLT_RE = re.compile(r"^\d{2,3}v$|^bivolt$|^\d{2,3}v[-/]\d{2,3}v$", re.I)   # 220v, bivolt, 110v-120v
+_NAO_MODELO = {"b20", "b8", "b10", "b12", "b15", "mg", "ns", "eq"}          # ligas/acabamentos comuns
+
+
 def _model_code(titulo):
-    """Maior token do título que mistura letra+dígito (ex.: 'Umc204hd', 'Cb-30bk', 'Zcc19')."""
+    """Maior token do título que parece CÓDIGO de modelo (letra+dígito), ignorando
+    voltagem (220v/bivolt) e ligas/acabamentos (b20, mg...) que davam match errado."""
     best = ""
     for t in re.findall(r"[0-9A-Za-zÀ-ÿ\-]+", titulo or ""):
-        if re.search(r"\d", t) and re.search(r"[A-Za-z]", t) and len(t) > len(best):
+        tl = t.lower()
+        if not (re.search(r"\d", t) and re.search(r"[A-Za-z]", t)):
+            continue
+        if _VOLT_RE.match(tl) or tl in _NAO_MODELO:
+            continue
+        if len(t) > len(best):
             best = t
     return best or None
 
@@ -75,7 +85,7 @@ def candidatos(reg, access):
         else:
             url = f"/products/search?status=active&site_id=MLB&q={quote(str(q))}"
         st, d = rec.get(url, access)
-        for p in ((d.get("results") if isinstance(d, dict) else None) or [])[:8]:
+        for p in ((d.get("results") if isinstance(d, dict) else None) or [])[:15]:
             pid = p.get("id")
             if not pid or pid in vistos:
                 continue
@@ -86,9 +96,9 @@ def candidatos(reg, access):
             out.append({"pid": pid, "nome": p.get("name"), "via": str(q)[:32],
                         "preco_min": (ps[0] if ps else None),
                         "preco_max": (ps[-1] if ps else None), "n_anuncios": len(ps)})
-            if len(out) >= 12:
+            if len(out) >= 20:
                 break
-        if len(out) >= 12:
+        if len(out) >= 20:
             break
     return out
 
