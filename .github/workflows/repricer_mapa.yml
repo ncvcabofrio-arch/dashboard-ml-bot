@@ -12,6 +12,17 @@ on:
         required: true
         default: "NAO"
         options: ["NAO", "SIM"]
+      excluir:
+        description: "Chaves a NÃO gravar no reparo (id nativo suspeito), separadas por vírgula"
+        type: string
+        required: false
+        default: ""
+      research:
+        description: "Rebuscar os avulsos com a busca melhorada e mostrar candidatos? (só leitura)"
+        type: choice
+        required: false
+        default: "NAO"
+        options: ["NAO", "SIM"]
 
 jobs:
   mapa:
@@ -31,4 +42,6 @@ jobs:
           SUPABASE_URL:     ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY:     ${{ secrets.SUPABASE_KEY }}
           CONFIRMA:         ${{ github.event.inputs.confirma || 'NAO' }}
+          EXCLUIR:          ${{ github.event.inputs.excluir }}
+          RESEARCH:         ${{ github.event.inputs.research || 'NAO' }}
         run: python repricer_mapa.py
