@@ -49,7 +49,7 @@ def _parece_kit(titulo):
 # dão falso-positivo (um 'Pedal' de bateria NÃO é flagado; um 'X + pedal' é).
 _BUNDLE_RE = re.compile(
     r"\+|\bkit\b|\bcombo\b|\bpacote\b|\bbrinde\b|bon[eé]|\be microfone\b"
-    r"|com (capa|suporte|pedal|bag|afinador|acess)", re.I)
+    r"|com (suporte|pedal|afinador|acess)", re.I)   # 'com capa/bag' NÃO é bundle (é padrão)
 
 
 def _parece_bundle(nome):
