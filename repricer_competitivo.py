@@ -1,233 +1,460 @@
 """
-AUTO-MATCHER — constrói o mapa (SKU -> produto de catálogo) sozinho.
-Heurística resolve os fáceis (regra do código do modelo + guardas); a IA do Claude
-julga os ambíguos. Escreve em repricer_match por SKU. Padrão = SIMULAÇÃO.
+FASE 1 — SONDA COMPETITIVA (somente leitura, NÃO escreve nada no ML nem no banco).
+Cruza cada anúncio de CATÁLOGO com a concorrência (price_to_win + concorrentes na PDP)
+e a sua margem, e imprime a DECISÃO que o robô tomaria — pra validarmos a régua antes
+de ligar no painel/aplicador.
 
-Fluxo por SKU novo:
-  1) coleta candidatos de catálogo (multi-query, sem bundle) — reusa o coletor.
-  2) HEURÍSTICA: mantém páginas cujo NOME contém o código do modelo, na faixa de
-     preço, mesma "mão" (canhoto/destro). Se sobra match limpo -> confiança ALTA (auto).
-  3) Caso contrário -> IA do Claude decide (produto/kit/sem_concorrente/revisar) c/ confiança.
-  4) grava upsert em repricer_match (só com CONFIRMA=SIM).
+Régua (definida com o vendedor):
+  - Perdendo por PREÇO: alvo = price_to_win, TRAVADO no piso da etiqueta (18% ou grupo).
+      * price_to_win >= preço-piso  -> DESCONTAR até o price_to_win (via PRICE_DISCOUNT/co-financiada).
+      * price_to_win <  preço-piso  -> NÃO PERSEGUIR (ganhar daria prejuízo). Alerta.
+  - Perdendo por motivo NÃO-preço (reputação, envio, Full, manufacturing): não desconta, reporta motivo.
+  - GANHANDO: se há folga até o 2º lugar, pode SUBIR o preço (reduzir desconto) até logo
+      abaixo do concorrente pra maximizar margem. Se já está no cheio, nada a fazer.
+  - Sem concorrente / não-catálogo: sem visão competitiva (fica pra política por etiqueta).
 
-Uso: SELLER_ID=<conta> [LIMITE=40] [CONFIRMA=SIM] [MODEL_IA=...] [SO_IA=SIM]
-Secrets: ANTHROPIC_API_KEY (a mesma chave do Claude que você já usa).
+Uso: SELLER_ID=<conta>  [MAX_ITENS=30]  [MARGEM_MIN=18]
+Só leitura: usa GET /items/{id}, /items/{id}/price_to_win, /products/{pid}/items.
 """
 import os
 import re
-import json
 import time
-import requests
 from concurrent.futures import ThreadPoolExecutor
 import repricer_sugestoes as rec
-import repricer_competitivo as comp
-import repricer_match as coll
 from ml_auth import obter_access
 
-SELLER_ID = (os.environ.get("SELLER_ID") or "").strip()
-LIMITE = int(os.environ.get("LIMITE", "40"))
-WORKERS = int(os.environ.get("WORKERS", "8"))
-CONFIRMA = (os.environ.get("CONFIRMA") or "").strip().upper() == "SIM"
-SO_IA = (os.environ.get("SO_IA") or "").strip().upper() == "SIM"   # manda TUDO pra IA (máx acerto)
-MODEL_IA = (os.environ.get("MODEL_IA") or "claude-haiku-4-5").strip()
-ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-FAIXA_MIN, FAIXA_MAX = 0.40, 3.0
+API = rec.API
+WORKERS = int(os.environ.get("WORKERS", "8"))   # itens processados em paralelo
+# TRAVA DE SEGURANÇA (gatilho): piso absoluto que nenhuma etiqueta pode furar.
+# Vazio = desligada (respeita as etiquetas como estão, mesmo negativas).
+_pmin_abs = (os.environ.get("PISO_MIN_ABS") or "").strip()
+PISO_MIN_ABS = float(_pmin_abs) if _pmin_abs else None
+DEBUG = (os.environ.get("DEBUG") or "") == "1"
+DEBUG_ITEM = (os.environ.get("DEBUG_ITEM") or "").strip()   # analisa só 1 item, verboso
+NORM_CUSTO = {}   # sku normalizado -> sku original na tabela produtos (só p/ DIAGNÓSTICO)
+MEUS_SELLERS = set()   # TODOS os seus seller_ids (as 3 contas) — nunca competir consigo mesmo
+MATCH = {}             # item_id -> {product_ids, confianca, tipo} (mapa confirmado com IA)
 
 
-def norm(s):
-    return re.sub(r"[^0-9a-z]", "", str(s or "").lower())
+def _norm(s):
+    return re.sub(r"\s+", "", str(s)).upper() if s else ""
 
 
-def _mao_esq(txt):
-    return bool(re.search(r"canhoto|left|\blh\b", (txt or "").lower()))
+def _parece_kit(titulo):
+    """Título com 'kit' ou 'set' => conjunto (não casa com página de produto avulso)."""
+    return bool(re.search(r"\bkit\b|\bset\b", (titulo or "").lower()))
 
 
-def heuristica(reg):
-    """Retorna decisão (dict) se o match for LIMPO; senão None (=manda pra IA)."""
-    tit = reg.get("titulo") or ""
-    p0 = float(reg.get("preco") or 0)
-    cands = [c for c in reg.get("candidatos", []) if c.get("n_anuncios")]
-    code = coll._model_code(tit)
-    if not p0:
-        return None
-    if not cands:
-        return {"product_ids": [], "confianca": "nenhum", "tipo": "sem_concorrente",
-                "motivo": "sem página de catálogo com anúncios"}
-    if not code:
-        return None  # modelo sem código (ex.: 'Mininova') -> IA
-    nc = norm(code)
-    esq = _mao_esq(tit)
-    lo, hi = FAIXA_MIN * p0, FAIXA_MAX * p0
-    kept = []
-    for c in cands:
-        nome = c.get("nome") or ""
-        mn = c.get("preco_min")
-        if nc not in norm(nome):
-            continue                      # código do modelo não bate -> outro produto
-        if mn is None or not (lo <= mn <= hi):
-            continue                      # fora da faixa -> variante/errado
-        if _mao_esq(nome) != esq:
-            continue                      # canhoto vs destro
-        kept.append(c["pid"])
-    if kept:
-        return {"product_ids": kept, "confianca": "alta", "tipo": "produto",
-                "motivo": f"código '{code}' bate em {len(kept)} página(s)"}
-    return None   # nada bateu limpo -> IA decide
+# bundle = item + extras (não é concorrente do item pelado). Sinais que raramente
+# dão falso-positivo (um 'Pedal' de bateria NÃO é flagado; um 'X + pedal' é).
+_BUNDLE_RE = re.compile(
+    r"\+|\bkit\b|\bcombo\b|\bpacote\b|\bbrinde\b|bon[eé]|\be microfone\b"
+    r"|com (suporte|pedal|afinador|acess)", re.I)   # 'com capa/bag' NÃO é bundle (é padrão)
 
 
-def ia_match(reg):
-    """Chama o Claude pra julgar o match. Retorna dict decisão."""
-    cands = [{"pid": c["pid"], "nome": c.get("nome"), "min": c.get("preco_min"),
-              "max": c.get("preco_max"), "n": c.get("n_anuncios")}
-             for c in reg.get("candidatos", []) if c.get("n_anuncios")]
-    prompt = (
-        "Você casa o PRODUTO de um vendedor com páginas de produto do catálogo do Mercado Livre.\n"
-        "Retorne SÓ um JSON: {\"product_ids\":[...],\"confianca\":\"alta|media|nenhum\","
-        "\"tipo\":\"produto|kit|sem_concorrente|revisar\",\"motivo\":\"...\"}.\n"
-        "Regras:\n"
-        "- INCLUA TODAS as páginas que forem o MESMO produto. Páginas DUPLICADAS (preços, número de "
-        "anúncios ou descrições diferentes) são NORMAIS e devem TODAS entrar em product_ids — a gente "
-        "agrega os concorrentes de todas. Diferença de PREÇO entre páginas do mesmo produto NÃO é "
-        "motivo pra excluir nem pra 'revisar'.\n"
-        "- EXCLUA só página de produto DIFERENTE: outro tamanho/polegada, outra cor, outro acabamento, "
-        "outra versão (ex.: V2), canhoto vs destro, ou modelo diferente. Também exclua bundle "
-        "(item+capa/suporte/pedal/boné), kit e acessório.\n"
-        "- Se o anúncio é um KIT/conjunto: tipo='kit', product_ids=[].\n"
-        "- Se NENHUMA página é o mesmo produto: tipo='sem_concorrente', product_ids=[].\n"
-        "- Use 'revisar' SÓ quando houver dúvida REAL de variante (ex.: não dá pra saber a cor/acabamento). "
-        "Nunca use 'revisar' por causa de preço.\n\n"
-        f"MEU PRODUTO: {json.dumps({k: reg.get(k) for k in ('titulo','marca','modelo','gtin','preco')}, ensure_ascii=False)}\n"
-        f"CANDIDATOS: {json.dumps(cands, ensure_ascii=False)}\n"
-    )
-    body = {"model": MODEL_IA, "max_tokens": 400,
-            "messages": [{"role": "user", "content": prompt}]}
-    h = {"x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01",
-         "content-type": "application/json"}
-    for tent in range(3):
-        try:
-            r = requests.post("https://api.anthropic.com/v1/messages", headers=h, json=body, timeout=40)
-            if r.status_code >= 500 or r.status_code == 429:
-                time.sleep(1.2 * (tent + 1)); continue
-            txt = "".join(b.get("text", "") for b in r.json().get("content", []))
-            m = re.search(r"\{.*\}", txt, re.S)
-            d = json.loads(m.group(0)) if m else {}
-            d["motivo"] = "IA: " + str(d.get("motivo", ""))[:120]
-            d.setdefault("product_ids", []); d.setdefault("confianca", "nenhum")
-            d.setdefault("tipo", "revisar")
-            return d
-        except Exception as e:
-            if tent == 2:
-                return {"product_ids": [], "confianca": "nenhum", "tipo": "revisar",
-                        "motivo": f"IA falhou: {e}"}
-            time.sleep(1.0)
+def _parece_bundle(nome):
+    return bool(_BUNDLE_RE.search(nome or ""))
 
 
-def decidir(reg):
-    if comp._parece_kit(reg.get("titulo")):
-        return {"product_ids": [], "confianca": "nenhum", "tipo": "kit", "motivo": "título é kit/conjunto"}
-    d = None if SO_IA else heuristica(reg)
-    via = "heurística"
-    if d is None:
-        if not ANTHROPIC_KEY:
-            return {"product_ids": [], "confianca": "nenhum", "tipo": "revisar",
-                    "motivo": "sem ANTHROPIC_API_KEY; ambíguo -> revisar", "_via": "sem-ia"}
-        d = ia_match(reg); via = "IA"
-    d["_via"] = via
-    return d
-
-
-def gravar(sku, d):
-    row = {"sku": sku, "product_ids": d.get("product_ids") or [],
-           "confianca": d.get("confianca"), "tipo": d.get("tipo"), "nota": d.get("motivo")}
-    rec.sb.table("repricer_match").upsert(row, on_conflict="sku").execute()
-
-
-def processar_conta(access, sid, mapeados):
-    """Mapeia até LIMITE SKUs NOVOS de uma conta. Atualiza 'mapeados' com os gravados."""
-    todos, _ = rec.todos_ativos(sid, access)
-    det = rec.detalhes_itens(todos, access)
-    vistos, ids = set(), []
-    for iid in todos:
-        b = det.get(iid) or {}
-        sku = b.get("seller_sku") or b.get("seller_custom_field")
-        key = sku or iid   # sem SKU -> usa item_id como chave
-        if key in vistos or key in mapeados:
-            continue
-        vistos.add(key); ids.append(iid)
-        if len(ids) >= LIMITE:
-            break
-
-    modo = "⚠️ ESCREVER" if CONFIRMA else "SIMULAÇÃO"
-    print(f">>> AUTO-MATCH | conta {sid} | {len(ids)} produtos novos | {modo} | "
-          f"IA={'todos' if SO_IA else 'só ambíguos'} ({MODEL_IA if ANTHROPIC_KEY else 'sem chave'}) <<<", flush=True)
-    if not ids:
-        return 0
-
-    with ThreadPoolExecutor(max_workers=WORKERS) as ex:
-        regs = [r for r in ex.map(lambda i: coll.coletar(i, access), ids) if r]
-
-    cont = {}
-    for reg in regs:
-        sku = reg.get("sku")
-        chave = sku or reg.get("item_id")   # sem SKU -> grava pelo item_id (chave única do anúncio)
-        d = decidir(reg)
-        cont[d["tipo"]] = cont.get(d["tipo"], 0) + 1
-        pids = ",".join(d.get("product_ids") or []) or "—"
-        tag = {"produto": "✅", "kit": "📦", "sem_concorrente": "∅", "revisar": "❓"}.get(d["tipo"], "·")
-        rot = f"SKU={sku}" if sku else f"ITEM={chave}"
-        print(f"{tag} {rot} [{d['tipo']}/{d['confianca']}] via {d.get('_via')} "
-              f"| {str(reg.get('titulo'))[:34]} -> {pids} | {d.get('motivo')}", flush=True)
-        if CONFIRMA and chave:
-            try:
-                gravar(chave, d)
-                mapeados.add(chave)   # não repetir na próxima conta/rodada
-            except Exception as e:
-                print(f"   (erro ao gravar {chave}: {e})", flush=True)
-    print("=== " + ", ".join(f"{k}: {v}" for k, v in cont.items()) + " ===\n", flush=True)
-    return len(ids)
-
-
-def main():
-    if not ANTHROPIC_KEY:
-        print("(aviso: sem ANTHROPIC_API_KEY — só a heurística resolve; ambíguos viram 'revisar')", flush=True)
-    rec.preload()
-
-    mapeados = set()
+def carregar_match():
+    """Carrega o mapa (chave->produto(s)) confirmado, paginando. A chave é o SKU
+    ou, quando o anúncio não tem SKU, o próprio item_id. Silencioso se não existir."""
     ini = 0
     while True:
         try:
-            lote = (rec.sb.table("repricer_match").select("sku")
+            lote = (rec.sb.table("repricer_match").select("*")
                     .range(ini, ini + 999).execute().data) or []
-        except Exception:
-            break
+        except Exception as e:
+            print(f"(aviso: sem tabela repricer_match ainda: {e})", flush=True)
+            return
         for r in lote:
             if r.get("sku"):
-                mapeados.add(r["sku"])
+                MATCH[r["sku"]] = r
         if len(lote) < 1000:
             break
         ini += 1000
-    print(f"(chaves já mapeadas: {len(mapeados)})", flush=True)
+SELLER_ID = (os.environ.get("SELLER_ID") or "").strip()
+MAX_ITENS = int(os.environ.get("MAX_ITENS", "30"))
+EPS = 0.01
 
-    # SELLER_ID definido = só ela; VAZIO (agendado) = TODAS as contas
-    alvos = []
+
+def _pct_cat(cat, ltid, access):
+    """% de comissão fixa da categoria (cacheada por (cat,ltid)). None se a API não trouxer."""
+    p = rec._percentual(cat, ltid, access)
+    return float(p) if p is not None else None
+
+
+def margem_no_preco(pb, cat, ltid, frete, custo, access):
+    """'Você recebe' = preço - comissão - frete (meli%=0). Comissão = % fixa da categoria.
+    Determinístico e sem chamada por preço (usa a % cacheada)."""
+    pct = _pct_cat(cat, ltid, access)
+    com = (pb * pct / 100.0) if pct is not None else (rec.comissao(round(pb, 2), cat, ltid, access) or 0)
+    recebe = pb - com - frete
+    margem = ((recebe - custo) / pb * 100) if pb else -999
+    return margem, round(com, 2), round(recebe, 2)
+
+
+def preco_piso(piso_pct, cat, ltid, frete, custo, access, teto):
+    """Menor preço que ainda rende a margem mínima — FÓRMULA FECHADA (sem busca binária):
+       margem = (1 - pct/100) - (frete+custo)/pb ; resolvendo margem = piso.
+    Retorna None se nem no preço cheio a margem alcança o piso (item já abaixo do piso)."""
+    pct = _pct_cat(cat, ltid, access)
+    if pct is None:
+        return None
+    denom = (1 - pct / 100.0) - piso_pct / 100.0
+    if denom <= 0:
+        return None
+    pb = (frete + custo) / denom
+    if pb > teto + 0.01:     # precisaria de preço acima do cheio -> já abaixo do piso
+        return None
+    return round(pb, 2)
+
+
+def price_to_win(item_id, access):
+    st, d = rec.get(f"/items/{item_id}/price_to_win?version=v2", access)
+    return d if isinstance(d, dict) else None
+
+
+def concorrentes(product_id, sid, access):
+    """Preços dos concorrentes na página de produto. Exclui TODAS as suas contas
+    (MEUS_SELLERS) — nunca conta você mesmo como concorrente. Retorna lista de floats."""
+    st, d = rec.get(f"/products/{product_id}/items?limit=50", access)
+    res = d.get("results") if isinstance(d, dict) else None
+    precos = []
+    for r in (res or []):
+        try:
+            s = str(r.get("seller_id"))
+            if s not in MEUS_SELLERS and s != str(sid) and r.get("price"):
+                precos.append(float(r["price"]))
+        except (TypeError, ValueError):
+            pass
+    return sorted(precos)
+
+
+def gtin_do_item(it):
+    """Extrai o primeiro EAN/GTIN do anúncio (atributos ou variações)."""
+    def _busca(attrs):
+        for a in (attrs or []):
+            if a.get("id") == "GTIN" and a.get("value_name"):
+                return str(a["value_name"]).split(",")[0].strip()
+        return None
+    g = _busca(it.get("attributes"))
+    if g:
+        return g
+    for v in (it.get("variations") or []):
+        g = _busca(v.get("attributes"))
+        if g:
+            return g
+    return None
+
+
+# palavras genéricas que não ajudam a busca (categoria, ligações, cores, qualificadores)
+_GENERICO = {
+    "de", "da", "do", "com", "sem", "para", "por", "e", "ou", "a", "o", "em", "no", "na",
+    "c/", "p/", "kit", "conjunto", "set",
+    "sintetizador", "teclado", "teclados", "teclas", "tecla", "piano", "controlador",
+    "violao", "violão", "guitarra", "contrabaixo", "baixo", "cavaco", "cavaquinho", "ukulele",
+    "microfone", "mic", "fone", "fones", "ouvido", "headset", "headphone", "auricular",
+    "interface", "placa", "audio", "áudio", "caixa", "som", "ativa", "passiva", "amplificador",
+    "cabecote", "cabeçote", "pedal", "pedaleira", "prato", "pratos", "bateria", "mesa", "mixer",
+    "estante", "suporte", "capa", "bag", "case", "cabo", "sistema", "fio", "arranjador",
+    "profissional", "digital", "eletronico", "eletrônico", "eletroacustico", "eletroacústico",
+    "acustico", "acústico", "eletrico", "elétrico", "portatil", "portátil", "compacto", "compacta",
+    "novo", "nova", "original", "premium", "dinamico", "dinâmico", "condensador", "duplo", "mao", "mão",
+    "preto", "preta", "branco", "branca", "azul", "vermelho", "vermelha", "rosa", "cinza", "prata",
+    "polegadas", "pol", "w", "watts",
+}
+
+
+def consulta_do_item(it):
+    """Busca curta (marca+modelo) extraída do TÍTULO: tira genéricos e números soltos,
+    mantém as ~5 palavras que importam. Ex.: 'Teclado Casio Ct-x800 61 Teclas' -> 'Casio Ct-x800'."""
+    titulo = it.get("title") or ""
+    sig = []
+    for t in re.findall(r"[0-9A-Za-zÀ-ÿ/\-]+", titulo):
+        tl = t.lower().strip("/-")
+        if not tl or len(tl) <= 1 or tl in _GENERICO or tl.isdigit():
+            continue
+        sig.append(t)
+        if len(sig) >= 5:
+            break
+    return " ".join(sig) if sig else (titulo[:40] or None)
+
+
+FAIXA_MIN, FAIXA_MAX = 0.40, 3.0   # concorrente crível: entre 40% e 300% do seu preço
+
+
+def _busca_catalogo(q, sid, access, tipo, p0, nome_chave=None):
+    """Acha produto(s) de catálogo (por EAN ou por texto) e lista os concorrentes deles.
+    Substitui /sites/search (bloqueado, 403). Filtra por nome do produto (modelo) e por
+    faixa de preço sã, pra não pegar produto/acessório errado. Exclui você."""
+    from urllib.parse import quote
+    if tipo == "ean":
+        url = f"/products/search?status=active&site_id=MLB&product_identifier={q}"
+    else:
+        url = f"/products/search?status=active&site_id=MLB&q={quote(str(q))}"
+    st, d = rec.get(url, access)
+    prods = (d.get("results") if isinstance(d, dict) else None) or []
+    lo, hi = FAIXA_MIN * p0, FAIXA_MAX * p0
+    precos, usado, pulados = [], None, 0
+    for prod in prods[:6]:
+        nome = str(prod.get("name") or "")
+        if nome_chave and nome_chave.lower() not in nome.lower():
+            pulados += 1
+            continue   # produto não bate com o modelo -> ignora
+        if _parece_bundle(nome):
+            pulados += 1
+            continue   # bundle (item+extras) -> não é concorrente do item pelado
+        if not prod.get("id"):
+            continue
+        c = [x for x in concorrentes(prod["id"], sid, access) if lo <= x <= hi]
+        if c:                      # usa só o produto MAIS RELEVANTE que casou (não mistura)
+            precos = c
+            usado = (prod["id"], nome)
+            break
+    if DEBUG:
+        alvo = f"{usado[0]} '{usado[1][:45]}'" if usado else "nenhum"
+        print(f"    [products/search {tipo}='{str(q)[:40]}'] HTTP {st} | produtos={len(prods)} "
+              f"| fora-do-modelo: {pulados} | usado: {alvo} | faixa R${lo:.0f}-{hi:.0f} "
+              f"| conc={len(precos)} menor R${min(precos):.2f}" if precos else
+              f"    [products/search {tipo}='{str(q)[:40]}'] HTTP {st} | produtos={len(prods)} "
+              f"| fora-do-modelo: {pulados} | usado: nenhum | conc=0", flush=True)
+    return sorted(precos)
+
+
+def concorrencia_mercado(ean, consulta, titulo, sid, access, p0):
+    """Concorrentes via CATÁLOGO (a busca de listagens /sites/search é bloqueada pelo ML):
+       1) EAN -> produto de catálogo -> concorrentes
+       2) marca+modelo (texto) -> produto cujo NOME contém o modelo -> concorrentes
+       Retorna (precos_ordenados, origem). Exclui você."""
+    if ean:
+        precos = _busca_catalogo(ean, sid, access, "ean", p0)
+        if precos:
+            return precos, f"EAN {ean}"
+    if consulta:
+        chave = consulta.split()[0] if consulta else None   # 1º token = modelo (ex.: 'Mininova')
+        precos = _busca_catalogo(consulta, sid, access, "q", p0, nome_chave=chave)
+        if precos:
+            return precos, f"busca '{consulta}'"
+    return [], None
+
+
+def analisar(item_id, access, sid):
+    st, it = rec.get(f"/items/{item_id}?include_attributes=all", access)
+    if not isinstance(it, dict):
+        return None
+    raw_aq = it.get("available_quantity")
+    try:
+        aq = int(raw_aq)
+    except (TypeError, ValueError):
+        aq = None
+    if aq is not None and aq <= 0:
+        return {"item_id": item_id, "titulo": it.get("title"), "aq": raw_aq, "acao": "sem_estoque",
+                "detalhe": "estoque zero"}
+    p0 = float(it.get("price") or 0)
+    cat, ltid = it.get("category_id"), it.get("listing_type_id")
+    sku = it.get("seller_sku") or it.get("seller_custom_field")
+    pid = it.get("catalog_product_id")
+    catalog_listing = bool(it.get("catalog_listing"))   # SÓ True = compete de fato no catálogo
+    custo = rec.custo_de(sku)
+    if custo is None or not p0:
+        nk = _norm(sku)
+        if nk and nk in NORM_CUSTO:
+            extra = f" [ESTÁ na tabela como '{NORM_CUSTO[nk]}' — só diferença de formato!]"
+        else:
+            extra = " [não está na tabela produtos]"
+        return {"item_id": item_id, "titulo": it.get("title"), "sku": sku, "aq": raw_aq,
+                "acao": "sem_custo", "detalhe": f"sem custo (SKU={sku or '—'}){extra}"}
+    frete, _ = rec.frete_de(sku, item_id, access)
+    piso, grupo = rec.margem_minima_do(sku)
+    piso_orig = piso
+    if PISO_MIN_ABS is not None:                 # trava de segurança ligada
+        piso = max(piso, PISO_MIN_ABS)
+    pmin = preco_piso(piso, cat, ltid, frete, custo, access, p0)
+    m_cheio, _, _ = margem_no_preco(p0, cat, ltid, frete, custo, access)
+
+    base = {"item_id": item_id, "titulo": it.get("title"), "sku": sku, "aq": raw_aq,
+            "grupo": grupo, "piso": piso, "piso_orig": piso_orig, "preco_cheio": round(p0, 2),
+            "margem_cheio": round(m_cheio, 1), "preco_piso": pmin, "catalog": catalog_listing}
+
+    if not catalog_listing:
+        m = MATCH.get(sku) or MATCH.get(item_id)   # sem SKU -> busca pelo item_id
+        if m:
+            # ITEM MAPEADO (match confirmado) -> exato, agrega páginas duplicadas
+            if (m.get("confianca") == "nenhum") or (m.get("tipo") in ("kit", "sem_concorrente")):
+                base.update({"acao": "sem_match",
+                             "detalhe": f"mapeado ({m.get('tipo')}) — não precifica por catálogo"})
+                return base
+            pids = m.get("product_ids") or []
+            lo, hi = FAIXA_MIN * p0, FAIXA_MAX * p0
+            precos = sorted([x for pid in pids for x in concorrentes(pid, sid, access) if lo <= x <= hi])
+            origem = f"mapa ({len(pids)}p)"
+        else:
+            # NÃO mapeado -> trava anti-kit + busca fuzzy (estimativa)
+            if _parece_kit(it.get("title")):
+                base.update({"acao": "sem_match",
+                             "detalhe": "parece kit/conjunto — não precifica por catálogo (não mapeado)"})
+                return base
+            ean = gtin_do_item(it)
+            consulta = consulta_do_item(it)
+            precos, origem = concorrencia_mercado(ean, consulta, it.get("title"), sid, access, p0)
+            if origem:
+                origem += " (estimativa)"
+        ctx = "elegível ao catálogo, sem opt-in" if pid else "fora do catálogo"
+        if not precos:
+            base.update({"acao": "sem_match",
+                         "detalhe": f"{ctx}; sem concorrente encontrado"})
+            return base
+        menor = precos[0]
+        base.update({"origem": origem, "n_conc": len(precos), "conc_min": round(menor, 2)})
+        if menor > p0 + EPS:
+            base.update({"acao": "ja_competitivo",
+                         "detalhe": f"[{origem}] já é o mais barato: seu R${p0:.2f} < menor conc. "
+                                    f"R${menor:.2f} ({len(precos)} conc)"})
+        elif pmin is None:
+            base.update({"acao": "nao_perseguir_ean",
+                         "detalhe": f"[{origem}] já abaixo do piso no preço cheio -> não dá pra descontar"})
+        elif (menor - EPS) >= pmin:
+            alvo = round(menor - EPS, 2)
+            m_alvo, _, _ = margem_no_preco(alvo, cat, ltid, frete, custo, access)
+            desc = (1 - alvo / p0) * 100
+            base.update({"acao": "descontar_ean", "alvo": alvo, "margem_alvo": round(m_alvo, 1),
+                         "detalhe": f"[{origem}] {len(precos)} conc, menor R${menor:.2f} -> "
+                                    f"descontar p/ R${alvo:.2f} ({desc:.1f}% off, margem {m_alvo:.1f}%) "
+                                    f"[piso={piso}% pmin=R${pmin}]"})
+        else:
+            # mercado abaixo do piso: desconta até o PISO (mantém 18%, o mais competitivo possível)
+            alvo = round(pmin, 2)
+            m_alvo, _, _ = margem_no_preco(alvo, cat, ltid, frete, custo, access)
+            desc = (1 - alvo / p0) * 100
+            base.update({"acao": "descontar_piso", "alvo": alvo, "margem_alvo": round(m_alvo, 1),
+                         "detalhe": f"[{origem}] menor conc R${menor:.2f} < piso -> descontar até o PISO "
+                                    f"R${alvo:.2f} ({desc:.1f}% off, margem {m_alvo:.1f}%; não bate o concorrente)"})
+        return base
+
+    ptw = price_to_win(item_id, access)
+    if not ptw:
+        base.update({"acao": "sem_dado", "detalhe": "price_to_win indisponível"})
+        return base
+    status = ptw.get("status")
+    alvo = ptw.get("price_to_win")
+    winner = (ptw.get("winner") or {})
+    reason = ptw.get("reason") or []
+    base.update({"status": status, "price_to_win": alvo,
+                 "winner_price": winner.get("price"), "reason": ", ".join(reason)})
+
+    if status == "winning":
+        precos = concorrentes(pid, sid, access)
+        segundo = precos[0] if precos else None
+        base["segundo"] = segundo
+        if segundo and segundo - EPS > p0 + EPS:
+            m_seg, _, _ = margem_no_preco(segundo - EPS, cat, ltid, frete, custo, access)
+            base.update({"acao": "subir_margem",
+                         "detalhe": f"ganhando; 2º lugar R${segundo:.2f} > seu R${p0:.2f} "
+                                    f"-> pode subir até ~R${segundo - EPS:.2f} (margem {m_seg:.1f}%)"})
+        else:
+            base.update({"acao": "manter_ganhando", "detalhe": "ganhando, sem folga p/ subir"})
+        return base
+
+    # perdendo (competing / listed / sharing_first_place)
+    reason_preco = (alvo is not None)
+    if not reason_preco:
+        base.update({"acao": "perde_nao_preco", "detalhe": f"perde por: {base['reason'] or 'motivo não-preço'}"})
+        return base
+    alvo = float(alvo)
+    if pmin is None:
+        base.update({"acao": "nao_perseguir",
+                     "detalhe": f"price_to_win R${alvo:.2f}; já abaixo do piso no cheio -> não dá pra descontar"})
+    elif alvo >= pmin:
+        m_alvo, _, _ = margem_no_preco(alvo, cat, ltid, frete, custo, access)
+        desc = (1 - alvo / p0) * 100
+        base.update({"acao": "descontar", "alvo": round(alvo, 2), "margem_alvo": round(m_alvo, 1),
+                     "detalhe": f"descontar até R${alvo:.2f} ({desc:.1f}% off) -> margem {m_alvo:.1f}%"})
+    else:
+        alvo2 = round(pmin, 2)
+        m_alvo, _, _ = margem_no_preco(alvo2, cat, ltid, frete, custo, access)
+        desc = (1 - alvo2 / p0) * 100
+        base.update({"acao": "descontar_piso", "alvo": alvo2, "margem_alvo": round(m_alvo, 1),
+                     "detalhe": f"price_to_win R${alvo:.2f} < piso -> descontar até o PISO R${alvo2:.2f} "
+                                f"({desc:.1f}% off, margem {m_alvo:.1f}%)"})
+    return base
+
+
+def main():
+    if not SELLER_ID:
+        print("Defina SELLER_ID (ex 177795203).", flush=True); return
+    print(">>> SONDA v7 (mapa por SKU + anti-bundle) <<<", flush=True)
+    rec.preload()
+    carregar_match()
+    print(f"mapa de match carregado: {len(MATCH)} itens", flush=True)
+    # autentica TODAS as contas: guarda os seller_ids (p/ não competir consigo) e pega o access da escolhida
+    access = sid = None
     for seller_id, refresh in rec.contas():
         a, s, refresh = obter_access(rec.sb, seller_id, refresh)
-        if not s:
-            continue
-        if SELLER_ID and str(s) != str(SELLER_ID):
-            continue
-        alvos.append((a, s))
-    if not alvos:
-        print(f"nenhuma conta pra processar (SELLER_ID={SELLER_ID or 'todas'}).", flush=True); return
+        if s:
+            MEUS_SELLERS.add(str(s))
+        if str(s) == str(SELLER_ID):
+            access, sid = a, s
+    if not access:
+        print(f"não autentiquei a conta {SELLER_ID}.", flush=True); return
+    print(f"suas contas (não contam como concorrente): {', '.join(sorted(MEUS_SELLERS))}", flush=True)
 
-    total = 0
-    for access, sid in alvos:
-        total += processar_conta(access, sid, mapeados)
+    for k in rec.CUSTOS:
+        NORM_CUSTO[_norm(k)] = k
+    amostra = ", ".join(list(rec.CUSTOS.keys())[:15])
+    print(f"amostra de SKUs na tabela 'produtos': {amostra}\n", flush=True)
 
-    if not CONFIRMA:
-        print("SIMULAÇÃO: nada gravado. Rode com CONFIRMA=SIM pra escrever o mapa.", flush=True)
-    elif total == 0:
-        print("Nenhum SKU novo — mapa em dia. ✅", flush=True)
+    if DEBUG_ITEM:
+        ids, total = [DEBUG_ITEM], "?"
+    else:
+        ids, total = rec.todos_ativos(sid, access)
+        ids = ids[:MAX_ITENS]
+    print(f"===== SONDA COMPETITIVA | conta {sid} | amostra {len(ids)} de {total} (só leitura, pula estoque 0) =====\n", flush=True)
+
+    # processa os itens EM PARALELO (só leitura); mantém a ordem original
+    if DEBUG_ITEM:
+        resultados = [analisar(i, access, sid) for i in ids]
+    else:
+        with ThreadPoolExecutor(max_workers=WORKERS) as ex:
+            resultados = list(ex.map(lambda i: analisar(i, access, sid), ids))
+
+    TAGS = {"descontar": "🎯", "descontar_ean": "🎯", "descontar_piso": "🔻",
+            "nao_perseguir": "🛑", "nao_perseguir_ean": "🛑", "subir_margem": "⬆️",
+            "manter_ganhando": "🏆", "ja_competitivo": "✅", "perde_nao_preco": "⚠️",
+            "sem_concorrencia": "·", "sem_match": "🔍", "sem_dado": "?", "sem_custo": "∅"}
+    cont = {}
+    linhas = []
+    for r in resultados:
+        if not r:
+            continue
+        cont[r["acao"]] = cont.get(r["acao"], 0) + 1
+        linhas.append(r)
+        if r["acao"] == "sem_estoque":
+            continue   # não polui a saída; conta no resumo
+        print(f"{TAGS.get(r['acao'], '·')} [{r['acao']}] {r['item_id']} est={r.get('aq')} "
+              f"{str(r.get('titulo'))[:30]} | cheio R${r.get('preco_cheio')} "
+              f"(margem {r.get('margem_cheio')}%) | {r.get('detalhe')}", flush=True)
+
+    print("\n=== RESUMO: " + ", ".join(f"{k}: {v}" for k, v in cont.items()) + " ===", flush=True)
+    cat = sum(1 for l in linhas if l.get("catalog"))
+    print(f"competindo no catálogo (opt-in feito): {cat}/{len(linhas)} — só esses têm price_to_win.", flush=True)
+
+    faltando = [l for l in linhas if l["acao"] == "sem_custo"]
+    if faltando:
+        print(f"\n--- {len(faltando)} SEM CUSTO (preencher na tabela 'produtos') ---", flush=True)
+        for l in faltando:
+            print(f"   {l['item_id']} | SKU={l.get('sku') or '—'} | {str(l.get('titulo'))[:45]}", flush=True)
+
+    baixos = [l for l in linhas if (l.get("piso_orig") is not None and l["piso_orig"] < 0)]
+    if PISO_MIN_ABS is not None:
+        print(f"\n🔒 trava de segurança LIGADA: piso nunca abaixo de {PISO_MIN_ABS:.0f}%.", flush=True)
+    elif baixos:
+        grupos = sorted({f"{l.get('grupo')} ({l['piso_orig']:.0f}%)" for l in baixos})
+        print(f"\n⚠️ LEMBRETE: trava de segurança DESLIGADA e {len(baixos)} item(ns) com piso NEGATIVO "
+              f"— grupo(s): {', '.join(grupos)}. Esses podem descontar até dar prejuízo.\n"
+              f"   Pra proteger: rode com piso_minimo (ex. 18) OU corrija o grupo em 'repricer_grupos'.", flush=True)
+
+    print("\nNada foi escrito. É só a leitura da régua competitiva.", flush=True)
 
 
 if __name__ == "__main__":
