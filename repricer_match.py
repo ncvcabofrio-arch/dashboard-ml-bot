@@ -147,8 +147,14 @@ def main():
         regs = list(ex.map(lambda i: coletar(i, access), ids))
     print("=====BEGIN_MATCH_JSONL=====", flush=True)
     for reg in regs:
-        if reg:
-            print(json.dumps(reg, ensure_ascii=False), flush=True)
+        if not reg:
+            continue
+        # COMPACTO: só candidatos COM anúncios (os que valem pra preço), nomes curtos.
+        cand = [[c["pid"], (c.get("nome") or "")[:48], c.get("preco_min"), c.get("preco_max"), c.get("n_anuncios")]
+                for c in reg.get("candidatos", []) if c.get("n_anuncios")]
+        slim = {"i": reg["item_id"], "t": (reg.get("titulo") or "")[:48],
+                "p": reg.get("preco"), "kit": comp._parece_kit(reg.get("titulo")), "c": cand}
+        print(json.dumps(slim, ensure_ascii=False), flush=True)
     print("=====END_MATCH_JSONL=====", flush=True)
 
 
