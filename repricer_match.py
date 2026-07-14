@@ -106,6 +106,7 @@ def coletar(item_id, access):
     consulta = comp.consulta_do_item(it)
     reg = {
         "item_id": item_id,
+        "sku": it.get("seller_sku") or it.get("seller_custom_field"),
         "titulo": it.get("title"),
         "marca": a.get("BRAND"),
         "modelo": a.get("MODEL") or a.get("ALPHANUMERIC_MODEL") or a.get("LINE"),
@@ -141,8 +142,28 @@ def main():
         if not ids:
             print("Sem itens 'sem_match' no banco; use MODO=amostra.", flush=True); return
     else:
-        ids, _ = comp.rec.todos_ativos(sid, access)
-        ids = ids[:LIMITE]
+        # SKUs já mapeados (pra pular e trazer só produtos NOVOS a cada lote)
+        mapeados = set()
+        try:
+            for r in (rec.sb.table("repricer_match").select("sku").execute().data or []):
+                if r.get("sku"):
+                    mapeados.add(r["sku"])
+        except Exception:
+            pass
+        todos, _ = rec.todos_ativos(sid, access)
+        det = rec.detalhes_itens(todos, access)   # multiget: pega seller_sku barato
+        vistos, ids = set(), []
+        for iid in todos:
+            b = det.get(iid) or {}
+            sku = b.get("seller_sku") or b.get("seller_custom_field")
+            key = sku or iid
+            if key in vistos or (sku and sku in mapeados):
+                continue                # dedup por SKU + pula os já confirmados
+            vistos.add(key)
+            ids.append(iid)
+            if len(ids) >= LIMITE:
+                break
+        print(f"(SKUs já mapeados: {len(mapeados)}; coletando {len(ids)} produtos novos)", flush=True)
 
     print(f">>> COLETOR DE MATCH | conta {sid} | {len(ids)} itens | (cole tudo abaixo pro Claude) <<<", flush=True)
     with ThreadPoolExecutor(max_workers=WORKERS) as ex:
@@ -154,7 +175,7 @@ def main():
         # COMPACTO: só candidatos COM anúncios (os que valem pra preço), nomes curtos.
         cand = [[c["pid"], (c.get("nome") or "")[:48], c.get("preco_min"), c.get("preco_max"), c.get("n_anuncios")]
                 for c in reg.get("candidatos", []) if c.get("n_anuncios")]
-        slim = {"i": reg["item_id"], "t": (reg.get("titulo") or "")[:48],
+        slim = {"i": reg["item_id"], "s": reg.get("sku"), "t": (reg.get("titulo") or "")[:48],
                 "p": reg.get("preco"), "kit": comp._parece_kit(reg.get("titulo")), "c": cand}
         print(json.dumps(slim, ensure_ascii=False), flush=True)
     print("=====END_MATCH_JSONL=====", flush=True)
