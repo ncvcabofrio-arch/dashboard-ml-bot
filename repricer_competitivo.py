@@ -45,6 +45,17 @@ def _parece_kit(titulo):
     return bool(re.search(r"\bkit\b|\bset\b", (titulo or "").lower()))
 
 
+# bundle = item + extras (não é concorrente do item pelado). Sinais que raramente
+# dão falso-positivo (um 'Pedal' de bateria NÃO é flagado; um 'X + pedal' é).
+_BUNDLE_RE = re.compile(
+    r"\+|\bkit\b|\bcombo\b|\bpacote\b|\bbrinde\b|bon[eé]|\be microfone\b"
+    r"|com (capa|suporte|pedal|bag|afinador|acess)", re.I)
+
+
+def _parece_bundle(nome):
+    return bool(_BUNDLE_RE.search(nome or ""))
+
+
 def carregar_match():
     """Carrega o mapa item->produto(s) confirmado. Silencioso se a tabela não existir."""
     try:
@@ -181,6 +192,9 @@ def _busca_catalogo(q, sid, access, tipo, p0, nome_chave=None):
         if nome_chave and nome_chave.lower() not in nome.lower():
             pulados += 1
             continue   # produto não bate com o modelo -> ignora
+        if _parece_bundle(nome):
+            pulados += 1
+            continue   # bundle (item+extras) -> não é concorrente do item pelado
         if not prod.get("id"):
             continue
         c = [x for x in concorrentes(prod["id"], sid, access) if lo <= x <= hi]
