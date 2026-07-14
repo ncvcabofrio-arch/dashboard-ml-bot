@@ -1,7 +1,7 @@
-name: Repricer - Coletor de Match (mapeamento)
+name: Repricer - Auto-Match (heurística + IA)
 
-# Junta, por anúncio, os candidatos de produto de catálogo (API sancionada) e
-# imprime em JSONL pra a IA julgar o match certo. NÃO escreve nada.
+# Constrói o mapa SKU->produto sozinho: heurística nos fáceis, IA do Claude nos ambíguos.
+# Padrao = SIMULACAO. So escreve com confirma=SIM.
 on:
   workflow_dispatch:
     inputs:
@@ -11,23 +11,34 @@ on:
         required: true
         default: ""
       limite:
-        description: "Quantos anúncios coletar"
+        description: "Quantos produtos NOVOS por rodada"
         type: string
         required: false
-        default: "15"
-      modo:
-        description: "amostra (primeiros N ativos) ou sem_match (os difíceis)"
+        default: "40"
+      confirma:
+        description: "Gravar o mapa? (NAO = simulacao)"
         type: choice
         required: true
-        default: "amostra"
-        options: ["amostra", "sem_match"]
+        default: "NAO"
+        options: ["NAO", "SIM"]
+      so_ia:
+        description: "Mandar TUDO pra IA (máx acerto, mais custo)?"
+        type: choice
+        required: true
+        default: "NAO"
+        options: ["NAO", "SIM"]
+      model_ia:
+        description: "Modelo do Claude (o mesmo dos seus bots)."
+        type: string
+        required: false
+        default: "claude-haiku-4-5"
 
 concurrency:
   group: ml-puxador
   cancel-in-progress: false
 
 jobs:
-  match:
+  automatch:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -36,14 +47,18 @@ jobs:
           python-version: '3.11'
       - name: Instalar dependencias
         run: pip install requests supabase
-      - name: Coletar candidatos (so leitura)
+      - name: Auto-match (heuristica + IA)
         env:
           ML_CLIENT_ID:     ${{ secrets.ML_CLIENT_ID }}
           ML_CLIENT_SECRET: ${{ secrets.ML_CLIENT_SECRET }}
           ML_REFRESH_TOKEN: ${{ secrets.ML_REFRESH_TOKEN }}
           SUPABASE_URL:     ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY:     ${{ secrets.SUPABASE_KEY }}
+          # >>> se sua chave do Claude tem OUTRO nome no secrets, troque o lado direito abaixo <<<
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           SELLER_ID: ${{ github.event.inputs.seller_id }}
           LIMITE:    ${{ github.event.inputs.limite }}
-          MODO:      ${{ github.event.inputs.modo }}
-        run: python repricer_match.py
+          CONFIRMA:  ${{ github.event.inputs.confirma }}
+          SO_IA:     ${{ github.event.inputs.so_ia }}
+          MODEL_IA:  ${{ github.event.inputs.model_ia }}
+        run: python repricer_automatch.py
