@@ -24,6 +24,11 @@ on:
         type: string
         required: false
         default: "3"
+      max_drop_pct:
+        description: "Anti-salto: maior % de desconto permitido (ex 90 = quase desligado, pra VER tudo)"
+        type: string
+        required: false
+        default: "20"
       seller_id:
         description: "Conta (padrão MG). Não mude sem querer."
         type: string
@@ -59,7 +64,7 @@ jobs:
           CONFIRMA:        ${{ github.event.inputs.confirma || 'NAO' }}
           ATIVO:           ${{ github.event.inputs.ativo || 'SIM' }}
           MAX_ALTERACOES:  ${{ github.event.inputs.max_alteracoes || '3' }}
-          MAX_DROP_PCT:    '20'
+          MAX_DROP_PCT:    ${{ github.event.inputs.max_drop_pct || '20' }}
           UNDERCUT:        '5'
           DIAS:            '14'
         run: python repricer_piloto.py
