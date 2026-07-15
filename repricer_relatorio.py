@@ -118,11 +118,12 @@ def margem_diaria(sid, dias):
 
 
 WRITE_ACOES = {"descontar", "descontar_ean", "descontar_piso", "entrar_campanha", "remover_desconto"}
+INFO_ACOES = {"manter_desconto"}   # não é escrita; é a trava anti-gangorra segurando
 
 
 def mudancas_da_passada(sid, janela_min):
-    """Toda TENTATIVA de escrita nos últimos `janela_min` min — sucesso E falha.
-    Retorna (linhas, n_ok, n_erro). Assim dá pra ver se o proposto foi mesmo feito."""
+    """Escritas dos últimos `janela_min` min (sucesso E falha) + quantos foram mantidos.
+    Retorna (linhas, n_ok, n_erro, n_mantido)."""
     corte = (datetime.now(timezone.utc) - timedelta(minutes=janela_min)).isoformat()
     try:
         # SÓ modo=live: simulação (http vazio, aplicado=false) NÃO é falha e não pode entrar aqui.
@@ -131,10 +132,14 @@ def mudancas_da_passada(sid, janela_min):
                 .order("ts", desc=False).execute().data) or []
     except Exception as e:
         print(f"(aviso: não li repricer_log: {e})", flush=True)
-        return [], 0, 0
-    linhas, n_ok, n_erro = [], 0, 0
+        return [], 0, 0, 0
+    linhas, n_ok, n_erro, n_mantido = [], 0, 0, 0
     for r in rows:
-        if r.get("acao") not in WRITE_ACOES:      # pula insight/pulado/fila (não tentou escrever)
+        acao = r.get("acao")
+        if acao in INFO_ACOES:
+            n_mantido += 1
+            continue
+        if acao not in WRITE_ACOES:               # pula insight/pulado/fila (não tentou escrever)
             continue
         ok = bool(r.get("aplicado"))
         n_ok += int(ok)
@@ -142,33 +147,84 @@ def mudancas_da_passada(sid, janela_min):
         linhas.append([str(r.get("ts"))[:19], r.get("item_id"), (r.get("titulo") or "")[:40],
                        r.get("acao"), r.get("deal_price"), r.get("margem_alvo"),
                        r.get("motivo"), r.get("http_status"), "ok" if ok else "ERRO"])
-    return linhas, n_ok, n_erro
+    return linhas, n_ok, n_erro, n_mantido
 
 
-def nota_curta(hora, linhas, n_ok, n_erro, m_hoje):
-    """A mensagenzinha comentada de cada passada (o Apps Script manda por email)."""
-    if linhas:
-        det = "; ".join(
-            f"{(x[2] or x[1] or '')[:22]} {x[3]}" + (" ❌" if x[8] == "ERRO" else "")
-            for x in linhas[:6])
-        if len(linhas) > 6:
-            det += f" (+{len(linhas) - 6})"
-        txt = f"🤖 {hora} {NOME_CONTA}: aplicou {n_ok} mudança(s)"
-        if n_erro:
-            txt += f" — ⚠️ {n_erro} FALHOU/FALHARAM"
-        txt += f" — {det}."
-    else:
-        txt = f"🤖 {hora} {NOME_CONTA}: sem mudanças nesta passada."
+def _rs(v):
+    """Formata dinheiro no jeito BR: 1234.5 -> R$1.234,50."""
+    try:
+        return "R$" + f"{float(v):,.2f}".replace(",", "§").replace(".", ",").replace("§", ".")
+    except (TypeError, ValueError):
+        return ("R$" + str(v)) if v not in (None, "") else "—"
+
+
+def _pct(v):
+    """18.0 -> '18%', 16.1 -> '16,1%' (jeito BR, sem casa decimal à toa)."""
+    try:
+        f = float(v)
+        s = str(int(f)) if f == int(f) else f"{f:.1f}".replace(".", ",")
+        return s + "%"
+    except (TypeError, ValueError):
+        return str(v) + "%"
+
+
+_LABEL = {"descontar": "criou desconto", "descontar_ean": "criou desconto",
+          "descontar_piso": "criou desconto (piso)", "entrar_campanha": "trocou p/ campanha do ML",
+          "remover_desconto": "removeu desconto"}
+_PORQUE = {"descontar": "estava perdendo e parado", "descontar_ean": "estava perdendo e parado",
+           "descontar_piso": "perdendo; desceu até o piso",
+           "entrar_campanha": "campanha paga mais margem e segue competitiva",
+           "remover_desconto": "voltou a ganhar sem precisar do desconto"}
+
+
+def montar_email(hora, linhas, n_ok, n_erro, n_mantido, m_hoje):
+    """Email legível: margem no topo, item por item com margem-alvo e o porquê."""
+    L = [f"Repricer — {NOME_CONTA} — {hora}", ""]
     if m_hoje and m_hoje[6] is not None:
+        seta = ""
+        try:
+            if BASE_MARGEM:
+                seta = " ▲" if float(str(m_hoje[6])) >= float(BASE_MARGEM.replace(",", ".")) else " ▼"
+        except (TypeError, ValueError):
+            seta = ""
         base = f" (base {BASE_MARGEM}%)" if BASE_MARGEM else ""
-        txt += f" Margem do dia {m_hoje[6]}%{base}, {m_hoje[1]} pedido(s), receita R${m_hoje[3]:.0f}."
-    return txt
+        L.append(f"Margem do dia: {_pct(m_hoje[6])}{seta}{base}")
+        L.append(f"{m_hoje[1]} pedido(s) · receita {_rs(m_hoje[3])}")
+    else:
+        L.append("Margem do dia: ainda sem venda aprovada hoje.")
+    L.append("")
+
+    feitas = [x for x in linhas if x[8] == "ok"]
+    falhas = [x for x in linhas if x[8] != "ok"]
+    if feitas:
+        L.append(f"✅ Aplicadas nesta passada: {len(feitas)}")
+        for x in feitas:
+            marg = f" · margem-alvo {_pct(x[5])}" if x[5] not in (None, "") else ""
+            porque = _PORQUE.get(x[3], "")
+            porque = f"  ({porque})" if porque else ""
+            L.append(f"• {(x[2] or x[1])}: {_LABEL.get(x[3], x[3])} → {_rs(x[4])}{marg}{porque}")
+    else:
+        L.append("✅ Aplicadas nesta passada: nenhuma.")
+
+    if n_mantido:
+        L.append("")
+        L.append(f"🔒 Descontos mantidos (anti-gangorra): {n_mantido}")
+        L.append("   (ganham só por causa do desconto; remover faria o preço subir e perder a ponta)")
+
+    if falhas:
+        L.append("")
+        L.append(f"⚠️ Falhas: {len(falhas)}")
+        for x in falhas:
+            L.append(f"• {(x[2] or x[1])}: {_LABEL.get(x[3], x[3])} — HTTP {x[7]} "
+                     f"(retenta na próxima; se insistir, é preço/faixa inválida ou token)")
+
+    return "\n".join(L)
 
 
 def main():
     agora = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M")
     hora = datetime.now(timezone.utc).astimezone().strftime("%Hh")
-    linhas, n_ok, n_erro = mudancas_da_passada(SELLER_ID, JANELA_MIN)
+    linhas, n_ok, n_erro, n_mantido = mudancas_da_passada(SELLER_ID, JANELA_MIN)
     _post({"aba": "Mudancas", "quando": agora, "conta": SELLER_ID, "rows": linhas})
 
     dias = margem_diaria(SELLER_ID, MARGEM_DIAS)
@@ -176,16 +232,17 @@ def main():
 
     hoje = date.today().isoformat()
     m_hoje = next((l for l in dias if l[0] == hoje), None)
-    nota = nota_curta(hora, linhas, n_ok, n_erro, m_hoje)
-    # o Apps Script grava a linha E manda o PULSO por email SÓ quando NÃO houve nenhuma
-    # tentativa de mudança. Passada com mudança (ou falha!) fica pro comentário narrado
-    # da Claude de hora em hora, pra não chegar email em dobro e pra ela sinalizar falhas.
+    corpo = montar_email(hora, linhas, n_ok, n_erro, n_mantido, m_hoje)
+    marg_txt = f", margem {m_hoje[6]}%" if (m_hoje and m_hoje[6] is not None) else ""
+    falha_txt = f", {n_erro} falha(s)" if n_erro else ""
+    assunto = f"Repricer {hora} {NOME_CONTA} — {n_ok} mudança(s){falha_txt}{marg_txt}"
+    # o Apps Script grava a linha E manda o email (corpo) em TODA passada ao vivo, na hora.
     _post({"aba": "Passadas", "quando": agora, "conta": SELLER_ID,
-           "nota": nota, "para": EMAIL_RELATORIO, "tem_mudanca": len(linhas) > 0,
-           "modo": MODO,   # Apps Script só manda o pulso por email em modo 'live'
-           "assunto": f"Repricer {hora} — {NOME_CONTA}",
-           "rows": [[agora, SELLER_ID, f"{n_ok} ok / {n_erro} erro", nota]]})
-    print(f"Relatório: {n_ok} ok, {n_erro} erro, {len(dias)} dia(s) de margem. {nota}", flush=True)
+           "nota": corpo, "para": EMAIL_RELATORIO, "tem_mudanca": len(linhas) > 0,
+           "modo": MODO,   # Apps Script só manda email em modo 'live'
+           "assunto": assunto,
+           "rows": [[agora, SELLER_ID, f"{n_ok} ok / {n_erro} erro / {n_mantido} mantido", assunto]]})
+    print(f"Relatório: {n_ok} ok, {n_erro} erro, {n_mantido} mantido, {len(dias)} dia(s). {assunto}", flush=True)
 
 
 if __name__ == "__main__":
