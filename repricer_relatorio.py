@@ -22,6 +22,10 @@ WEBHOOK_URL = (os.environ.get("WEBHOOK_URL") or "").strip()
 SELLER_ID = (os.environ.get("SELLER_ID") or "3244206480").strip()
 JANELA_MIN = int(os.environ.get("RELATORIO_JANELA_MIN", "90"))      # "esta passada" = últimos X min
 MARGEM_DIAS = int(os.environ.get("RELATORIO_MARGEM_DIAS", "20"))    # janela do painel de margem
+EMAIL_RELATORIO = (os.environ.get("EMAIL_RELATORIO") or "").strip()  # p/ quem o Apps Script manda o aviso
+BASE_MARGEM = (os.environ.get("BASE_MARGEM") or "").strip()          # margem-base p/ comparar (ex "14,3")
+NOME_CONTA = (os.environ.get("NOME_CONTA") or "").strip() or f"conta {SELLER_ID}"
+MODO = "live" if (os.environ.get("CONFIRMA") or "").strip().upper() == "SIM" else "simulacao"
 _CANCEL = ("cancel",)   # só cancelada não conta
 
 
@@ -133,8 +137,26 @@ def mudancas_da_passada(sid, janela_min):
     return feitas
 
 
+def nota_curta(hora, feitas, m_hoje):
+    """A mensagenzinha comentada de cada passada (o Apps Script manda por email)."""
+    if feitas:
+        det = "; ".join(
+            f"{(f[2] or '')[:22]} {f[3]}" + (f" R${f[4]}" if f[4] not in (None, "") else "")
+            for f in feitas[:6])
+        if len(feitas) > 6:
+            det += f" (+{len(feitas) - 6})"
+        txt = f"🤖 {hora} {NOME_CONTA}: mexi em {len(feitas)} item(ns) — {det}."
+    else:
+        txt = f"🤖 {hora} {NOME_CONTA}: sem mudanças nesta passada."
+    if m_hoje and m_hoje[6] is not None:
+        base = f" (base {BASE_MARGEM}%)" if BASE_MARGEM else ""
+        txt += f" Margem do dia {m_hoje[6]}%{base}, {m_hoje[1]} pedido(s), receita R${m_hoje[3]:.0f}."
+    return txt
+
+
 def main():
     agora = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M")
+    hora = datetime.now(timezone.utc).astimezone().strftime("%Hh")
     feitas = mudancas_da_passada(SELLER_ID, JANELA_MIN)
     _post({"aba": "Mudancas", "quando": agora, "conta": SELLER_ID, "rows": feitas})
 
@@ -143,12 +165,16 @@ def main():
 
     hoje = date.today().isoformat()
     m_hoje = next((l for l in linhas if l[0] == hoje), None)
-    resumo = f"{len(feitas)} mudança(s) aplicada(s)"
-    if m_hoje:
-        resumo += f" · hoje: {m_hoje[1]} pedido(s), receita R${m_hoje[3]:.2f}, margem {m_hoje[6]}%"
+    nota = nota_curta(hora, feitas, m_hoje)
+    # o Apps Script grava a linha E manda o PULSO por email SÓ quando NÃO houve mudança.
+    # Passada com mudança fica pro comentário narrado (tarefa da Claude de hora em hora),
+    # pra não chegar email em dobro.
     _post({"aba": "Passadas", "quando": agora, "conta": SELLER_ID,
-           "rows": [[agora, SELLER_ID, len(feitas), resumo]]})
-    print(f"Relatório: {len(feitas)} mudança(s) aplicada(s), {len(linhas)} dia(s) de margem. {resumo}", flush=True)
+           "nota": nota, "para": EMAIL_RELATORIO, "tem_mudanca": len(feitas) > 0,
+           "modo": MODO,   # Apps Script só manda o pulso por email em modo 'live'
+           "assunto": f"Repricer {hora} — {NOME_CONTA}",
+           "rows": [[agora, SELLER_ID, len(feitas), nota]]})
+    print(f"Relatório: {len(feitas)} mudança(s), {len(linhas)} dia(s) de margem. {nota}", flush=True)
 
 
 if __name__ == "__main__":
