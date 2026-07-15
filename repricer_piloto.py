@@ -100,6 +100,29 @@ def promo_estado(a):
     return (p in NOSSAS_PROMO), (p not in NOSSAS_PROMO)
 
 
+def melhor_cofin(a, access):
+    """Melhor promoção COFINANCIADA (candidata) por MARGEM %, respeitando o piso.
+    Reusa o avaliar() do repricer_sugestoes (que já trata o meli_percentage — a parte
+    que o ML banca). Retorna o dict do avaliar (pb, margem, recebe, o) ou None."""
+    custo, frete, piso = a.get("custo"), a.get("frete"), a.get("piso")
+    cat, ltid = a.get("cat"), a.get("ltid")
+    if custo is None or frete is None or piso is None:
+        return None
+    try:
+        ofertas = rec.ofertas_do_item(a["item_id"], access)
+    except Exception:
+        return None
+    seguras = []
+    for o in (ofertas if isinstance(ofertas, list) else []):
+        if not (isinstance(o, dict) and (o.get("status") or "").lower() == "candidate"
+                and o.get("meli_percentage") and o.get("original_price")):
+            continue
+        ev = rec.avaliar(o, cat, ltid, access, frete, custo)
+        if ev and ev["margem"] >= piso:
+            seguras.append(ev)
+    return max(seguras, key=lambda x: x["margem"]) if seguras else None   # BALIZADOR = margem %
+
+
 def telegram(msg):
     tok = os.environ.get("TELEGRAM_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN")
     chat = os.environ.get("TELEGRAM_CHAT_ID")
@@ -231,14 +254,17 @@ def main():
 
     def _an(iid):
         try:
-            return sonda.analisar(iid, access, sid)
+            a = sonda.analisar(iid, access, sid)
+            if a and a.get("acao") in ACOES_DESCONTO:      # só nos que a gente descontaria
+                a["cofin"] = melhor_cofin(a, access)        # melhor campanha do ML por margem
+            return a
         except Exception as e:
             print(f"   (analisar {iid} falhou: {e})", flush=True)
             return None
     with ThreadPoolExecutor(max_workers=WORKERS) as ex:   # análise em paralelo (grande ganho)
         analises = [a for a in ex.map(_an, todos) if a]
 
-    cont = {"criado": 0, "removido": 0, "vende": 0, "barato": 0, "fila": 0}
+    cont = {"criado": 0, "removido": 0, "vende": 0, "barato": 0, "fila": 0, "campanha": 0}
     criados = 0
     for a in analises:
         acao = a.get("acao")
@@ -271,6 +297,19 @@ def main():
                 continue
             desc = (1 - alvo / p0) * 100
             row = {**base_log(sid, a), "acao": acao, "deal_price": alvo, "desconto_pct": round(desc, 1)}
+            cofin = a.get("cofin")                        # melhor campanha do ML por margem, ou None
+            ma = a["margem_alvo"] if a.get("margem_alvo") is not None else -999
+            ganha_campanha = bool(cofin and cofin["margem"] > ma + 0.01)
+            camp_txt = ""
+            if cofin:
+                _nome = cofin["o"].get("name") or cofin["o"].get("type")
+                camp_txt = (f"  |  🎁 campanha \"{_nome}\" R${cofin['pb']:.2f} margem {cofin['margem']:.1f}%"
+                            f" -> {'CAMPANHA vence' if ganha_campanha else 'desconto próprio vence'}")
+                if ganha_campanha:
+                    cont["campanha"] += 1
+                    logar({**row, "acao": "recomenda_campanha", "aplicado": False, "modo": "insight",
+                           "deal_price": cofin["pb"], "margem_alvo": cofin["margem"],
+                           "motivo": f"campanha {_nome} paga margem {cofin['margem']:.1f}% > desconto {ma:.1f}%"})
             tem_pd, tem_outra = promo_estado(a)           # do sale_price já lido (sem chamada extra)
             if tem_pd:
                 continue                                  # já descontado por nós; ajuste fino fica pra depois
@@ -286,7 +325,7 @@ def main():
             if not CONFIRMA:                        # simulação: mostra TUDO (marca a fila além do teto)
                 marca = "" if dentro else f" (FILA, além do teto {MAX_ALTERACOES})"
                 print(f"• SIMULA cria{marca} {iid} {tit} -> R${alvo:.2f} ({desc:.1f}% off, "
-                      f"margem {a.get('margem_alvo')}%)", flush=True)
+                      f"margem {a.get('margem_alvo')}%){camp_txt}", flush=True)
                 logar({**row, "acao": acao if dentro else "fila_teto", "aplicado": False, "modo": "simulacao"})
                 if dentro:
                     criados += 1; cont["criado"] += 1
@@ -330,7 +369,9 @@ def main():
               f"{'criados' if CONFIRMA else 'a criar'}"
               + (f" (+{cont['fila']} na fila além do teto)" if cont['fila'] else "")
               + f", {cont['removido']} remoção(ões), {cont['vende']} segurados por venda, "
-              f"{cont['barato']} barato-demais.")
+              f"{cont['barato']} barato-demais"
+              + (f", 🎁 {cont['campanha']} onde campanha do ML paga mais margem" if cont['campanha'] else "")
+              + ".")
     print(f"\n=== {resumo} ===", flush=True)
     telegram("🤖 " + resumo)
     if not CONFIRMA:
