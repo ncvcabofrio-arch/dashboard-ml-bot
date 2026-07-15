@@ -1,5 +1,5 @@
 """
-PILOTO — repricer completo em UMA conta (padrão MG 3244206480), com trilhos e reconciliador.
+PILOTO — repricer completo em UMA conta (padrão Cabo Frio 471489691), com trilhos e reconciliador.
 Lê a sonda + as vendas recentes + o controle por anúncio, e ACERTA o estado de cada item:
   perdendo + PARADO      -> cria desconto (Central de Promoções) no alvo competitivo (piso/PMA)
   perdendo + VENDENDO    -> não desconta; se já tiver desconto nosso, REMOVE (protege margem)
@@ -12,12 +12,24 @@ As REMOÇÕES (que protegem margem) não contam no teto.
 """
 import os
 import time
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
 import requests
 import repricer_sugestoes as rec
 import repricer_competitivo as sonda
 from ml_auth import obter_access
+
+
+def _rs(v):
+    """R$ no formato BR (1234.5 -> '1.234,50'). Sem o 'R$' na frente."""
+    try:
+        return format(float(v), ",.2f").replace(",", "X").replace(".", ",").replace("X", ".")
+    except (TypeError, ValueError):
+        return str(v)
+
+
+def _agora_iso():
+    return datetime.now(timezone.utc).isoformat()
 
 # --- API da Central de Promoções (autossuficiente: NÃO depende do repricer_aplicar) ---
 STATUS_ATIVA = {"started", "active", "in_progress", "ongoing", "pending"}
@@ -47,7 +59,7 @@ def promos_do_item(item_id, access):
     st, d = req("GET", f"/seller-promotions/items/{item_id}?app_version=v2", access)
     return d if isinstance(d, list) else []
 
-SELLER_ID = (os.environ.get("SELLER_ID") or "3244206480").strip()   # MG por padrão
+SELLER_ID = (os.environ.get("SELLER_ID") or "471489691").strip()   # Cabo Frio por padrão
 MAX_ITENS = int(os.environ.get("MAX_ITENS", "0"))                    # 0 = todos
 WORKERS = int(os.environ.get("WORKERS", "8"))                        # análise em paralelo
 CONFIRMA = (os.environ.get("CONFIRMA") or "").strip().upper() == "SIM"
@@ -63,6 +75,13 @@ SUBIR_ATIVO = True     # liga/desliga a subida gradual
 SUBIR_PASSO_PCT = 8.0  # teto de % que o preço pode subir POR RODADA (gradual)
 SUBIR_MIN_RS = 5.0     # só sobe se o ganho for pelo menos isso (R$), pra não mexer à toa
 SUBIR_EXIGE_VENDA = True  # só sobe o próximo degrau se VENDEU desde a última subida (subiu e não vendeu -> segura)
+# --- itens SEM concorrente: sobe por demanda (a cada N pedidos +X%), passo atrás se parar/cair ---
+SEMC_ATIVO = True      # liga/desliga a regra dos itens sem concorrente
+SEMC_PEDIDOS = 5       # a cada N pedidos desde a última subida, sobe
+SEMC_PCT = 3.0         # quanto sobe (e desce no passo atrás), em %
+SEMC_PAROU_DIAS = 2    # dias sem vender (desde a última subida) que contam como "parou" -> passo atrás
+SEMC_CAIU_PCT = 50.0   # "caiu o ritmo": pedidos/dia depois da subida < esse % do que era antes -> passo atrás
+SEMC_COOLDOWN_DIAS = 7  # anti-loop: depois de um passo atrás, espera isso antes de poder subir de novo
 
 
 def _num(v, tipo, padrao):
@@ -76,6 +95,7 @@ def resolver_config():
     """Regras globais: input do workflow (env, por rodada) > painel (repricer_config) > default."""
     global MAX_ALTERACOES, MAX_DROP_PCT, DIAS, VENDAS_DIAS, VENDAS_MIN
     global SUBIR_ATIVO, SUBIR_PASSO_PCT, SUBIR_MIN_RS, SUBIR_EXIGE_VENDA
+    global SEMC_ATIVO, SEMC_PEDIDOS, SEMC_PCT, SEMC_PAROU_DIAS, SEMC_CAIU_PCT, SEMC_COOLDOWN_DIAS
     C = sonda.CONFIG
 
     def r(env_name, chave, padrao, tipo):
@@ -96,6 +116,13 @@ def resolver_config():
     SUBIR_MIN_RS = max(0.0, r("SUBIR_MIN_RS", "subir_min_rs", 5.0, float))
     _sev = os.environ.get("SUBIR_EXIGE_VENDA") or C.get("subir_exige_venda") or "1"
     SUBIR_EXIGE_VENDA = str(_sev).strip().upper() not in ("0", "NAO", "NÃO", "FALSE", "OFF", "")
+    _sca = os.environ.get("SEMC_ATIVO") or C.get("semc_ativo") or "1"
+    SEMC_ATIVO = str(_sca).strip().upper() not in ("0", "NAO", "NÃO", "FALSE", "OFF", "")
+    SEMC_PEDIDOS = max(1, r("SEMC_PEDIDOS", "semc_pedidos", 5, int))
+    SEMC_PCT = max(0.0, min(r("SEMC_PCT", "semc_pct", 3.0, float), 100.0))
+    SEMC_PAROU_DIAS = max(1, r("SEMC_PAROU_DIAS", "semc_parou_dias", 2, int))
+    SEMC_CAIU_PCT = max(0.0, min(r("SEMC_CAIU_PCT", "semc_caiu_pct", 50.0, float), 100.0))
+    SEMC_COOLDOWN_DIAS = max(0, r("SEMC_COOLDOWN_DIAS", "semc_cooldown_dias", 7, int))
 
 ACOES_DESCONTO = {"descontar", "descontar_ean", "descontar_piso"}
 REMOVER_OK = {"subir_margem", "ja_competitivo", "manter_ganhando"}   # confiante que não precisa desconto
@@ -233,14 +260,14 @@ def ultima_venda_dia(sid, dias=90):
     return it
 
 
-def ultima_subida_dia(sid, dias=90):
-    """Dia da última SUBIDA de preço aplicada por item_id (repricer_log, acao=subir_preco)."""
+def ultimo_dia_acoes(sid, acoes, dias=90):
+    """Dia da última vez (por item_id) que o robô APLICOU uma das `acoes` (repricer_log)."""
     corte = (date.today() - timedelta(days=dias)).isoformat()
     it, ini = {}, 0
     while True:
         try:
             lote = (rec.sb.table("repricer_log").select("item_id,ts")
-                    .eq("seller_id", str(sid)).eq("acao", "subir_preco").eq("aplicado", True)
+                    .eq("seller_id", str(sid)).in_("acao", list(acoes)).eq("aplicado", True)
                     .gte("ts", corte).range(ini, ini + 999).execute().data) or []
         except Exception:
             return it
@@ -252,6 +279,34 @@ def ultima_subida_dia(sid, dias=90):
             break
         ini += 1000
     return it
+
+
+def ultima_subida_dia(sid, dias=90):
+    return ultimo_dia_acoes(sid, ("subir_preco",), dias)
+
+
+def vendas_pedidos_por_item(sid, dias=120):
+    """Por item_id: lista de dias (ISO) dos PEDIDOS distintos (order_id, não cancelados) nos
+    últimos `dias`. Usada na regra dos itens sem concorrente (a cada N pedidos, sobe)."""
+    corte = (date.today() - timedelta(days=dias)).isoformat()
+    tmp, ini = {}, 0   # tmp[iid] = {order_id: dia}
+    while True:
+        try:
+            lote = (rec.sb.table("vendas").select("item_id,order_id,status,data_aprovacao")
+                    .eq("seller_id", str(sid)).gte("data_aprovacao", corte)
+                    .range(ini, ini + 999).execute().data) or []
+        except Exception as e:
+            print(f"(aviso: não li pedidos p/ sem-concorrente: {e})", flush=True); break
+        for r in lote:
+            if any(x in str(r.get("status") or "").lower() for x in _CANCEL):
+                continue
+            iid, oid, d = r.get("item_id"), r.get("order_id"), _dia(r.get("data_aprovacao"))
+            if iid and d:
+                tmp.setdefault(iid, {})[oid or d] = d
+        if len(lote) < 1000:
+            break
+        ini += 1000
+    return {iid: sorted(od.values()) for iid, od in tmp.items()}
 
 
 def estado_promo(item_id, access):
@@ -293,6 +348,213 @@ def entrar_campanha(item_id, o, access):
     return st, resp
 
 
+def mudar_preco_lista(item_id, preco, access):
+    """Muda o PREÇO DE TABELA (cheio) do anúncio. Só usado nos itens SEM concorrente, e só
+    depois de você APROVAR pelo botão do Telegram. Nunca é chamado automático sem aprovação."""
+    return req("PUT", f"/items/{item_id}", access, body={"price": round(float(preco), 2)})
+
+
+# ============ APROVAÇÃO POR BOTÃO NO TELEGRAM (subida de preço de lista) ============
+def telegram_botao(msg, aprov_id):
+    """Manda a mensagem com os botões ✅/❌ e devolve o message_id (pra Edge Function editar)."""
+    tok = os.environ.get("TELEGRAM_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat = os.environ.get("TELEGRAM_CHAT_ID")
+    if not (tok and chat):
+        return None
+    teclado = {"inline_keyboard": [[
+        {"text": "✅ Aprova", "callback_data": f"apv:{aprov_id}:ok"},
+        {"text": "❌ Não",    "callback_data": f"apv:{aprov_id}:no"},
+    ]]}
+    try:
+        r = requests.post(f"https://api.telegram.org/bot{tok}/sendMessage",
+                          json={"chat_id": chat, "text": msg, "parse_mode": "HTML",
+                                "reply_markup": teclado}, timeout=15)
+        d = r.json()
+        return (d.get("result") or {}).get("message_id")
+    except Exception:
+        return None
+
+
+def aprovacao_pendente(sid, item_id):
+    """Já existe um pedido de aprovação em aberto (pendente/aprovada não aplicada) pra esse item?"""
+    try:
+        d = (rec.sb.table("repricer_aprovacoes").select("id")
+             .eq("seller_id", str(sid)).eq("item_id", item_id)
+             .in_("status", ["pendente", "aprovada"]).limit(1).execute().data) or []
+        return bool(d)
+    except Exception:
+        return True   # na dúvida, não duplica
+
+
+def criar_aprovacao(sid, a, pv, novo):
+    """Cria a linha 'pendente' e manda o botão no Telegram. Não mexe em preço nenhum."""
+    iid = a.get("item_id")
+    linha = {"seller_id": str(sid), "item_id": iid, "sku": a.get("sku"),
+             "titulo": a.get("titulo"), "preco_atual": round(float(pv), 2),
+             "preco_novo": round(float(novo), 2), "status": "pendente"}
+    try:
+        ins = rec.sb.table("repricer_aprovacoes").insert(linha).execute().data
+        aprov_id = ins[0]["id"] if ins else None
+    except Exception as e:
+        print(f"   (não criei aprovação {iid}: {e})", flush=True); return
+    if not aprov_id:
+        return
+    tit = str(a.get("titulo"))[:60]
+    msg = (f"📈 <b>Subir preço de lista</b>\n<b>{tit}</b>\n"
+           f"Sem concorrente e vendendo — de R$ {_rs(pv)} para <b>R$ {_rs(novo)}</b> (+{SEMC_PCT:.0f}%).\n"
+           f"Aprova a subida?")
+    mid = telegram_botao(msg, aprov_id)
+    if mid:
+        try:
+            chat = os.environ.get("TELEGRAM_CHAT_ID")
+            rec.sb.table("repricer_aprovacoes").update({"message_id": str(mid), "chat_id": str(chat)}).eq("id", aprov_id).execute()
+        except Exception:
+            pass
+
+
+def aplicar_aprovacoes(sid, access):
+    """No começo da rodada: aplica as subidas de lista que você APROVOU (status='aprovada')."""
+    try:
+        pend = (rec.sb.table("repricer_aprovacoes").select("*")
+                .eq("seller_id", str(sid)).eq("status", "aprovada").limit(50).execute().data) or []
+    except Exception:
+        return 0
+    n = 0
+    for row in pend:
+        iid, novo = row.get("item_id"), row.get("preco_novo")
+        if not iid or not novo:
+            continue
+        st, resp = mudar_preco_lista(iid, novo, access)
+        ok = 200 <= st < 300
+        print(f"{'✅' if ok else '⛔'} SOBE LISTA {iid} -> R${float(novo):.2f} HTTP {st}", flush=True)
+        try:
+            rec.sb.table("repricer_aprovacoes").update({
+                "status": "aplicada" if ok else "erro", "http_status": st,
+                "aplicado_em": _agora_iso()}).eq("id", row["id"]).execute()
+        except Exception:
+            pass
+        if ok:
+            n += 1
+            logar({"seller_id": str(sid), "item_id": iid, "sku": row.get("sku"),
+                   "titulo": row.get("titulo"), "acao": "subir_lista", "aplicado": True,
+                   "modo": "live", "deal_price": novo, "http_status": st,
+                   "motivo": f"lista aprovada: R${float(row.get('preco_atual') or 0):.2f}->R${float(novo):.2f}"})
+        time.sleep(0.4)
+    return n
+
+
+def _ritmo_caiu(datas, us, hoje):
+    """True se o ritmo de pedidos DEPOIS da subida caiu abaixo de SEMC_CAIU_PCT% do de ANTES.
+    Só julga com >=3 dias desde a subida (senão é cedo demais e vira falso positivo)."""
+    if not us:
+        return False
+    try:
+        d_us = date.fromisoformat(us)
+    except ValueError:
+        return False
+    dias_dep = (hoje - d_us).days
+    if dias_dep < 3:
+        return False
+    ini_antes = (d_us - timedelta(days=30)).isoformat()
+    n_antes = sum(1 for d in datas if ini_antes <= d < us)
+    n_dep = sum(1 for d in datas if d > us)
+    rate_antes = n_antes / 30.0
+    rate_dep = n_dep / max(dias_dep, 1)
+    if rate_antes <= 0:
+        return False
+    return rate_dep < rate_antes * (SEMC_CAIU_PCT / 100.0)
+
+
+def passo_semc(a, sid, access, pedidos_map, sub_dia, passo_dia, cont):
+    """Itens SEM concorrente (tipo confirmado no mapa): a cada SEMC_PEDIDOS pedidos desde a
+    última subida, +SEMC_PCT%. Sobe por desconto se couber abaixo do cheio; se passaria do
+    cheio, PEDE APROVAÇÃO no Telegram (botão). Passo atrás (-SEMC_PCT%) se parou ou caiu o ritmo."""
+    sku = a.get("sku"); iid = a.get("item_id"); tit = str(a.get("titulo"))[:26]
+    mrec = sonda.MATCH.get(sku) if sku else None
+    if not mrec or mrec.get("tipo") != "sem_concorrente":
+        return                                        # só nos confirmados sem concorrente
+    pv = a.get("preco_venda"); p0 = a.get("preco_cheio")
+    if not pv or not p0 or pv <= 0:
+        return
+    datas = pedidos_map.get(iid, [])                  # dias dos pedidos (um por pedido)
+    us = sub_dia.get(iid, "")                          # dia da última subida
+    up = passo_dia.get(iid, "")                        # dia do último passo atrás
+    hoje = date.today()
+    ult_venda = datas[-1] if datas else ""
+    # ANTI-LOOP: conta pedidos desde o ÚLTIMO MOVIMENTO (subida OU passo atrás), não só da subida.
+    # Assim, depois de descer, precisa de N vendas NOVAS pra subir de novo — não 1 venda solta.
+    ref_mov = max(us or "", up or "")
+    pedidos_desde = sum(1 for d in datas if (not ref_mov) or d > ref_mov)
+    # cooldown pós passo-atrás: se o último movimento foi um passo atrás e faz pouco tempo, não sobe
+    em_cooldown = bool(up and up >= (us or "") and (hoje - date.fromisoformat(up)).days < SEMC_COOLDOWN_DIAS)
+
+    # ---- SUBIR: a cada SEMC_PEDIDOS pedidos desde o último movimento (fora do cooldown) ----
+    if pedidos_desde >= SEMC_PEDIDOS and not em_cooldown:
+        novo = round(pv * (1 + SEMC_PCT / 100.0), 2)
+        if novo <= pv + 0.01:
+            return
+        if novo <= p0 + 0.01:                          # cabe abaixo do cheio -> sobe por desconto (auto)
+            novo = min(novo, round(p0 - 0.01, 2))
+            base = {**base_log(sid, a), "acao": "subir_semc", "deal_price": novo,
+                    "motivo": f"sem conc: {pedidos_desde} pedidos -> R${pv:.2f}->R${novo:.2f} (+{SEMC_PCT:.0f}%)"}
+            if not CONFIRMA:
+                print(f"• SIMULA sobe(semc) {iid} {tit}: R${pv:.2f}->R${novo:.2f}", flush=True)
+                logar({**base, "aplicado": False, "modo": "simulacao"}); cont["semc"] = cont.get("semc", 0) + 1; return
+            tem_pd, tem_outra = promo_estado(a)
+            if tem_outra:
+                logar({**base, "acao": "pulado_campanha", "aplicado": False, "modo": "live"}); return
+            if tem_pd:
+                remover_desconto(iid, access); time.sleep(0.3)
+            st, resp = criar_desconto(iid, novo, access)
+            ok = 200 <= st < 300
+            print(f"{'✅' if ok else '⛔'} SOBE(semc) {iid} {tit}: R${pv:.2f}->R${novo:.2f} HTTP {st}", flush=True)
+            logar({**base, "aplicado": ok, "modo": "live", "http_status": st})
+            if ok:
+                cont["semc"] = cont.get("semc", 0) + 1
+            return
+        # passaria do cheio -> PEDE APROVAÇÃO (não mexe sozinho no preço de lista)
+        if aprovacao_pendente(sid, iid):
+            return                                     # já tem botão em aberto pra esse item
+        print(f"📈 PEDE APROVAÇÃO {iid} {tit}: subir lista R${pv:.2f}->R${novo:.2f}", flush=True)
+        logar({**base_log(sid, a), "acao": "pede_aprovacao", "aplicado": False, "modo": "insight",
+               "deal_price": novo, "motivo": f"sem conc: {pedidos_desde} pedidos, subir lista"})
+        if CONFIRMA:
+            criar_aprovacao(sid, a, pv, novo)
+            cont["pede"] = cont.get("pede", 0) + 1
+        return
+
+    # ---- PASSO ATRÁS: parou OU caiu (só se subiu depois do último passo atrás) ----
+    if us and (not up or us > up):
+        try:
+            dias_sem_venda = (hoje - date.fromisoformat(ult_venda)).days if ult_venda else 999
+        except ValueError:
+            dias_sem_venda = 999
+        parou = dias_sem_venda >= SEMC_PAROU_DIAS
+        caiu = _ritmo_caiu(datas, us, hoje)
+        if parou or caiu:
+            novo = round(pv * (1 - SEMC_PCT / 100.0), 2)
+            if novo >= pv - 0.01 or novo <= 0:
+                return
+            motivo = "parou" if parou else "caiu o ritmo"
+            base = {**base_log(sid, a), "acao": "passo_atras", "deal_price": novo,
+                    "motivo": f"sem conc ({motivo}): R${pv:.2f}->R${novo:.2f}"}
+            if not CONFIRMA:
+                print(f"• SIMULA passo-atrás {iid} {tit} ({motivo})", flush=True)
+                logar({**base, "aplicado": False, "modo": "simulacao"}); cont["passo"] = cont.get("passo", 0) + 1; return
+            tem_pd, tem_outra = promo_estado(a)
+            if tem_outra:
+                return
+            if tem_pd:
+                remover_desconto(iid, access); time.sleep(0.3)
+            st, resp = criar_desconto(iid, novo, access)
+            ok = 200 <= st < 300
+            print(f"{'✅' if ok else '⛔'} PASSO-ATRÁS {iid} {tit} ({motivo}): R${pv:.2f}->R${novo:.2f} HTTP {st}", flush=True)
+            logar({**base, "aplicado": ok, "modo": "live", "http_status": st})
+            if ok:
+                cont["passo"] = cont.get("passo", 0) + 1
+            return
+
+
 def main():
     if not ATIVO:
         print("⛔ ATIVO=NAO (botão de pânico) — nada será escrito. Saindo.", flush=True)
@@ -328,6 +590,11 @@ def main():
     print(f"===== PILOTO | conta {sid} | {modo} | {teto_txt} | anti-salto {MAX_DROP_PCT:.0f}% | "
           f"gate vendas {VENDAS_MIN}u/{VENDAS_DIAS}d | UNDERCUT R${float(uc_txt):.0f} =====", flush=True)
 
+    if CONFIRMA and SEMC_ATIVO:                 # aplica as subidas de lista que você aprovou no botão
+        n_apr = aplicar_aprovacoes(sid, access)
+        if n_apr:
+            print(f"   ({n_apr} subida(s) de lista aprovada(s) aplicada(s))", flush=True)
+
     todos, _ = rec.todos_ativos(sid, access)
     if MAX_ITENS:
         todos = todos[:MAX_ITENS]
@@ -336,6 +603,9 @@ def main():
     venda_dia = ultima_venda_dia(sid) if SUBIR_ATIVO and SUBIR_EXIGE_VENDA else {}
     subida_dia = ultima_subida_dia(sid) if SUBIR_ATIVO and SUBIR_EXIGE_VENDA else {}
     corte_recente = (date.today() - timedelta(days=VENDAS_DIAS)).isoformat()
+    pedidos_map  = vendas_pedidos_por_item(sid) if SEMC_ATIVO else {}                       # sem-concorrente
+    sub_dia_semc = ultimo_dia_acoes(sid, ("subir_semc", "subir_lista")) if SEMC_ATIVO else {}
+    passo_dia    = ultimo_dia_acoes(sid, ("passo_atras",)) if SEMC_ATIVO else {}
 
     def _an(iid):
         try:
@@ -349,7 +619,8 @@ def main():
     with ThreadPoolExecutor(max_workers=WORKERS) as ex:   # análise em paralelo (grande ganho)
         analises = [a for a in ex.map(_an, todos) if a]
 
-    cont = {"criado": 0, "removido": 0, "vende": 0, "barato": 0, "fila": 0, "campanha": 0, "subiu": 0}
+    cont = {"criado": 0, "removido": 0, "vende": 0, "barato": 0, "fila": 0, "campanha": 0,
+            "subiu": 0, "semc": 0, "passo": 0, "pede": 0}
     criados = 0
     try:
         uc = float(sonda.CONFIG.get("undercut") or sonda.UNDERCUT or 5)
@@ -358,6 +629,10 @@ def main():
     for a in analises:
         acao = a.get("acao")
         if acao == "desligado":
+            continue
+        if acao == "sem_match":                 # itens sem concorrente -> regra própria (sobe por demanda)
+            if SEMC_ATIVO:
+                passo_semc(a, sid, access, pedidos_map, sub_dia_semc, passo_dia, cont)
             continue
         iid = a.get("item_id")
         tit = str(a.get("titulo"))[:26]
@@ -571,6 +846,9 @@ def main():
               + f", {cont['removido']} remoção(ões), {cont.get('mantido', 0)} desconto(s) mantido(s) "
               f"(anti-gangorra), {cont['vende']} segurados por venda, {cont['barato']} barato-demais"
               + (f", ⬆️ {cont['subiu']} subida(s) de margem" if cont.get('subiu') else "")
+              + (f", 📈 {cont['semc']} subida(s) sem-concorrente" if cont.get('semc') else "")
+              + (f", 🔽 {cont['passo']} passo(s) atrás" if cont.get('passo') else "")
+              + (f", 🔔 {cont['pede']} aprovação(ões) pedida(s)" if cont.get('pede') else "")
               + (f", 🎁 {cont['campanha']} onde campanha do ML paga mais margem" if cont['campanha'] else "")
               + ".")
     print(f"\n=== {resumo} ===", flush=True)
