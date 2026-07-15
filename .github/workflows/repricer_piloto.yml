@@ -1,6 +1,6 @@
 name: Repricer - PILOTO
 
-# Roda o repricer completo numa conta (padrão MG), com trilhos de segurança.
+# Roda o repricer completo numa conta (padrão Cabo Frio=471489691), com trilhos de segurança.
 # As REGRAS vêm do painel (repricer_config); inputs abaixo só pra override por rodada.
 # Agendado = SIMULAÇÃO (alimenta o painel sem escrever). Ao vivo = workflow_dispatch com confirma=SIM.
 on:
@@ -39,7 +39,7 @@ on:
         description: "Conta: 3244206480=MG, 471489691=Cabo Frio, 177795203=CF"
         type: string
         required: false
-        default: "3244206480"
+        default: "471489691"   # Cabo Frio (era 3244206480=MG por engano -> mandava o pinger pra conta errada)
 
 concurrency:
   group: ml-repricer-piloto
