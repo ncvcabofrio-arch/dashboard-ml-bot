@@ -35,6 +35,7 @@ NORM_CUSTO = {}   # sku normalizado -> sku original na tabela produtos (só p/ D
 MEUS_SELLERS = set()   # TODOS os seus seller_ids (as 3 contas) — nunca competir consigo mesmo
 MATCH = {}             # item_id -> {product_ids, confianca, tipo} (mapa confirmado com IA)
 CONTROLE = {}          # item_id -> {ativo, piso_override, undercut_override, pma, preco_manual} (painel)
+CONFIG = {}            # chave -> valor (regras globais editáveis no painel: undercut, piso etc.)
 
 
 def _norm(s):
@@ -93,6 +94,16 @@ def carregar_controle():
         if len(lote) < 1000:
             break
         ini += 1000
+
+
+def carregar_config():
+    """Carrega as regras globais editáveis no painel (repricer_config: chave->valor)."""
+    try:
+        for r in (rec.sb.table("repricer_config").select("chave,valor").execute().data or []):
+            if r.get("chave"):
+                CONFIG[r["chave"]] = r.get("valor")
+    except Exception as e:
+        print(f"(aviso: sem tabela repricer_config ainda: {e})", flush=True)
 
 
 SELLER_ID = (os.environ.get("SELLER_ID") or "").strip()
@@ -264,6 +275,21 @@ def concorrencia_mercado(ean, consulta, titulo, sid, access, p0):
     return [], None
 
 
+def sale_price(item_id, access):
+    """Preço de venda ATUAL (com promoção, se houver) + tipo de promoção ativa.
+    A promoção NÃO muda item.price; é isto que revela o que o cliente paga de fato
+    e se há oferta rolando. Retorna (amount, promotion_type)."""
+    st, d = rec.get(f"/items/{item_id}/sale_price?context=channel_marketplace", access)
+    if not isinstance(d, dict):
+        return None, None
+    amt = d.get("amount")
+    ptipo = (d.get("metadata") or {}).get("promotion_type")
+    try:
+        return (float(amt) if amt is not None else None), ptipo
+    except (TypeError, ValueError):
+        return None, ptipo
+
+
 def analisar(item_id, access, sid):
     st, it = rec.get(f"/items/{item_id}?include_attributes=all", access)
     if not isinstance(it, dict):
@@ -276,7 +302,9 @@ def analisar(item_id, access, sid):
     if aq is not None and aq <= 0:
         return {"item_id": item_id, "titulo": it.get("title"), "aq": raw_aq, "acao": "sem_estoque",
                 "detalhe": "estoque zero"}
-    p0 = float(it.get("price") or 0)
+    p0 = float(it.get("price") or 0)               # preço CHEIO (de tabela) — base do desconto
+    pv, promo_ativa = sale_price(item_id, access)  # preço REAL que o cliente paga + promoção ativa
+    pv = pv if pv else p0                           # sem sale_price -> usa o cheio
     cat, ltid = it.get("category_id"), it.get("listing_type_id")
     sku = it.get("seller_sku") or it.get("seller_custom_field")
     pid = it.get("catalog_product_id")
@@ -285,7 +313,8 @@ def analisar(item_id, access, sid):
     if ctl.get("ativo") is False:                        # liga/desliga por anúncio (painel)
         return {"item_id": item_id, "titulo": it.get("title"), "sku": sku, "aq": raw_aq,
                 "acao": "desligado", "detalhe": "robô desligado neste anúncio (controle)"}
-    uc = float(ctl["undercut_override"]) if ctl.get("undercut_override") is not None else UNDERCUT
+    uc = (float(ctl["undercut_override"]) if ctl.get("undercut_override") is not None
+          else float(CONFIG.get("undercut") or UNDERCUT))
     pma = float(ctl["pma"]) if ctl.get("pma") is not None else None
     custo = rec.custo_de(sku)
     if custo is None or not p0:
@@ -310,6 +339,7 @@ def analisar(item_id, access, sid):
 
     base = {"item_id": item_id, "titulo": it.get("title"), "sku": sku, "aq": raw_aq,
             "grupo": grupo, "piso": piso, "piso_orig": piso_orig, "preco_cheio": round(p0, 2),
+            "preco_venda": round(pv, 2), "promo": promo_ativa,
             "margem_cheio": round(m_cheio, 1), "preco_piso": pmin, "pma": pma, "catalog": catalog_listing}
 
     if not catalog_listing:
@@ -342,9 +372,9 @@ def analisar(item_id, access, sid):
             return base
         menor = precos[0]
         base.update({"origem": origem, "n_conc": len(precos), "conc_min": round(menor, 2)})
-        if menor > p0 + EPS:
+        if menor > pv + EPS:
             base.update({"acao": "ja_competitivo",
-                         "detalhe": f"[{origem}] já é o mais barato: seu R${p0:.2f} < menor conc. "
+                         "detalhe": f"[{origem}] já é o mais barato: seu R${pv:.2f} < menor conc. "
                                     f"R${menor:.2f} ({len(precos)} conc)"})
         elif pmin is None:
             base.update({"acao": "nao_perseguir_ean",
@@ -382,11 +412,11 @@ def analisar(item_id, access, sid):
         precos = concorrentes(pid, sid, access)
         segundo = precos[0] if precos else None
         base["segundo"] = segundo
-        if segundo and (segundo - uc) > p0 + EPS:
+        if segundo and (segundo - uc) > pv + EPS:
             alvo_subir = round(segundo - uc, 2)
             m_seg, _, _ = margem_no_preco(alvo_subir, cat, ltid, frete, custo, access)
             base.update({"acao": "subir_margem", "alvo_subir": alvo_subir,
-                         "detalhe": f"ganhando; 2º lugar R${segundo:.2f} > seu R${p0:.2f} "
+                         "detalhe": f"ganhando; 2º lugar R${segundo:.2f} > seu R${pv:.2f} "
                                     f"-> pode subir até R${alvo_subir:.2f} (R${uc:.0f} abaixo do 2º, "
                                     f"margem {m_seg:.1f}%)"})
         else:
@@ -423,6 +453,8 @@ def main():
     print(">>> SONDA v7 (mapa por SKU + anti-bundle) <<<", flush=True)
     rec.preload()
     carregar_match()
+    carregar_controle()
+    carregar_config()
     print(f"mapa de match carregado: {len(MATCH)} itens", flush=True)
     # autentica TODAS as contas: guarda os seller_ids (p/ não competir consigo) e pega o access da escolhida
     access = sid = None
