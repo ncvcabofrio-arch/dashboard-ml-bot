@@ -83,7 +83,11 @@ jobs:
           SUPABASE_URL:     ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY:     ${{ secrets.SUPABASE_KEY }}
           SELLER_ID:        ${{ github.event.inputs.seller_id || '3244206480' }}
+          CONFIRMA:         ${{ github.event.inputs.confirma || 'NAO' }}   # define modo live/simulação no aviso
           WEBHOOK_URL:      ${{ secrets.WEBHOOK_URL }}   # URL /exec do Apps Script (a ponte)
+          EMAIL_RELATORIO:  'ncvcabofrio@gmail.com'      # p/ quem chega o aviso de hora em hora
+          NOME_CONTA:       'Cabo Frio'                  # rótulo amigável nos avisos
+          BASE_MARGEM:      '14,3'                        # margem-base (antes do robô) p/ comparar
           RELATORIO_JANELA_MIN:  '90'    # "esta passada" = mudanças aplicadas nos últimos 90 min
           RELATORIO_MARGEM_DIAS: '20'    # painel de margem: últimos 20 dias
         run: python repricer_relatorio.py
