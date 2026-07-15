@@ -218,6 +218,20 @@ def remover_desconto(item_id, access):
                f"/seller-promotions/items/{item_id}?promotion_type=PRICE_DISCOUNT&app_version=v2", access)
 
 
+def entrar_campanha(item_id, o, access):
+    """Entra numa campanha cofinanciada do ML (candidata). Corpo: tipo + promotion_id + offer_id."""
+    body = {"promotion_type": o.get("type"), "promotion_id": o.get("id")}
+    if o.get("ref_id"):
+        body["offer_id"] = o["ref_id"]
+    st, resp = req("POST", f"/seller-promotions/items/{item_id}?app_version=v2", access, body=body)
+    if st == 400 and "START_DATE" in str(resp):        # algumas pedem a janela de datas
+        for k in ("start_date", "finish_date"):
+            if o.get(k):
+                body[k] = o[k]
+        st, resp = req("POST", f"/seller-promotions/items/{item_id}?app_version=v2", access, body=body)
+    return st, resp
+
+
 def main():
     if not ATIVO:
         print("⛔ ATIVO=NAO (botão de pânico) — nada será escrito. Saindo.", flush=True)
@@ -306,22 +320,52 @@ def main():
             row = {**base_log(sid, a), "acao": acao, "deal_price": alvo, "desconto_pct": round(desc, 1)}
             cofin = a.get("cofin")                        # melhor campanha do ML por margem, ou None
             ma = a["margem_alvo"] if a.get("margem_alvo") is not None else -999
-            ganha_campanha = bool(cofin and cofin["margem"] > ma + 0.01)
+            # REGRA "só se continuar competitivo": campanha entra se paga MAIS margem E preço <= alvo
+            usar_campanha = bool(cofin and cofin["pb"] <= alvo + 0.01 and cofin["margem"] > ma + 0.01)
             camp_txt = ""
             if cofin:
                 _nome = cofin["o"].get("name") or cofin["o"].get("type")
-                camp_txt = (f"  |  🎁 campanha \"{_nome}\" R${cofin['pb']:.2f} margem {cofin['margem']:.1f}%"
-                            f" -> {'CAMPANHA vence' if ganha_campanha else 'desconto próprio vence'}")
-                if ganha_campanha:
-                    cont["campanha"] += 1
-                    logar({**row, "acao": "recomenda_campanha", "aplicado": False, "modo": "insight",
-                           "deal_price": cofin["pb"], "margem_alvo": cofin["margem"],
-                           "motivo": f"campanha {_nome} paga margem {cofin['margem']:.1f}% > desconto {ma:.1f}%"})
+                _tag = ("USA CAMPANHA (competitiva e paga mais)" if usar_campanha
+                        else ("paga mais margem MAS fica acima do alvo -> usa desconto"
+                              if cofin["margem"] > ma + 0.01 else "desconto próprio vence"))
+                camp_txt = f"  |  🎁 \"{_nome}\" R${cofin['pb']:.2f} margem {cofin['margem']:.1f}% -> {_tag}"
+
             tem_pd, tem_outra = promo_estado(a)           # do sale_price já lido (sem chamada extra)
+            if tem_outra:                                 # já em campanha/DEAL do ML -> deixa quieto
+                logar({**row, "acao": "pulado_campanha", "aplicado": False, "modo": modo.lower()}); continue
+
+            if usar_campanha:                             # ===== caminho CAMPANHA =====
+                o = cofin["o"]; _nome = o.get("name") or o.get("type")
+                rowc = {**base_log(sid, a), "acao": "entrar_campanha", "deal_price": cofin["pb"],
+                        "margem_alvo": cofin["margem"], "motivo": f"campanha {_nome}"}
+                dentro = (MAX_ALTERACOES <= 0) or (criados < MAX_ALTERACOES)
+                cont["campanha"] += 1
+                if not CONFIRMA:
+                    marca = "" if dentro else f" (FILA, além do teto {MAX_ALTERACOES})"
+                    print(f"🎁 USA CAMPANHA{marca} {iid} {tit}: {_nome} R${cofin['pb']:.2f} "
+                          f"margem {cofin['margem']:.1f}% (vs desconto {ma:.1f}%)", flush=True)
+                    logar({**rowc, "acao": "entrar_campanha" if dentro else "fila_teto", "aplicado": False, "modo": "simulacao"})
+                    if dentro:
+                        criados += 1; cont["criado"] += 1
+                    else:
+                        cont["fila"] += 1
+                    continue
+                if not dentro:
+                    logar({**rowc, "acao": "fila_teto", "aplicado": False, "modo": "live"}); cont["fila"] += 1; continue
+                if tem_pd:                                # trocar: sai do nosso desconto antes de entrar
+                    remover_desconto(iid, access); time.sleep(0.3)
+                st, resp = entrar_campanha(iid, o, access)
+                ok = 200 <= st < 300
+                print(f"{'✅' if ok else '⛔'} CAMPANHA {iid} {tit}: {_nome} R${cofin['pb']:.2f} HTTP {st}", flush=True)
+                logar({**rowc, "aplicado": ok, "modo": "live", "http_status": st})
+                if ok:
+                    criados += 1; cont["criado"] += 1
+                time.sleep(0.4)
+                continue
+
+            # ===== caminho DESCONTO PRÓPRIO =====
             if tem_pd:
                 continue                                  # já descontado por nós; ajuste fino fica pra depois
-            if tem_outra:                                 # DEAL/campanha do ML -> deixa quieto (não empilha)
-                logar({**row, "acao": "pulado_campanha", "aplicado": False, "modo": modo.lower()}); continue
             if desc > MAX_DROP_PCT:
                 print(f"⏭️  SALTO {iid} {tit} -> R${alvo:.2f} ({desc:.1f}% off > {MAX_DROP_PCT:.0f}%, "
                       f"margem {a.get('margem_alvo')}%) — segurado p/ revisão", flush=True)
