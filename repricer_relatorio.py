@@ -117,8 +117,12 @@ def margem_diaria(sid, dias):
     return linhas
 
 
+WRITE_ACOES = {"descontar", "descontar_ean", "descontar_piso", "entrar_campanha", "remover_desconto"}
+
+
 def mudancas_da_passada(sid, janela_min):
-    """O que o robô REALMENTE aplicou nos últimos `janela_min` minutos (aplicado=true)."""
+    """Toda TENTATIVA de escrita nos últimos `janela_min` min — sucesso E falha.
+    Retorna (linhas, n_ok, n_erro). Assim dá pra ver se o proposto foi mesmo feito."""
     corte = (datetime.now(timezone.utc) - timedelta(minutes=janela_min)).isoformat()
     try:
         rows = (rec.sb.table("repricer_log").select("*")
@@ -126,26 +130,32 @@ def mudancas_da_passada(sid, janela_min):
                 .order("ts", desc=False).execute().data) or []
     except Exception as e:
         print(f"(aviso: não li repricer_log: {e})", flush=True)
-        return []
-    feitas = []
+        return [], 0, 0
+    linhas, n_ok, n_erro = [], 0, 0
     for r in rows:
-        if not r.get("aplicado"):
+        if r.get("acao") not in WRITE_ACOES:      # pula insight/pulado/fila (não tentou escrever)
             continue
-        feitas.append([str(r.get("ts"))[:19], r.get("item_id"), (r.get("titulo") or "")[:40],
+        ok = bool(r.get("aplicado"))
+        n_ok += int(ok)
+        n_erro += int(not ok)
+        linhas.append([str(r.get("ts"))[:19], r.get("item_id"), (r.get("titulo") or "")[:40],
                        r.get("acao"), r.get("deal_price"), r.get("margem_alvo"),
-                       r.get("motivo"), r.get("http_status")])
-    return feitas
+                       r.get("motivo"), r.get("http_status"), "ok" if ok else "ERRO"])
+    return linhas, n_ok, n_erro
 
 
-def nota_curta(hora, feitas, m_hoje):
+def nota_curta(hora, linhas, n_ok, n_erro, m_hoje):
     """A mensagenzinha comentada de cada passada (o Apps Script manda por email)."""
-    if feitas:
+    if linhas:
         det = "; ".join(
-            f"{(f[2] or '')[:22]} {f[3]}" + (f" R${f[4]}" if f[4] not in (None, "") else "")
-            for f in feitas[:6])
-        if len(feitas) > 6:
-            det += f" (+{len(feitas) - 6})"
-        txt = f"🤖 {hora} {NOME_CONTA}: mexi em {len(feitas)} item(ns) — {det}."
+            f"{(x[2] or x[1] or '')[:22]} {x[3]}" + (" ❌" if x[8] == "ERRO" else "")
+            for x in linhas[:6])
+        if len(linhas) > 6:
+            det += f" (+{len(linhas) - 6})"
+        txt = f"🤖 {hora} {NOME_CONTA}: aplicou {n_ok} mudança(s)"
+        if n_erro:
+            txt += f" — ⚠️ {n_erro} FALHOU/FALHARAM"
+        txt += f" — {det}."
     else:
         txt = f"🤖 {hora} {NOME_CONTA}: sem mudanças nesta passada."
     if m_hoje and m_hoje[6] is not None:
@@ -157,24 +167,24 @@ def nota_curta(hora, feitas, m_hoje):
 def main():
     agora = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M")
     hora = datetime.now(timezone.utc).astimezone().strftime("%Hh")
-    feitas = mudancas_da_passada(SELLER_ID, JANELA_MIN)
-    _post({"aba": "Mudancas", "quando": agora, "conta": SELLER_ID, "rows": feitas})
+    linhas, n_ok, n_erro = mudancas_da_passada(SELLER_ID, JANELA_MIN)
+    _post({"aba": "Mudancas", "quando": agora, "conta": SELLER_ID, "rows": linhas})
 
-    linhas = margem_diaria(SELLER_ID, MARGEM_DIAS)
-    _post({"aba": "MargemDiaria", "quando": agora, "conta": SELLER_ID, "rows": linhas})
+    dias = margem_diaria(SELLER_ID, MARGEM_DIAS)
+    _post({"aba": "MargemDiaria", "quando": agora, "conta": SELLER_ID, "rows": dias})
 
     hoje = date.today().isoformat()
-    m_hoje = next((l for l in linhas if l[0] == hoje), None)
-    nota = nota_curta(hora, feitas, m_hoje)
-    # o Apps Script grava a linha E manda o PULSO por email SÓ quando NÃO houve mudança.
-    # Passada com mudança fica pro comentário narrado (tarefa da Claude de hora em hora),
-    # pra não chegar email em dobro.
+    m_hoje = next((l for l in dias if l[0] == hoje), None)
+    nota = nota_curta(hora, linhas, n_ok, n_erro, m_hoje)
+    # o Apps Script grava a linha E manda o PULSO por email SÓ quando NÃO houve nenhuma
+    # tentativa de mudança. Passada com mudança (ou falha!) fica pro comentário narrado
+    # da Claude de hora em hora, pra não chegar email em dobro e pra ela sinalizar falhas.
     _post({"aba": "Passadas", "quando": agora, "conta": SELLER_ID,
-           "nota": nota, "para": EMAIL_RELATORIO, "tem_mudanca": len(feitas) > 0,
+           "nota": nota, "para": EMAIL_RELATORIO, "tem_mudanca": len(linhas) > 0,
            "modo": MODO,   # Apps Script só manda o pulso por email em modo 'live'
            "assunto": f"Repricer {hora} — {NOME_CONTA}",
-           "rows": [[agora, SELLER_ID, len(feitas), nota]]})
-    print(f"Relatório: {len(feitas)} mudança(s), {len(linhas)} dia(s) de margem. {nota}", flush=True)
+           "rows": [[agora, SELLER_ID, f"{n_ok} ok / {n_erro} erro", nota]]})
+    print(f"Relatório: {n_ok} ok, {n_erro} erro, {len(dias)} dia(s) de margem. {nota}", flush=True)
 
 
 if __name__ == "__main__":
