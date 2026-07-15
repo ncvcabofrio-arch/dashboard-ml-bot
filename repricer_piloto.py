@@ -401,6 +401,19 @@ def main():
             tem_pd, _ = promo_estado(a)               # do sale_price já lido
             if not tem_pd:
                 continue
+            # ANTI-GANGORRA: só remove se a gente continuaria GANHANDO no preço CHEIO.
+            # Se só ganha por causa do desconto (concorrente <= preço cheio), remover faria
+            # o preço subir e perder -> mantém o desconto (senão vira cria/remove toda hora).
+            p0 = a.get("preco_cheio")
+            conc = a.get("conc_min") or a.get("segundo")
+            if p0 and conc and conc <= p0 + 0.01:
+                pv = a.get("preco_venda")
+                print(f"🔒 MANTÉM desconto {iid} {tit}: ganha a R${pv} mas no cheio R${p0:.2f} "
+                      f"perderia p/ conc R${conc:.2f} (anti-gangorra)", flush=True)
+                logar({**base_log(sid, a), "acao": "manter_desconto", "aplicado": False,
+                       "modo": modo.lower(), "motivo": f"anti-gangorra ({remover_motivo})"})
+                cont["mantido"] = cont.get("mantido", 0) + 1
+                continue
             row = {**base_log(sid, a), "acao": "remover_desconto", "motivo": remover_motivo}
             if not CONFIRMA:
                 print(f"• SIMULA remove desconto {iid} {tit} ({remover_motivo})", flush=True)
@@ -419,8 +432,8 @@ def main():
     resumo = (f"Piloto {modo} · conta {sid}: {cont['criado']} desconto(s) "
               f"{'criados' if CONFIRMA else 'a criar'}"
               + (f" (+{cont['fila']} na fila além do teto)" if cont['fila'] else "")
-              + f", {cont['removido']} remoção(ões), {cont['vende']} segurados por venda, "
-              f"{cont['barato']} barato-demais"
+              + f", {cont['removido']} remoção(ões), {cont.get('mantido', 0)} desconto(s) mantido(s) "
+              f"(anti-gangorra), {cont['vende']} segurados por venda, {cont['barato']} barato-demais"
               + (f", 🎁 {cont['campanha']} onde campanha do ML paga mais margem" if cont['campanha'] else "")
               + ".")
     print(f"\n=== {resumo} ===", flush=True)
