@@ -1,4 +1,4 @@
-name: Repricer - PILOTO
+  name: Repricer - PILOTO
 
 # Roda o repricer completo numa conta (padrão MG), com trilhos de segurança.
 # As REGRAS vêm do painel (repricer_config); inputs abaixo só pra override por rodada.
@@ -66,8 +66,8 @@ jobs:
           TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           # Agendado (inputs vazios) = SIMULAÇÃO. Só vira ao vivo via workflow_dispatch confirma=SIM.
-          SELLER_ID:       ${{ github.event.inputs.seller_id || '3244206480' }}
-          CONFIRMA:        ${{ github.event.inputs.confirma || 'NAO' }}
+          SELLER_ID:       ${{ github.event.inputs.seller_id || '471489691' }}
+          CONFIRMA:        ${{ github.event.inputs.confirma || 'SIM' }}
           ATIVO:           ${{ github.event.inputs.ativo || 'SIM' }}
           # regras: vazio -> usa o painel (repricer_config). Preencha só pra forçar nesta rodada.
           MAX_ALTERACOES:  ${{ github.event.inputs.max_alteracoes }}
@@ -82,8 +82,8 @@ jobs:
           ML_REFRESH_TOKEN: ${{ secrets.ML_REFRESH_TOKEN }}
           SUPABASE_URL:     ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY:     ${{ secrets.SUPABASE_KEY }}
-          SELLER_ID:        ${{ github.event.inputs.seller_id || '3244206480' }}
-          CONFIRMA:         ${{ github.event.inputs.confirma || 'NAO' }}   # define modo live/simulação no aviso
+          SELLER_ID:        ${{ github.event.inputs.seller_id || '471489691' }}
+          CONFIRMA:         ${{ github.event.inputs.confirma || 'SIM' }}   # define modo live/simulação no aviso
           WEBHOOK_URL:      ${{ secrets.WEBHOOK_URL }}   # URL /exec do Apps Script (a ponte)
           EMAIL_RELATORIO:  'ncvcabofrio@gmail.com'      # p/ quem chega o aviso de hora em hora
           NOME_CONTA:       'Cabo Frio'                  # rótulo amigável nos avisos
