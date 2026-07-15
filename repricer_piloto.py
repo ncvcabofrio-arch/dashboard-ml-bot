@@ -58,7 +58,7 @@ ATIVO = (os.environ.get("ATIVO") or "SIM").strip().upper() == "SIM"  # botão de
 
 ACOES_DESCONTO = {"descontar", "descontar_ean", "descontar_piso"}
 REMOVER_OK = {"subir_margem", "ja_competitivo", "manter_ganhando"}   # confiante que não precisa desconto
-_CANCEL = ("cancel", "estorn", "refund", "devolv")                   # status que NÃO conta como venda
+_CANCEL = ("cancel",)   # só cancelada NÃO conta como venda (paid e partially_refunded contam)
 
 
 def telegram(msg):
