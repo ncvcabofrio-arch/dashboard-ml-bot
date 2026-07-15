@@ -78,11 +78,12 @@ def resolver_config():
             v = C.get(chave)
         return _num(v, tipo, padrao) if v not in (None, "") else padrao
 
-    MAX_ALTERACOES = r("MAX_ALTERACOES", "teto_alteracoes", 0, int)
-    MAX_DROP_PCT = r("MAX_DROP_PCT", "anti_salto_pct", 35.0, float)
+    # com limites sãos: um valor torto (ex.: conta no campo errado) é ignorado, não quebra
+    MAX_ALTERACOES = max(0, r("MAX_ALTERACOES", "teto_alteracoes", 0, int))
+    MAX_DROP_PCT = max(0.0, min(r("MAX_DROP_PCT", "anti_salto_pct", 35.0, float), 100.0))
     DIAS = max(1, min(r("DIAS", "dias", 14, int), 14))
-    VENDAS_DIAS = r("VENDAS_DIAS", "vendas_dias", 5, int)
-    VENDAS_MIN = r("VENDAS_MIN", "vendas_min", 1, int)
+    VENDAS_DIAS = max(1, min(r("VENDAS_DIAS", "vendas_dias", 5, int), 365))
+    VENDAS_MIN = max(0, r("VENDAS_MIN", "vendas_min", 1, int))
 
 ACOES_DESCONTO = {"descontar", "descontar_ean", "descontar_piso"}
 REMOVER_OK = {"subir_margem", "ja_competitivo", "manter_ganhando"}   # confiante que não precisa desconto
