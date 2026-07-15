@@ -19,14 +19,23 @@ import requests
 import repricer_sugestoes as rec
 
 WEBHOOK_URL = (os.environ.get("WEBHOOK_URL") or "").strip()
-SELLER_ID = (os.environ.get("SELLER_ID") or "3244206480").strip()
+SELLER_ID = (os.environ.get("SELLER_ID") or "471489691").strip()
 JANELA_MIN = int(os.environ.get("RELATORIO_JANELA_MIN", "15"))      # só ESTA passada (piloto+relatório <5 min)
 MARGEM_DIAS = int(os.environ.get("RELATORIO_MARGEM_DIAS", "20"))    # janela do painel de margem
 EMAIL_RELATORIO = (os.environ.get("EMAIL_RELATORIO") or "").strip()  # p/ quem o Apps Script manda o aviso
-BASE_MARGEM = (os.environ.get("BASE_MARGEM") or "").strip()          # margem-base p/ comparar (ex "14,3")
-NOME_CONTA = (os.environ.get("NOME_CONTA") or "").strip() or f"conta {SELLER_ID}"
+# nome + margem-base POR CONTA (assim o rótulo do e-mail segue a conta que rodou, não fica fixo).
+# Preencha a base de cada conta quando souber; vazio = não mostra comparação de base no relatório.
+CONTAS = {
+    "471489691": ("Cabo Frio", "14,3"),
+    "3244206480": ("MG", ""),
+    "177795203": ("CF", ""),
+}
+_c = CONTAS.get(SELLER_ID)
+NOME_CONTA  = (_c[0] if _c else (os.environ.get("NOME_CONTA") or "").strip()) or f"conta {SELLER_ID}"
+BASE_MARGEM = (_c[1] if _c else (os.environ.get("BASE_MARGEM") or "").strip())
 MODO = "live" if (os.environ.get("CONFIRMA") or "").strip().upper() == "SIM" else "simulacao"
 BR = timezone(timedelta(hours=-3))   # horário de Brasília (o Brasil não usa mais horário de verão)
+RESUMO_HORA = int(os.environ.get("RESUMO_HORA", "8"))   # hora (BRT) em que sai o resumo do dia
 _CANCEL = ("cancel",)   # só cancelada não conta
 
 
@@ -241,6 +250,82 @@ def montar_email(hora, linhas, n_ok, n_erro, n_mantido, m_hoje):
     return "".join(P)
 
 
+def dados_do_dia(sid):
+    """Agrega o que o robô fez nas últimas 24h (via repricer_log) para o resumo do dia."""
+    dd = {"criados": 0, "removidos": 0, "campanhas": 0, "falhas": 0, "barato": []}
+    corte = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+    def base():
+        return (rec.sb.table("repricer_log").select("id", count="exact")
+                .eq("seller_id", str(sid)).gte("ts", corte))
+    try:
+        dd["criados"]   = base().in_("acao", ["descontar", "descontar_ean", "descontar_piso"]).eq("aplicado", True).execute().count or 0
+        dd["removidos"] = base().eq("acao", "remover_desconto").eq("aplicado", True).execute().count or 0
+        dd["campanhas"] = base().eq("acao", "entrar_campanha").eq("aplicado", True).execute().count or 0
+        dd["falhas"]    = base().in_("acao", list(WRITE_ACOES)).eq("aplicado", False).not_.is_("http_status", "null").execute().count or 0
+    except Exception as e:
+        print(f"(resumo: falha ao contar ações: {e})", flush=True)
+    # "barato demais": itens distintos marcados subir_margem nas últimas ~3h (foto do estado atual)
+    try:
+        corte2 = (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat()
+        rows = (rec.sb.table("repricer_log").select("item_id,titulo")
+                .eq("seller_id", str(sid)).eq("acao", "subir_margem")
+                .gte("ts", corte2).limit(1000).execute().data) or []
+        vistos = {}
+        for r in rows:
+            k = r.get("item_id")
+            if k and k not in vistos:
+                vistos[k] = (r.get("titulo") or "")[:40]
+        dd["barato"] = list(vistos.values())
+    except Exception as e:
+        print(f"(resumo: falha no barato-demais: {e})", flush=True)
+    return dd
+
+
+def montar_resumo_diario(dias, dd, hora):
+    """Resumo do dia em HTML: margem de ontem vs base, tendência, o que o robô fez, atenção."""
+    hoje = datetime.now(BR).date().isoformat()
+    passados = [d for d in dias if d[0] < hoje]          # exclui hoje (dia parcial)
+    ontem = passados[-1] if passados else (dias[-1] if dias else None)
+    ult5 = passados[-5:]
+    P = ['<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#222;'
+         'line-height:1.5;max-width:600px">']
+    P.append(f'<div style="font-size:12px;color:#8a8a8a;text-transform:uppercase;'
+             f'letter-spacing:.6px">Resumo do dia &middot; {_esc(NOME_CONTA)} &middot; {hora}</div>')
+    if ontem and ontem[6] is not None:
+        seta, cor = "", "#333"
+        try:
+            if BASE_MARGEM:
+                acima = float(ontem[6]) >= float(BASE_MARGEM.replace(",", "."))
+                seta = " &#9650;" if acima else " &#9660;"
+                cor = "#16a34a" if acima else "#dc2626"
+        except (TypeError, ValueError):
+            pass
+        base = f' <span style="font-size:13px;color:#8a8a8a;font-weight:400">(base {BASE_MARGEM}%)</span>' if BASE_MARGEM else ""
+        P.append(f'<div style="font-size:22px;font-weight:700;margin:8px 0 2px">'
+                 f'<span style="color:{cor}">Margem de ontem: {_pct(ontem[6])}{seta}</span>{base}</div>')
+        P.append(f'<div style="color:#666;font-size:13px;margin-bottom:16px">'
+                 f'{ontem[1]} pedido(s) &middot; {_rs(ontem[5])} de margem &middot; receita {_rs(ontem[3])}</div>')
+    else:
+        P.append('<div style="font-size:16px;margin:8px 0 16px;color:#666">'
+                 'Ainda sem margem consolidada de ontem.</div>')
+    seq = " &rarr; ".join(_pct(d[6]) for d in ult5 if d[6] is not None)
+    if seq:
+        P.append(f'<div style="margin:0 0 16px"><b>Últimos dias:</b> {seq}</div>')
+    P.append('<div style="font-weight:700;margin:0 0 6px">O que o robô fez (24h)</div>')
+    falha_txt = (f' &middot; <span style="color:#dc2626">{dd["falhas"]} falha(s)</span>' if dd.get("falhas") else "")
+    P.append(f'<div style="margin-bottom:16px">Criou <b>{dd.get("criados",0)}</b> desconto(s) &middot; '
+             f'removeu <b>{dd.get("removidos",0)}</b> &middot; entrou em <b>{dd.get("campanhas",0)}</b> campanha(s){falha_txt}</div>')
+    bd = dd.get("barato", [])
+    if bd:
+        itens = "".join(f'<div style="color:#555;font-size:13px">&bull; {_esc(t)}</div>' for t in bd[:5])
+        mais = f'<div style="color:#999;font-size:12px">+ {len(bd)-5} outros</div>' if len(bd) > 5 else ""
+        P.append(f'<div style="border-left:3px solid #f59e0b;padding:2px 0 2px 11px;margin-bottom:8px">'
+                 f'<b>&#128176; Barato demais ({len(bd)}):</b> ganhando com folga — dá pra subir o preço na mão.'
+                 f'{itens}{mais}</div>')
+    P.append('</div>')
+    return "".join(P)
+
+
 def main():
     agora = datetime.now(BR).strftime("%Y-%m-%d %H:%M")
     hora = datetime.now(BR).strftime("%Hh")
@@ -263,6 +348,21 @@ def main():
            "assunto": assunto,
            "rows": [[agora, SELLER_ID, f"{n_ok} ok / {n_erro} erro / {n_mantido} mantido", assunto]]})
     print(f"Relatório: {n_ok} ok, {n_erro} erro, {n_mantido} mantido, {len(dias)} dia(s). {assunto}", flush=True)
+
+    # RESUMO DO DIA: sai só na rodada das RESUMO_HORA (08h BRT por padrão), ao vivo.
+    # Vai pelo MESMO webhook (email confiável, sem conector/aprovação).
+    try:
+        if MODO == "live" and datetime.now(BR).hour == RESUMO_HORA:
+            dd = dados_do_dia(SELLER_ID)
+            corpo_dia = montar_resumo_diario(dias, dd, hora)
+            _post({"aba": "Passadas", "quando": agora, "conta": SELLER_ID,
+                   "nota": corpo_dia, "para": EMAIL_RELATORIO, "modo": MODO,
+                   "assunto": f"Repricer {NOME_CONTA} — resumo do dia",
+                   "rows": [[agora, SELLER_ID, "resumo-do-dia",
+                             f"criou {dd['criados']} / removeu {dd['removidos']} / barato-demais {len(dd['barato'])}"]]})
+            print("Resumo do dia enviado.", flush=True)
+    except Exception as e:
+        print(f"(resumo do dia falhou, não derruba a rodada: {e})", flush=True)
 
 
 if __name__ == "__main__":
