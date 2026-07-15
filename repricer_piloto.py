@@ -224,6 +224,13 @@ def main():
         telegram("⛔ Piloto: botão de pânico ligado. Nada foi feito.")
         return
 
+    faltando = [fn for fn in ("carregar_match", "carregar_controle", "carregar_config",
+                              "analisar", "sale_price", "UNDERCUT") if not hasattr(sonda, fn)]
+    if faltando:
+        print(f"⛔ repricer_competitivo.py DESATUALIZADO no repo (falta: {', '.join(faltando)}).", flush=True)
+        print("   Suba a versão mais nova do repricer_competitivo.py JUNTO com este piloto.", flush=True)
+        return
+
     rec.preload()
     sonda.carregar_match()
     sonda.carregar_controle()
