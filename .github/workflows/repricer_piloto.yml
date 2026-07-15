@@ -88,6 +88,6 @@ jobs:
           EMAIL_RELATORIO:  'ncvcabofrio@gmail.com'      # p/ quem chega o aviso de hora em hora
           NOME_CONTA:       'Cabo Frio'                  # rótulo amigável nos avisos
           BASE_MARGEM:      '14,3'                        # margem-base (antes do robô) p/ comparar
-          RELATORIO_JANELA_MIN:  '65'    # "esta passada" = mudanças AO VIVO na última ~1h (evita pegar a rodada anterior)
+          RELATORIO_JANELA_MIN:  '15'    # só ESTA passada: piloto+relatório terminam em <5 min, então 15 min isola a rodada atual
           RELATORIO_MARGEM_DIAS: '20'    # painel de margem: últimos 20 dias
         run: python repricer_relatorio.py
