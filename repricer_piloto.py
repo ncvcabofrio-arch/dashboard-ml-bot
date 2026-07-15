@@ -47,14 +47,40 @@ def promos_do_item(item_id, access):
     return d if isinstance(d, list) else []
 
 SELLER_ID = (os.environ.get("SELLER_ID") or "3244206480").strip()   # MG por padrão
-MAX_ALTERACOES = int(os.environ.get("MAX_ALTERACOES", "3"))          # teto de CRIAÇÕES por rodada
-MAX_DROP_PCT = float(os.environ.get("MAX_DROP_PCT", "20"))
-DIAS = max(1, min(int(os.environ.get("DIAS", "14")), 14))            # duração do desconto (rede de segurança)
-VENDAS_DIAS = int(os.environ.get("VENDAS_DIAS", "2"))               # janela do gate de vendas
-VENDAS_MIN = int(os.environ.get("VENDAS_MIN", "1"))                 # vendeu >= isso -> não desconta
 MAX_ITENS = int(os.environ.get("MAX_ITENS", "0"))                    # 0 = todos
 CONFIRMA = (os.environ.get("CONFIRMA") or "").strip().upper() == "SIM"
 ATIVO = (os.environ.get("ATIVO") or "SIM").strip().upper() == "SIM"  # botão de pânico
+# regras globais — resolvidas em resolver_config() (input do workflow > painel/repricer_config > default)
+MAX_ALTERACOES = 0     # teto de CRIAÇÕES por rodada (0 = sem teto)
+MAX_DROP_PCT = 35.0    # anti-salto (%)
+DIAS = 14              # duração do desconto (rede de segurança, máx 14)
+VENDAS_DIAS = 5        # janela do gate de vendas (dias)
+VENDAS_MIN = 1         # vendeu >= isso no período -> não desconta
+
+
+def _num(v, tipo, padrao):
+    try:
+        return tipo(v)
+    except (TypeError, ValueError):
+        return padrao
+
+
+def resolver_config():
+    """Regras globais: input do workflow (env, por rodada) > painel (repricer_config) > default."""
+    global MAX_ALTERACOES, MAX_DROP_PCT, DIAS, VENDAS_DIAS, VENDAS_MIN
+    C = sonda.CONFIG
+
+    def r(env_name, chave, padrao, tipo):
+        v = os.environ.get(env_name)
+        if v is None or v == "":
+            v = C.get(chave)
+        return _num(v, tipo, padrao) if v not in (None, "") else padrao
+
+    MAX_ALTERACOES = r("MAX_ALTERACOES", "teto_alteracoes", 0, int)
+    MAX_DROP_PCT = r("MAX_DROP_PCT", "anti_salto_pct", 35.0, float)
+    DIAS = max(1, min(r("DIAS", "dias", 14, int), 14))
+    VENDAS_DIAS = r("VENDAS_DIAS", "vendas_dias", 5, int)
+    VENDAS_MIN = r("VENDAS_MIN", "vendas_min", 1, int)
 
 ACOES_DESCONTO = {"descontar", "descontar_ean", "descontar_piso"}
 REMOVER_OK = {"subir_margem", "ja_competitivo", "manter_ganhando"}   # confiante que não precisa desconto
@@ -132,16 +158,16 @@ def unidades(a, por_item, por_sku):
 
 
 def estado_promo(item_id, access):
-    """(tem_pd, tem_deal): tem PRICE_DISCOUNT nosso ativo? está num DEAL?"""
-    tem_pd = tem_deal = False
+    """(tem_pd, tem_outra): tem PRICE_DISCOUNT NOSSO ativo? tem OUTRA promoção ativa
+    (DEAL ou campanha cofinanciada do ML)? Só mexemos no nosso PRICE_DISCOUNT."""
+    tem_pd = tem_outra = False
     for o in promos_do_item(item_id, access):
         if isinstance(o, dict) and eh_ativa(o):
-            t = (o.get("type") or "")
-            if t == "PRICE_DISCOUNT":
+            if (o.get("type") or "") == "PRICE_DISCOUNT":
                 tem_pd = True
-            elif t == "DEAL":
-                tem_deal = True
-    return tem_pd, tem_deal
+            else:
+                tem_outra = True
+    return tem_pd, tem_outra
 
 
 def criar_desconto(item_id, deal_price, access):
@@ -165,6 +191,8 @@ def main():
     rec.preload()
     sonda.carregar_match()
     sonda.carregar_controle()
+    sonda.carregar_config()
+    resolver_config()          # aplica as regras do painel (repricer_config)
 
     access = sid = None
     for seller_id, refresh in rec.contas():
@@ -177,9 +205,10 @@ def main():
         return
 
     modo = "AO VIVO" if CONFIRMA else "SIMULAÇÃO"
-    print(f"===== PILOTO | conta {sid} | {modo} | teto {MAX_ALTERACOES} criações/rodada | "
-          f"anti-salto {MAX_DROP_PCT:.0f}% | gate vendas {VENDAS_MIN}u/{VENDAS_DIAS}d | "
-          f"UNDERCUT R${sonda.UNDERCUT:.0f} =====", flush=True)
+    teto_txt = "sem teto" if MAX_ALTERACOES <= 0 else f"teto {MAX_ALTERACOES}/rodada"
+    uc_txt = sonda.CONFIG.get("undercut") or sonda.UNDERCUT
+    print(f"===== PILOTO | conta {sid} | {modo} | {teto_txt} | anti-salto {MAX_DROP_PCT:.0f}% | "
+          f"gate vendas {VENDAS_MIN}u/{VENDAS_DIAS}d | UNDERCUT R${float(uc_txt):.0f} =====", flush=True)
 
     todos, _ = rec.todos_ativos(sid, access)
     if MAX_ITENS:
@@ -229,18 +258,18 @@ def main():
                 continue
             desc = (1 - alvo / p0) * 100
             row = {**base_log(sid, a), "acao": acao, "deal_price": alvo, "desconto_pct": round(desc, 1)}
-            tem_pd, tem_deal = estado_promo(iid, access)
+            tem_pd, tem_outra = estado_promo(iid, access)
             if tem_pd:
-                continue                                  # já descontado; ajuste fino fica pra depois
-            if tem_deal:
-                logar({**row, "acao": "pulado_deal", "aplicado": False, "modo": modo.lower()}); continue
+                continue                                  # já descontado por nós; ajuste fino fica pra depois
+            if tem_outra:                                 # DEAL/campanha do ML -> deixa quieto (não empilha)
+                logar({**row, "acao": "pulado_campanha", "aplicado": False, "modo": modo.lower()}); continue
             if desc > MAX_DROP_PCT:
                 print(f"⏭️  SALTO {iid} {tit} -> R${alvo:.2f} ({desc:.1f}% off > {MAX_DROP_PCT:.0f}%, "
                       f"margem {a.get('margem_alvo')}%) — segurado p/ revisão", flush=True)
                 logar({**row, "acao": "pulado_salto", "aplicado": False, "modo": modo.lower()}); continue
             if desc < 5:
                 logar({**row, "acao": "pulado_menor5", "aplicado": False, "modo": modo.lower()}); continue
-            dentro = criados < MAX_ALTERACOES
+            dentro = (MAX_ALTERACOES <= 0) or (criados < MAX_ALTERACOES)   # teto 0 = sem teto
             if not CONFIRMA:                        # simulação: mostra TUDO (marca a fila além do teto)
                 marca = "" if dentro else f" (FILA, além do teto {MAX_ALTERACOES})"
                 print(f"• SIMULA cria{marca} {iid} {tit} -> R${alvo:.2f} ({desc:.1f}% off, "
