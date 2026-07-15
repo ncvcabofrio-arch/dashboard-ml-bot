@@ -57,6 +57,18 @@ def estoque_atual_de(sku):
 def pct_br(v):
     """17.58 -> '17,58%'"""
     return f"{v:.2f}".replace(".", ",") + "%"
+def _minutos_desde(iso):
+    """Minutos desde uma data ISO (data_aprovacao/date_created). Retorna um número
+    grande se a data não der pra ler — assim, na dúvida, o aviso NÃO é segurado."""
+    if not iso:
+        return 9999
+    try:
+        t = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+        if t.tzinfo is None:
+            t = t.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - t).total_seconds() / 60
+    except Exception:
+        return 9999
 def margem_do_mes():
     """Margem % acumulada do mês (America/Sao_Paulo), via bot_sql. None se falhar."""
     try:
@@ -85,9 +97,11 @@ def notificar_vendas_novas():
         pedidos[r["order_id"]].append(r)
     margem_mes = margem_do_mes()   # calcula 1x por rodada
     linha_mes = (f"\n📅 Margem do mês: {pct_br(margem_mes)}" if margem_mes is not None else "")
+    notificados = []               # só marca como avisados os que REALMENTE saíram
     if len(pedidos) > 20:
         total = sum((its[0].get("total") or 0) for its in pedidos.values())
         tg_send(f"🛒 <b>{len(pedidos)} vendas novas!</b>\nTotal: R$ {total:,.2f}{linha_mes}")
+        notificados = list(pedidos.keys())
     else:
         for oid, itens in pedidos.items():
             it0 = itens[0]
@@ -100,8 +114,16 @@ def notificar_vendas_novas():
             comissao = sum((x.get("comissao") or 0) for x in itens)
             frete = sum((x.get("frete") or 0) for x in itens)
             tem_custo = all(x.get("custo_unitario") is not None for x in itens)
+            tem_comissao = all(x.get("comissao") is not None for x in itens)
+            # A comissão vem do sale_fee do ML e às vezes ainda não saiu no instante
+            # da venda. Sem ela, a margem sai INFLADA (conta a comissão como zero).
+            # Então: se falta a comissão e o pedido é recente, SEGURA o aviso pra
+            # próxima rodada (a comissão costuma cair em minutos). Passou de 30 min
+            # sem vir? Avisa assim mesmo, mas sem mostrar um número de margem errado.
+            if tem_custo and not tem_comissao and _minutos_desde(it0.get("data_aprovacao")) < 30:
+                continue
             alerta = False
-            if tem_custo and receita > 0:
+            if tem_custo and tem_comissao and receita > 0:
                 custo = sum((x.get("custo_unitario") or 0) * (x.get("quantidade") or 1) for x in itens)
                 margem = receita - custo - comissao - frete
                 pct = margem / receita * 100
@@ -109,8 +131,10 @@ def notificar_vendas_novas():
                 linha_margem = f"💰 Margem da venda: R$ {margem:,.2f} ({pct_br(pct)})"
                 if alerta:
                     linha_margem += " 🚨"
-            else:
+            elif not tem_custo:
                 linha_margem = "💰 Margem da venda: aguardando custo do produto"
+            else:
+                linha_margem = "💰 Margem da venda: aguardando comissão do ML"
             # estoque atual do produto principal
             est = estoque_atual_de(it0.get("sku"))
             linha_estoque = f"\n📦 Estoque atual: {float(est):g}" if est is not None else ""
@@ -119,7 +143,8 @@ def notificar_vendas_novas():
             tg_send(f"{cabecalho}\nConta: {conta}\n"
                     f"Valor: R$ {total:,.2f}\nProduto: {titulo}{extra}\n"
                     f"{linha_margem}{linha_mes}{linha_estoque}")
-    for oid in pedidos:
+            notificados.append(oid)
+    for oid in notificados:
         sb.table("vendas").update({"notificado": True}).eq("order_id", oid).execute()
 # ---------------- Mercado Livre ----------------
 def renovar_token(refresh_token):
