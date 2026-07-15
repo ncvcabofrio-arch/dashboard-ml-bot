@@ -5,7 +5,7 @@ name: Repricer - PILOTO
 # Agendado = SIMULAÇÃO (alimenta o painel sem escrever). Ao vivo = workflow_dispatch com confirma=SIM.
 on:
   schedule:
-    - cron: '0 11,17,23 * * *'   # 3x/dia (8h/14h/20h BRT): por padrão SIMULA e registra no log
+    - cron: '0 * * * *'   # de hora em hora: por padrão SIMULA e registra no log/planilha
   workflow_dispatch:
     inputs:
       confirma:
@@ -74,3 +74,16 @@ jobs:
           MAX_DROP_PCT:    ${{ github.event.inputs.max_drop_pct }}
           VENDAS_DIAS:     ${{ github.event.inputs.vendas_dias }}
         run: python repricer_piloto.py
+      - name: Relatorio (empurra pra planilha)
+        if: always()   # manda o relatório mesmo se o piloto tropeçar
+        env:
+          ML_CLIENT_ID:     ${{ secrets.ML_CLIENT_ID }}
+          ML_CLIENT_SECRET: ${{ secrets.ML_CLIENT_SECRET }}
+          ML_REFRESH_TOKEN: ${{ secrets.ML_REFRESH_TOKEN }}
+          SUPABASE_URL:     ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY:     ${{ secrets.SUPABASE_KEY }}
+          SELLER_ID:        ${{ github.event.inputs.seller_id || '3244206480' }}
+          WEBHOOK_URL:      ${{ secrets.WEBHOOK_URL }}   # URL /exec do Apps Script (a ponte)
+          RELATORIO_JANELA_MIN:  '90'    # "esta passada" = mudanças aplicadas nos últimos 90 min
+          RELATORIO_MARGEM_DIAS: '20'    # painel de margem: últimos 20 dias
+        run: python repricer_relatorio.py
