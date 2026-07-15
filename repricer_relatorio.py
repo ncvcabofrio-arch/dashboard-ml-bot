@@ -20,7 +20,7 @@ import repricer_sugestoes as rec
 
 WEBHOOK_URL = (os.environ.get("WEBHOOK_URL") or "").strip()
 SELLER_ID = (os.environ.get("SELLER_ID") or "3244206480").strip()
-JANELA_MIN = int(os.environ.get("RELATORIO_JANELA_MIN", "90"))      # "esta passada" = últimos X min
+JANELA_MIN = int(os.environ.get("RELATORIO_JANELA_MIN", "65"))      # "esta passada" = últimos X min (só live)
 MARGEM_DIAS = int(os.environ.get("RELATORIO_MARGEM_DIAS", "20"))    # janela do painel de margem
 EMAIL_RELATORIO = (os.environ.get("EMAIL_RELATORIO") or "").strip()  # p/ quem o Apps Script manda o aviso
 BASE_MARGEM = (os.environ.get("BASE_MARGEM") or "").strip()          # margem-base p/ comparar (ex "14,3")
@@ -125,8 +125,9 @@ def mudancas_da_passada(sid, janela_min):
     Retorna (linhas, n_ok, n_erro). Assim dá pra ver se o proposto foi mesmo feito."""
     corte = (datetime.now(timezone.utc) - timedelta(minutes=janela_min)).isoformat()
     try:
+        # SÓ modo=live: simulação (http vazio, aplicado=false) NÃO é falha e não pode entrar aqui.
         rows = (rec.sb.table("repricer_log").select("*")
-                .eq("seller_id", str(sid)).gte("ts", corte)
+                .eq("seller_id", str(sid)).eq("modo", "live").gte("ts", corte)
                 .order("ts", desc=False).execute().data) or []
     except Exception as e:
         print(f"(aviso: não li repricer_log: {e})", flush=True)
