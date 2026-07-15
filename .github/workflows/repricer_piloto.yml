@@ -1,0 +1,65 @@
+name: Repricer - PILOTO (MG)
+
+# Roda o repricer completo SÓ na conta MG, com trilhos de segurança.
+# Agendado = SIMULAÇÃO (alimenta o painel sem escrever). Ao vivo = workflow_dispatch com confirma=SIM.
+on:
+  schedule:
+    - cron: '17 */4 * * *'   # a cada 4h: por padrão SIMULA (não escreve) e registra no log
+  workflow_dispatch:
+    inputs:
+      confirma:
+        description: "Aplicar de verdade? (NAO = simulação)"
+        type: choice
+        required: true
+        default: "NAO"
+        options: ["NAO", "SIM"]
+      ativo:
+        description: "Botão de pânico: NAO = não escreve nada"
+        type: choice
+        required: true
+        default: "SIM"
+        options: ["SIM", "NAO"]
+      max_alteracoes:
+        description: "Teto de descontos por rodada"
+        type: string
+        required: false
+        default: "3"
+      seller_id:
+        description: "Conta (padrão MG). Não mude sem querer."
+        type: string
+        required: false
+        default: "3244206480"
+
+concurrency:
+  group: ml-repricer-piloto
+  cancel-in-progress: false
+
+jobs:
+  piloto:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Instalar dependencias
+        run: pip install requests supabase
+      - name: Rodar piloto
+        env:
+          ML_CLIENT_ID:     ${{ secrets.ML_CLIENT_ID }}
+          ML_CLIENT_SECRET: ${{ secrets.ML_CLIENT_SECRET }}
+          ML_REFRESH_TOKEN: ${{ secrets.ML_REFRESH_TOKEN }}
+          SUPABASE_URL:     ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY:     ${{ secrets.SUPABASE_KEY }}
+          # Telegram (opcional): se seus secrets têm outro nome, ajuste o lado direito.
+          TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # Agendado (inputs vazios) = SIMULAÇÃO na MG. Só vira ao vivo via workflow_dispatch confirma=SIM.
+          SELLER_ID:       ${{ github.event.inputs.seller_id || '3244206480' }}
+          CONFIRMA:        ${{ github.event.inputs.confirma || 'NAO' }}
+          ATIVO:           ${{ github.event.inputs.ativo || 'SIM' }}
+          MAX_ALTERACOES:  ${{ github.event.inputs.max_alteracoes || '3' }}
+          MAX_DROP_PCT:    '20'
+          UNDERCUT:        '5'
+          DIAS:            '14'
+        run: python repricer_piloto.py
