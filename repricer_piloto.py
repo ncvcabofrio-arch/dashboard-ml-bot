@@ -298,12 +298,23 @@ def main():
         quer_desconto = acao in ACOES_DESCONTO
         remover_motivo = None
 
-        if quer_desconto and u >= VENDAS_MIN:            # gate de vendas: gira -> não desconta
+        # "perde no cheio": no preço CHEIO a gente perderia o buy box — concorrente (próprio)
+        # ou price_to_win (catálogo) <= preço cheio. Aqui a venda vem DO desconto, então o gate
+        # de vendas NÃO deve tirar o desconto (senão sobe o preço, perde a caixa e mata a venda).
+        _p0 = a.get("preco_cheio")
+        _conc = a.get("conc_min") or a.get("segundo") or a.get("price_to_win")
+        perde_no_cheio = bool(_p0 and _conc and _conc <= _p0 + 0.01)
+
+        if quer_desconto and u >= VENDAS_MIN and not perde_no_cheio:   # gate de vendas: gira -> não desconta (só se competitivo no cheio)
             quer_desconto = False
             remover_motivo = f"vende {u}u/{VENDAS_DIAS}d"
             cont["vende"] += 1
             print(f"🛒 VENDE {iid} {tit} ({u}u/{VENDAS_DIAS}d) -> não desconta", flush=True)
             logar({**base_log(sid, a), "acao": "vende_nao_mexe", "aplicado": False, "modo": "insight"})
+        elif quer_desconto and u >= VENDAS_MIN and perde_no_cheio:     # vende, mas só por causa do desconto -> mantém
+            print(f"🛒🔒 VENDE {iid} {tit} ({u}u/{VENDAS_DIAS}d) mas perde no cheio -> MANTÉM desconto", flush=True)
+            logar({**base_log(sid, a), "acao": "vende_mantem_desconto", "aplicado": False, "modo": "insight",
+                   "motivo": f"vende {u}u/{VENDAS_DIAS}d; perde no cheio"})
         elif acao in REMOVER_OK:
             remover_motivo = acao
             if acao in ("subir_margem", "ja_competitivo"):
@@ -405,7 +416,7 @@ def main():
             # Se só ganha por causa do desconto (concorrente <= preço cheio), remover faria
             # o preço subir e perder -> mantém o desconto (senão vira cria/remove toda hora).
             p0 = a.get("preco_cheio")
-            conc = a.get("conc_min") or a.get("segundo")
+            conc = a.get("conc_min") or a.get("segundo") or a.get("price_to_win")  # catálogo: price_to_win
             if p0 and conc and conc <= p0 + 0.01:
                 pv = a.get("preco_venda")
                 print(f"🔒 MANTÉM desconto {iid} {tit}: ganha a R${pv} mas no cheio R${p0:.2f} "
