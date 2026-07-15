@@ -58,6 +58,11 @@ MAX_DROP_PCT = 35.0    # anti-salto (%)
 DIAS = 14              # duração do desconto (rede de segurança, máx 14)
 VENDAS_DIAS = 5        # janela do gate de vendas (dias)
 VENDAS_MIN = 1         # vendeu >= isso no período -> não desconta
+# --- subida gradual de margem (recupera preço nos "barato demais", sempre abaixo do concorrente) ---
+SUBIR_ATIVO = True     # liga/desliga a subida gradual
+SUBIR_PASSO_PCT = 8.0  # teto de % que o preço pode subir POR RODADA (gradual)
+SUBIR_MIN_RS = 5.0     # só sobe se o ganho for pelo menos isso (R$), pra não mexer à toa
+SUBIR_EXIGE_VENDA = True  # só sobe o próximo degrau se VENDEU desde a última subida (subiu e não vendeu -> segura)
 
 
 def _num(v, tipo, padrao):
@@ -70,6 +75,7 @@ def _num(v, tipo, padrao):
 def resolver_config():
     """Regras globais: input do workflow (env, por rodada) > painel (repricer_config) > default."""
     global MAX_ALTERACOES, MAX_DROP_PCT, DIAS, VENDAS_DIAS, VENDAS_MIN
+    global SUBIR_ATIVO, SUBIR_PASSO_PCT, SUBIR_MIN_RS, SUBIR_EXIGE_VENDA
     C = sonda.CONFIG
 
     def r(env_name, chave, padrao, tipo):
@@ -84,6 +90,12 @@ def resolver_config():
     DIAS = max(1, min(r("DIAS", "dias", 14, int), 14))
     VENDAS_DIAS = max(1, min(r("VENDAS_DIAS", "vendas_dias", 5, int), 365))
     VENDAS_MIN = max(0, r("VENDAS_MIN", "vendas_min", 1, int))
+    _sa = os.environ.get("SUBIR_ATIVO") or C.get("subir_ativo") or "1"
+    SUBIR_ATIVO = str(_sa).strip().upper() not in ("0", "NAO", "NÃO", "FALSE", "OFF", "")
+    SUBIR_PASSO_PCT = max(0.0, min(r("SUBIR_PASSO_PCT", "subir_passo_pct", 8.0, float), 100.0))
+    SUBIR_MIN_RS = max(0.0, r("SUBIR_MIN_RS", "subir_min_rs", 5.0, float))
+    _sev = os.environ.get("SUBIR_EXIGE_VENDA") or C.get("subir_exige_venda") or "1"
+    SUBIR_EXIGE_VENDA = str(_sev).strip().upper() not in ("0", "NAO", "NÃO", "FALSE", "OFF", "")
 
 ACOES_DESCONTO = {"descontar", "descontar_ean", "descontar_piso"}
 REMOVER_OK = {"subir_margem", "ja_competitivo", "manter_ganhando"}   # confiante que não precisa desconto
@@ -193,6 +205,55 @@ def unidades(a, por_item, por_sku):
     return u
 
 
+def _dia(s):
+    return str(s)[:10] if s else ""   # 'YYYY-MM-DD' (compara por dia, sem dor de cabeça de fuso)
+
+
+def ultima_venda_dia(sid, dias=90):
+    """Dia da venda mais recente (não cancelada) por item_id, nos últimos `dias`. Pra saber
+    se houve venda DEPOIS da última subida de preço (só aí vale subir mais um degrau)."""
+    corte = (date.today() - timedelta(days=dias)).isoformat()
+    it, ini = {}, 0
+    while True:
+        try:
+            lote = (rec.sb.table("vendas").select("item_id,status,data_aprovacao")
+                    .eq("seller_id", str(sid)).gte("data_aprovacao", corte)
+                    .range(ini, ini + 999).execute().data) or []
+        except Exception as e:
+            print(f"(aviso: não li datas de venda: {e})", flush=True); return it
+        for r in lote:
+            if any(x in str(r.get("status") or "").lower() for x in _CANCEL):
+                continue
+            iid, d = r.get("item_id"), _dia(r.get("data_aprovacao"))
+            if iid and d and d > it.get(iid, ""):
+                it[iid] = d
+        if len(lote) < 1000:
+            break
+        ini += 1000
+    return it
+
+
+def ultima_subida_dia(sid, dias=90):
+    """Dia da última SUBIDA de preço aplicada por item_id (repricer_log, acao=subir_preco)."""
+    corte = (date.today() - timedelta(days=dias)).isoformat()
+    it, ini = {}, 0
+    while True:
+        try:
+            lote = (rec.sb.table("repricer_log").select("item_id,ts")
+                    .eq("seller_id", str(sid)).eq("acao", "subir_preco").eq("aplicado", True)
+                    .gte("ts", corte).range(ini, ini + 999).execute().data) or []
+        except Exception:
+            return it
+        for r in lote:
+            iid, d = r.get("item_id"), _dia(r.get("ts"))
+            if iid and d and d > it.get(iid, ""):
+                it[iid] = d
+        if len(lote) < 1000:
+            break
+        ini += 1000
+    return it
+
+
 def estado_promo(item_id, access):
     """(tem_pd, tem_outra): tem PRICE_DISCOUNT NOSSO ativo? tem OUTRA promoção ativa
     (DEAL ou campanha cofinanciada do ML)? Só mexemos no nosso PRICE_DISCOUNT."""
@@ -272,6 +333,9 @@ def main():
         todos = todos[:MAX_ITENS]
 
     por_item, por_sku = carregar_vendas(sid, VENDAS_DIAS)
+    venda_dia = ultima_venda_dia(sid) if SUBIR_ATIVO and SUBIR_EXIGE_VENDA else {}
+    subida_dia = ultima_subida_dia(sid) if SUBIR_ATIVO and SUBIR_EXIGE_VENDA else {}
+    corte_recente = (date.today() - timedelta(days=VENDAS_DIAS)).isoformat()
 
     def _an(iid):
         try:
@@ -285,8 +349,12 @@ def main():
     with ThreadPoolExecutor(max_workers=WORKERS) as ex:   # análise em paralelo (grande ganho)
         analises = [a for a in ex.map(_an, todos) if a]
 
-    cont = {"criado": 0, "removido": 0, "vende": 0, "barato": 0, "fila": 0, "campanha": 0}
+    cont = {"criado": 0, "removido": 0, "vende": 0, "barato": 0, "fila": 0, "campanha": 0, "subiu": 0}
     criados = 0
+    try:
+        uc = float(sonda.CONFIG.get("undercut") or sonda.UNDERCUT or 5)
+    except (TypeError, ValueError):
+        uc = 5.0
     for a in analises:
         acao = a.get("acao")
         if acao == "desligado":
@@ -322,6 +390,63 @@ def main():
                 print(f"💰 BARATO DEMAIS {iid} {tit} -> {a.get('detalhe')}", flush=True)
                 logar({**base_log(sid, a), "acao": acao, "aplicado": False, "modo": "insight",
                        "deal_price": a.get("alvo_subir")})
+                # ===== SUBIDA GRADUAL DE MARGEM =====
+                # Recupera preço nos "barato demais": REDUZ o desconto (não remove tudo), subindo
+                # o preço em passos até logo abaixo do concorrente. Regras:
+                #  - alvo = 2º lugar/concorrente - undercut (continua ganhando a caixa)
+                #  - nunca acima do preço cheio (não mexe na tabela, é sempre camada de desconto)
+                #  - no máximo SUBIR_PASSO_PCT% por rodada (gradual); só se o ganho >= SUBIR_MIN_RS
+                if SUBIR_ATIVO:
+                    # GATE DA VENDA: só sobe o próximo degrau se VENDEU no preço atual.
+                    # Já subiu antes -> exige venda em dia POSTERIOR à última subida.
+                    # Nunca subiu -> exige venda recente (últimos VENDAS_DIAS). Subiu e não vendeu = segura.
+                    if SUBIR_EXIGE_VENDA:
+                        uv = venda_dia.get(iid, ""); us = subida_dia.get(iid, "")
+                        pode_subir = (uv > us) if us else (uv >= corte_recente)
+                        if not pode_subir:
+                            print(f"⏸️  SUBIR-ESPERA {iid} {tit}: sem venda nova desde a última subida "
+                                  f"(venda {uv or '—'} / subida {us or '—'}) -> segura", flush=True)
+                            logar({**base_log(sid, a), "acao": "subir_espera", "aplicado": False, "modo": "insight",
+                                   "motivo": f"aguarda venda (última venda {uv or '—'}, última subida {us or '—'})"})
+                            remover_motivo = None; continue   # segura no preço atual (não sobe, não remove)
+                    tem_pd, tem_outra = promo_estado(a)   # do sale_price já lido (sem chamada extra)
+                    pv = a.get("preco_venda"); p0 = a.get("preco_cheio")
+                    if acao == "subir_margem":
+                        topo = a.get("alvo_subir")                    # já vem (2º lugar - undercut)
+                    else:                                             # ja_competitivo
+                        cc = a.get("conc_min")
+                        topo = round(cc - uc, 2) if cc else None      # logo abaixo do concorrente
+                    if (not tem_outra) and topo and pv and p0 and topo > pv + SUBIR_MIN_RS and topo < p0:
+                        teto = pv * (1 + SUBIR_PASSO_PCT / 100.0)     # passo gradual desta rodada
+                        novo = round(min(topo, teto, p0 - 0.01), 2)   # nunca acima do alvo nem do cheio
+                        if novo > pv + SUBIR_MIN_RS:
+                            descn = (1 - novo / p0) * 100
+                            rowu = {**base_log(sid, a), "acao": "subir_preco", "deal_price": novo,
+                                    "desconto_pct": round(descn, 1),
+                                    "motivo": f"barato demais: sobe R${pv:.2f}->R${novo:.2f} (alvo R${topo:.2f})"}
+                            dentro = (MAX_ALTERACOES <= 0) or (criados < MAX_ALTERACOES)
+                            if not CONFIRMA:
+                                print(f"• SIMULA sobe {iid} {tit}: R${pv:.2f} -> R${novo:.2f} (alvo R${topo:.2f})", flush=True)
+                                logar({**rowu, "acao": "subir_preco" if dentro else "fila_teto",
+                                       "aplicado": False, "modo": "simulacao"})
+                                if dentro:
+                                    criados += 1; cont["subiu"] += 1
+                                else:
+                                    cont["fila"] += 1
+                                remover_motivo = None; continue
+                            if not dentro:
+                                logar({**rowu, "acao": "fila_teto", "aplicado": False, "modo": "live"})
+                                cont["fila"] += 1; remover_motivo = None; continue
+                            if tem_pd:                                     # troca o desconto atual pelo novo (maior)
+                                remover_desconto(iid, access); time.sleep(0.3)
+                            st, resp = criar_desconto(iid, novo, access)   # reduz o desconto (preço maior)
+                            ok = 200 <= st < 300
+                            print(f"{'✅' if ok else '⛔'} SOBE {iid} {tit}: R${pv:.2f} -> R${novo:.2f} HTTP {st}", flush=True)
+                            logar({**rowu, "aplicado": ok, "modo": "live", "http_status": st})
+                            if ok:
+                                criados += 1; cont["subiu"] += 1
+                            time.sleep(0.4)
+                            remover_motivo = None; continue
 
         if quer_desconto:
             alvo, p0 = a.get("alvo"), a.get("preco_cheio")
@@ -445,6 +570,7 @@ def main():
               + (f" (+{cont['fila']} na fila além do teto)" if cont['fila'] else "")
               + f", {cont['removido']} remoção(ões), {cont.get('mantido', 0)} desconto(s) mantido(s) "
               f"(anti-gangorra), {cont['vende']} segurados por venda, {cont['barato']} barato-demais"
+              + (f", ⬆️ {cont['subiu']} subida(s) de margem" if cont.get('subiu') else "")
               + (f", 🎁 {cont['campanha']} onde campanha do ML paga mais margem" if cont['campanha'] else "")
               + ".")
     print(f"\n=== {resumo} ===", flush=True)
