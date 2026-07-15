@@ -196,7 +196,7 @@ def main():
         except Exception as e:
             print(f"   (analisar {iid} falhou: {e})", flush=True)
 
-    cont = {"criado": 0, "removido": 0, "vende": 0, "barato": 0}
+    cont = {"criado": 0, "removido": 0, "vende": 0, "barato": 0, "fila": 0}
     criados = 0
     for a in analises:
         acao = a.get("acao")
@@ -240,12 +240,20 @@ def main():
                 logar({**row, "acao": "pulado_salto", "aplicado": False, "modo": modo.lower()}); continue
             if desc < 5:
                 logar({**row, "acao": "pulado_menor5", "aplicado": False, "modo": modo.lower()}); continue
-            if criados >= MAX_ALTERACOES:
-                logar({**row, "acao": "fila_teto", "aplicado": False, "modo": modo.lower()}); continue
-            if not CONFIRMA:
-                print(f"• SIMULA cria {iid} {tit} -> R${alvo:.2f} ({desc:.1f}% off, "
+            dentro = criados < MAX_ALTERACOES
+            if not CONFIRMA:                        # simulação: mostra TUDO (marca a fila além do teto)
+                marca = "" if dentro else f" (FILA, além do teto {MAX_ALTERACOES})"
+                print(f"• SIMULA cria{marca} {iid} {tit} -> R${alvo:.2f} ({desc:.1f}% off, "
                       f"margem {a.get('margem_alvo')}%)", flush=True)
-                logar({**row, "aplicado": False, "modo": "simulacao"}); criados += 1; cont["criado"] += 1; continue
+                logar({**row, "acao": acao if dentro else "fila_teto", "aplicado": False, "modo": "simulacao"})
+                if dentro:
+                    criados += 1; cont["criado"] += 1
+                else:
+                    cont["fila"] += 1
+                continue
+            if not dentro:                          # ao vivo: respeita o teto
+                logar({**row, "acao": "fila_teto", "aplicado": False, "modo": "live"})
+                cont["fila"] += 1; continue
             st, resp = criar_desconto(iid, alvo, access)
             ok = 200 <= st < 300
             print(f"{'✅' if ok else '⛔'} CRIA {iid} {tit} -> R${alvo:.2f} ({desc:.1f}% off) HTTP {st}", flush=True)
@@ -271,8 +279,10 @@ def main():
             time.sleep(0.3)
 
     resumo = (f"Piloto {modo} · MG {sid}: {cont['criado']} desconto(s) "
-              f"{'criados' if CONFIRMA else 'a criar'}, {cont['removido']} remoção(ões), "
-              f"{cont['vende']} segurados por venda, {cont['barato']} barato-demais.")
+              f"{'criados' if CONFIRMA else 'a criar'}"
+              + (f" (+{cont['fila']} na fila além do teto)" if cont['fila'] else "")
+              + f", {cont['removido']} remoção(ões), {cont['vende']} segurados por venda, "
+              f"{cont['barato']} barato-demais.")
     print(f"\n=== {resumo} ===", flush=True)
     telegram("🤖 " + resumo)
     if not CONFIRMA:
