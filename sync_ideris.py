@@ -101,8 +101,24 @@ def coletar(token):
         resp = _buscar(H, offset, limit)
 
         if resp.status_code == 404:
-            # fim da lista / registros-fantasma do Ideris — nada a recuperar aqui.
-            # pula a janela inteira, sem varrer de 1 em 1.
+            # O Ideris as vezes devolve 404 numa janela que AINDA TEM registros
+            # (acontece no fim da lista). Se ainda faltam registros pro total,
+            # varre de 1 em 1 pra NAO perder os ultimos — que sao justamente os
+            # produtos mais NOVOS. So considera "fim de verdade" se ja passou do total.
+            if total is not None and offset < total:
+                print(f"Aviso: 404 em offset={offset}, mas ainda faltam registros "
+                      f"(total={total}). Varrendo 1 a 1 pra nao perder os novos...")
+                fim = min(offset + limit, total)
+                for off1 in range(offset, fim):
+                    r1 = _buscar(H, off1, 1)
+                    time.sleep(1.3)
+                    if r1.status_code != 200:
+                        continue          # registro-fantasma isolado: ignora só ele
+                    d1 = r1.json()
+                    _processar(d1.get("obj", []) or [], custos, nomes, modelos)
+                offset = fim
+                continue
+            # fim de verdade da lista
             print(f"Aviso: 404 em offset={offset} (fim da lista/registros vazios). Pulando.")
             offset += limit
             continue
