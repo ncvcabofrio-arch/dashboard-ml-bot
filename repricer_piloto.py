@@ -13,6 +13,7 @@ As REMOÇÕES (que protegem margem) não contam no teto.
 import os
 import time
 from datetime import date, timedelta
+from concurrent.futures import ThreadPoolExecutor
 import requests
 import repricer_sugestoes as rec
 import repricer_competitivo as sonda
@@ -48,6 +49,7 @@ def promos_do_item(item_id, access):
 
 SELLER_ID = (os.environ.get("SELLER_ID") or "3244206480").strip()   # MG por padrão
 MAX_ITENS = int(os.environ.get("MAX_ITENS", "0"))                    # 0 = todos
+WORKERS = int(os.environ.get("WORKERS", "8"))                        # análise em paralelo
 CONFIRMA = (os.environ.get("CONFIRMA") or "").strip().upper() == "SIM"
 ATIVO = (os.environ.get("ATIVO") or "SIM").strip().upper() == "SIM"  # botão de pânico
 # regras globais — resolvidas em resolver_config() (input do workflow > painel/repricer_config > default)
@@ -85,6 +87,16 @@ def resolver_config():
 ACOES_DESCONTO = {"descontar", "descontar_ean", "descontar_piso"}
 REMOVER_OK = {"subir_margem", "ja_competitivo", "manter_ganhando"}   # confiante que não precisa desconto
 _CANCEL = ("cancel",)   # só cancelada NÃO conta como venda (paid e partially_refunded contam)
+NOSSAS_PROMO = {"PRICE_DISCOUNT", "custom", "CUSTOM"}   # ofertas individuais (nossas); resto = campanha do ML
+
+
+def promo_estado(a):
+    """(tem_pd, tem_outra) a partir do sale_price JÁ lido pela sonda — sem chamada extra.
+    tem_pd = desconto nosso ativo; tem_outra = DEAL/campanha cofinanciada do ML."""
+    p = a.get("promo")
+    if not p:
+        return False, False
+    return (p in NOSSAS_PROMO), (p not in NOSSAS_PROMO)
 
 
 def telegram(msg):
@@ -216,14 +228,14 @@ def main():
 
     por_item, por_sku = carregar_vendas(sid, VENDAS_DIAS)
 
-    analises = []
-    for iid in todos:
+    def _an(iid):
         try:
-            a = sonda.analisar(iid, access, sid)
-            if a:
-                analises.append(a)
+            return sonda.analisar(iid, access, sid)
         except Exception as e:
             print(f"   (analisar {iid} falhou: {e})", flush=True)
+            return None
+    with ThreadPoolExecutor(max_workers=WORKERS) as ex:   # análise em paralelo (grande ganho)
+        analises = [a for a in ex.map(_an, todos) if a]
 
     cont = {"criado": 0, "removido": 0, "vende": 0, "barato": 0, "fila": 0}
     criados = 0
@@ -258,7 +270,7 @@ def main():
                 continue
             desc = (1 - alvo / p0) * 100
             row = {**base_log(sid, a), "acao": acao, "deal_price": alvo, "desconto_pct": round(desc, 1)}
-            tem_pd, tem_outra = estado_promo(iid, access)
+            tem_pd, tem_outra = promo_estado(a)           # do sale_price já lido (sem chamada extra)
             if tem_pd:
                 continue                                  # já descontado por nós; ajuste fino fica pra depois
             if tem_outra:                                 # DEAL/campanha do ML -> deixa quieto (não empilha)
@@ -283,6 +295,9 @@ def main():
             if not dentro:                          # ao vivo: respeita o teto
                 logar({**row, "acao": "fila_teto", "aplicado": False, "modo": "live"})
                 cont["fila"] += 1; continue
+            gp, go = estado_promo(iid, access)      # guarda final: confere no seller-promotions antes de escrever
+            if gp or go:
+                logar({**row, "acao": "pulado_ja_promo", "aplicado": False, "modo": "live"}); continue
             st, resp = criar_desconto(iid, alvo, access)
             ok = 200 <= st < 300
             print(f"{'✅' if ok else '⛔'} CRIA {iid} {tit} -> R${alvo:.2f} ({desc:.1f}% off) HTTP {st}", flush=True)
@@ -292,13 +307,16 @@ def main():
             time.sleep(0.4)
 
         elif remover_motivo:
-            tem_pd, _ = estado_promo(iid, access)
+            tem_pd, _ = promo_estado(a)               # do sale_price já lido
             if not tem_pd:
                 continue
             row = {**base_log(sid, a), "acao": "remover_desconto", "motivo": remover_motivo}
             if not CONFIRMA:
                 print(f"• SIMULA remove desconto {iid} {tit} ({remover_motivo})", flush=True)
                 logar({**row, "aplicado": False, "modo": "simulacao"}); cont["removido"] += 1; continue
+            gp, _ = estado_promo(iid, access)         # guarda final: confirma que ainda temos o desconto
+            if not gp:
+                continue
             st, resp = remover_desconto(iid, access)
             ok = 200 <= st < 300
             print(f"{'✅' if ok else '⛔'} REMOVE desconto {iid} {tit} ({remover_motivo}) HTTP {st}", flush=True)
@@ -307,7 +325,7 @@ def main():
                 cont["removido"] += 1
             time.sleep(0.3)
 
-    resumo = (f"Piloto {modo} · MG {sid}: {cont['criado']} desconto(s) "
+    resumo = (f"Piloto {modo} · conta {sid}: {cont['criado']} desconto(s) "
               f"{'criados' if CONFIRMA else 'a criar'}"
               + (f" (+{cont['fila']} na fila além do teto)" if cont['fila'] else "")
               + f", {cont['removido']} remoção(ões), {cont['vende']} segurados por venda, "
