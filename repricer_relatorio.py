@@ -20,7 +20,7 @@ import repricer_sugestoes as rec
 
 WEBHOOK_URL = (os.environ.get("WEBHOOK_URL") or "").strip()
 SELLER_ID = (os.environ.get("SELLER_ID") or "3244206480").strip()
-JANELA_MIN = int(os.environ.get("RELATORIO_JANELA_MIN", "65"))      # "esta passada" = últimos X min (só live)
+JANELA_MIN = int(os.environ.get("RELATORIO_JANELA_MIN", "15"))      # só ESTA passada (piloto+relatório <5 min)
 MARGEM_DIAS = int(os.environ.get("RELATORIO_MARGEM_DIAS", "20"))    # janela do painel de margem
 EMAIL_RELATORIO = (os.environ.get("EMAIL_RELATORIO") or "").strip()  # p/ quem o Apps Script manda o aviso
 BASE_MARGEM = (os.environ.get("BASE_MARGEM") or "").strip()          # margem-base p/ comparar (ex "14,3")
