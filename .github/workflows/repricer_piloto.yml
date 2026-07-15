@@ -1,10 +1,11 @@
-name: Repricer - PILOTO (MG)
+name: Repricer - PILOTO
 
-# Roda o repricer completo SÓ na conta MG, com trilhos de segurança.
+# Roda o repricer completo numa conta (padrão MG), com trilhos de segurança.
+# As REGRAS vêm do painel (repricer_config); inputs abaixo só pra override por rodada.
 # Agendado = SIMULAÇÃO (alimenta o painel sem escrever). Ao vivo = workflow_dispatch com confirma=SIM.
 on:
   schedule:
-    - cron: '17 */4 * * *'   # a cada 4h: por padrão SIMULA (não escreve) e registra no log
+    - cron: '0 11,17,23 * * *'   # 3x/dia (8h/14h/20h BRT): por padrão SIMULA e registra no log
   workflow_dispatch:
     inputs:
       confirma:
@@ -20,17 +21,22 @@ on:
         default: "SIM"
         options: ["SIM", "NAO"]
       max_alteracoes:
-        description: "Teto de descontos por rodada"
+        description: "Teto de criações/rodada (vazio = usa painel; 0 = sem teto)"
         type: string
         required: false
-        default: "3"
+        default: ""
       max_drop_pct:
-        description: "Anti-salto: maior % de desconto permitido (ex 90 = quase desligado, pra VER tudo)"
+        description: "Anti-salto: maior % permitido (vazio = usa painel; ex 90 = ver tudo)"
         type: string
         required: false
-        default: "20"
+        default: ""
+      vendas_dias:
+        description: "Janela do gate de vendas em dias (vazio = usa painel)"
+        type: string
+        required: false
+        default: ""
       seller_id:
-        description: "Conta (padrão MG). Não mude sem querer."
+        description: "Conta: 3244206480=MG, 471489691=Cabo Frio, 177795203=CF"
         type: string
         required: false
         default: "3244206480"
@@ -59,12 +65,12 @@ jobs:
           # Telegram (opcional): se seus secrets têm outro nome, ajuste o lado direito.
           TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          # Agendado (inputs vazios) = SIMULAÇÃO na MG. Só vira ao vivo via workflow_dispatch confirma=SIM.
+          # Agendado (inputs vazios) = SIMULAÇÃO. Só vira ao vivo via workflow_dispatch confirma=SIM.
           SELLER_ID:       ${{ github.event.inputs.seller_id || '3244206480' }}
           CONFIRMA:        ${{ github.event.inputs.confirma || 'NAO' }}
           ATIVO:           ${{ github.event.inputs.ativo || 'SIM' }}
-          MAX_ALTERACOES:  ${{ github.event.inputs.max_alteracoes || '3' }}
-          MAX_DROP_PCT:    ${{ github.event.inputs.max_drop_pct || '20' }}
-          UNDERCUT:        '5'
-          DIAS:            '14'
+          # regras: vazio -> usa o painel (repricer_config). Preencha só pra forçar nesta rodada.
+          MAX_ALTERACOES:  ${{ github.event.inputs.max_alteracoes }}
+          MAX_DROP_PCT:    ${{ github.event.inputs.max_drop_pct }}
+          VENDAS_DIAS:     ${{ github.event.inputs.vendas_dias }}
         run: python repricer_piloto.py
