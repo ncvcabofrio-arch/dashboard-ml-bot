@@ -235,7 +235,8 @@ def main():
             if tem_deal:
                 logar({**row, "acao": "pulado_deal", "aplicado": False, "modo": modo.lower()}); continue
             if desc > MAX_DROP_PCT:
-                print(f"⏭️  SALTO {desc:.1f}%>{MAX_DROP_PCT:.0f}% {iid} {tit} — pulado", flush=True)
+                print(f"⏭️  SALTO {iid} {tit} -> R${alvo:.2f} ({desc:.1f}% off > {MAX_DROP_PCT:.0f}%, "
+                      f"margem {a.get('margem_alvo')}%) — segurado p/ revisão", flush=True)
                 logar({**row, "acao": "pulado_salto", "aplicado": False, "modo": modo.lower()}); continue
             if desc < 5:
                 logar({**row, "acao": "pulado_menor5", "aplicado": False, "modo": modo.lower()}); continue
