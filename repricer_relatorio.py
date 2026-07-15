@@ -26,6 +26,7 @@ EMAIL_RELATORIO = (os.environ.get("EMAIL_RELATORIO") or "").strip()  # p/ quem o
 BASE_MARGEM = (os.environ.get("BASE_MARGEM") or "").strip()          # margem-base p/ comparar (ex "14,3")
 NOME_CONTA = (os.environ.get("NOME_CONTA") or "").strip() or f"conta {SELLER_ID}"
 MODO = "live" if (os.environ.get("CONFIRMA") or "").strip().upper() == "SIM" else "simulacao"
+BR = timezone(timedelta(hours=-3))   # horário de Brasília (o Brasil não usa mais horário de verão)
 _CANCEL = ("cancel",)   # só cancelada não conta
 
 
@@ -177,60 +178,79 @@ _PORQUE = {"descontar": "estava perdendo e parado", "descontar_ean": "estava per
            "remover_desconto": "voltou a ganhar sem precisar do desconto"}
 
 
+def _esc(s):
+    """Escapa caracteres de HTML nos títulos dos produtos (evita quebrar o email)."""
+    return str(s if s is not None else "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 def montar_email(hora, linhas, n_ok, n_erro, n_mantido, m_hoje):
-    """Email legível: margem no topo, item por item com margem-alvo e o porquê."""
-    L = [f"Repricer — {NOME_CONTA} — {hora}", ""]
+    """Email em HTML: margem no topo, item por item, com espaçamento e hierarquia."""
+    P = ['<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#222;'
+         'line-height:1.5;max-width:600px">']
+    P.append(f'<div style="font-size:12px;color:#8a8a8a;text-transform:uppercase;'
+             f'letter-spacing:.6px">Repricer &middot; {_esc(NOME_CONTA)} &middot; {hora}</div>')
+
     if m_hoje and m_hoje[6] is not None:
-        seta = ""
+        seta, cor = "", "#333"
         try:
             if BASE_MARGEM:
-                seta = " ▲" if float(str(m_hoje[6])) >= float(BASE_MARGEM.replace(",", ".")) else " ▼"
+                acima = float(str(m_hoje[6])) >= float(BASE_MARGEM.replace(",", "."))
+                seta = " &#9650;" if acima else " &#9660;"   # ▲ / ▼
+                cor = "#16a34a" if acima else "#dc2626"
         except (TypeError, ValueError):
-            seta = ""
-        base = f" (base {BASE_MARGEM}%)" if BASE_MARGEM else ""
-        L.append(f"Margem do dia: {_pct(m_hoje[6])}{seta}{base}")
-        L.append(f"{m_hoje[1]} pedido(s) · receita {_rs(m_hoje[3])}")
+            pass
+        base = (f' <span style="font-size:13px;color:#8a8a8a;font-weight:400">(base {BASE_MARGEM}%)</span>'
+                if BASE_MARGEM else "")
+        P.append(f'<div style="font-size:22px;font-weight:700;margin:8px 0 2px">'
+                 f'<span style="color:{cor}">Margem do dia: {_pct(m_hoje[6])}{seta}</span>{base}</div>')
+        P.append(f'<div style="color:#666;font-size:13px;margin-bottom:18px">'
+                 f'{m_hoje[1]} pedido(s) &middot; receita {_rs(m_hoje[3])}</div>')
     else:
-        L.append("Margem do dia: ainda sem venda aprovada hoje.")
-    L.append("")
+        P.append('<div style="font-size:16px;margin:8px 0 18px;color:#666">'
+                 'Margem do dia: ainda sem venda aprovada hoje.</div>')
 
     feitas = [x for x in linhas if x[8] == "ok"]
     falhas = [x for x in linhas if x[8] != "ok"]
+
+    P.append(f'<div style="font-weight:700;margin:0 0 8px">&#9989; Aplicadas nesta passada: {len(feitas)}</div>')
     if feitas:
-        L.append(f"✅ Aplicadas nesta passada: {len(feitas)}")
         for x in feitas:
-            marg = f" · margem-alvo {_pct(x[5])}" if x[5] not in (None, "") else ""
+            marg = f' &middot; margem-alvo {_pct(x[5])}' if x[5] not in (None, "") else ""
             porque = _PORQUE.get(x[3], "")
-            porque = f"  ({porque})" if porque else ""
-            L.append(f"• {(x[2] or x[1])}: {_LABEL.get(x[3], x[3])} → {_rs(x[4])}{marg}{porque}")
+            porque = f'<div style="color:#999;font-size:12px">{porque}</div>' if porque else ""
+            P.append(f'<div style="border-left:3px solid #22c55e;padding:1px 0 1px 11px;margin-bottom:9px">'
+                     f'<b>{_esc(x[2] or x[1])}</b> — {_LABEL.get(x[3], x[3])} &rarr; <b>{_rs(x[4])}</b>{marg}{porque}</div>')
     else:
-        L.append("✅ Aplicadas nesta passada: nenhuma.")
+        P.append('<div style="color:#888;margin-bottom:9px">nenhuma.</div>')
 
     if n_mantido:
-        L.append("")
-        L.append(f"🔒 Descontos mantidos (anti-gangorra): {n_mantido}")
-        L.append("   (ganham só por causa do desconto; remover faria o preço subir e perder a ponta)")
+        P.append(f'<div style="margin:16px 0 4px"><b>&#128274; Descontos mantidos (anti-gangorra): {n_mantido}</b>'
+                 f'<div style="color:#999;font-size:12px">ganham só por causa do desconto; '
+                 f'remover faria o preço subir e perder a ponta</div></div>')
 
     if falhas:
-        L.append("")
-        L.append(f"⚠️ Falhas: {len(falhas)}")
+        P.append(f'<div style="font-weight:700;color:#dc2626;margin:16px 0 8px">'
+                 f'&#9888;&#65039; Falhas: {len(falhas)}</div>')
         for x in falhas:
-            L.append(f"• {(x[2] or x[1])}: {_LABEL.get(x[3], x[3])} — HTTP {x[7]} "
-                     f"(retenta na próxima; se insistir, é preço/faixa inválida ou token)")
+            P.append(f'<div style="border-left:3px solid #dc2626;padding:1px 0 1px 11px;margin-bottom:9px">'
+                     f'<b>{_esc(x[2] or x[1])}</b> — {_LABEL.get(x[3], x[3])} &middot; HTTP {x[7]}'
+                     f'<div style="color:#999;font-size:12px">retenta na próxima; '
+                     f'se insistir, é preço/faixa inválida ou token</div></div>')
 
-    return "\n".join(L)
+    P.append('</div>')
+    return "".join(P)
 
 
 def main():
-    agora = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M")
-    hora = datetime.now(timezone.utc).astimezone().strftime("%Hh")
+    agora = datetime.now(BR).strftime("%Y-%m-%d %H:%M")
+    hora = datetime.now(BR).strftime("%Hh")
     linhas, n_ok, n_erro, n_mantido = mudancas_da_passada(SELLER_ID, JANELA_MIN)
     _post({"aba": "Mudancas", "quando": agora, "conta": SELLER_ID, "rows": linhas})
 
     dias = margem_diaria(SELLER_ID, MARGEM_DIAS)
     _post({"aba": "MargemDiaria", "quando": agora, "conta": SELLER_ID, "rows": dias})
 
-    hoje = date.today().isoformat()
+    hoje = datetime.now(BR).date().isoformat()
     m_hoje = next((l for l in dias if l[0] == hoje), None)
     corpo = montar_email(hora, linhas, n_ok, n_erro, n_mantido, m_hoje)
     marg_txt = f", margem {m_hoje[6]}%" if (m_hoje and m_hoje[6] is not None) else ""
