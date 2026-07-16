@@ -29,7 +29,7 @@ on:
         default: "0"
 
 concurrency:
-  group: ml-puxador
+  group: ml-aplicar          # pista PRÓPRIA — não espera o piloto/sonda; roda na hora
   cancel-in-progress: false
 
 jobs:
