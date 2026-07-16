@@ -189,9 +189,9 @@ def processar(fila, access):
     ltid = it.get("listing_type_id")
     cat = it.get("category_id")
     sku = it.get("seller_sku") or it.get("seller_custom_field") or fila.get("sku")
-    custo = rec.custo_de(sku)
+    custo = rec.custo_efetivo(iid, sku)
     if custo is None:
-        gravar(fila["id"], {"status": "erro", "resultado": "sem custo pra recalcular margem"})
+        gravar(fila["id"], {"status": "erro", "resultado": "sem custo pra recalcular margem (preencha o custo do anúncio no painel)"})
         return "sem_custo"
     frete, _ = rec.frete_de(sku, iid, access)
     piso, grupo = rec.margem_minima_do(sku)
