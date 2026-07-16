@@ -258,7 +258,7 @@ def comissao(preco, cat, ltid, access):
 def detalhes_itens(ids, access):
     """Busca detalhes de VÁRIOS itens de uma vez (multiget, 20 por chamada)."""
     out = {}
-    attrs = "id,price,listing_type_id,category_id,seller_sku,seller_custom_field,title,status"
+    attrs = "id,price,listing_type_id,category_id,seller_sku,seller_custom_field,title,status,available_quantity"
     for i in range(0, len(ids), 20):
         lote = ids[i:i + 20]
         st, d = get(f"/items?ids={','.join(lote)}&attributes={attrs}", access)
@@ -354,6 +354,42 @@ def _vigente(o):
     return True
 
 
+_promo_cache = {}
+_promo_lock = threading.Lock()
+
+
+def _promo_detalhe(promotion_id, tipo, access):
+    """Detalhe da promoção (traz status: started/pending/finished e datas). Com cache
+    porque a MESMA promoção vale pra muitos itens (ex.: 'DESTAQUE 8.8' em 200 anúncios)."""
+    if not promotion_id:
+        return None
+    with _promo_lock:
+        if promotion_id in _promo_cache:
+            return _promo_cache[promotion_id]
+    st, d = get(f"/seller-promotions/promotions/{promotion_id}?promotion_type={tipo}&app_version=v2", access)
+    d = d if isinstance(d, dict) else None
+    with _promo_lock:
+        _promo_cache[promotion_id] = d
+    return d
+
+
+def cand_vigente(o, access):
+    """Vigência de um candidato. Usa a data do próprio candidato; se ela não vier
+    (comum nas cofinanciadas), consulta o DETALHE da promoção (status started=ativa,
+    pending=programada). É o jeito confiável de não recomendar/entrar em promo futura."""
+    if o.get("start_date") or o.get("finish_date"):
+        return _vigente(o)
+    d = _promo_detalhe(o.get("id"), o.get("type"), access)
+    if not isinstance(d, dict):
+        return True                       # sem info nenhuma, não descarta
+    status = (d.get("status") or "").lower()
+    if status == "started":
+        return True
+    if status in ("pending", "programmed", "scheduled", "finished"):
+        return False
+    return _vigente(d)
+
+
 def _rotulo(a):
     o = a["o"]
     return f"{o.get('name') or o.get('type') or '?'} R${a['pb']:.2f}->{a['margem']:.1f}%"
@@ -404,8 +440,9 @@ def processar_item(item_id, access, sid, detalhes):
                 break
         cand = [avaliar(o, cat, ltid, access, frete, custo) for o in cand_raw]
         cand = [c for c in cand if c]
-        # NÃO recomenda promoção que ainda não está vigente (programada/futura) nem já encerrada
-        cand = [c for c in cand if _vigente(c["o"])]
+        # NÃO recomenda promoção que ainda não está vigente (programada/futura) nem já encerrada.
+        # cand_vigente consulta o detalhe da promoção quando a data não vem no candidato.
+        cand = [c for c in cand if cand_vigente(c["o"], access)]
         seguras = [c for c in cand if c["margem"] >= piso]
 
         # ---- decide a ação (sua regra) ----
@@ -449,6 +486,7 @@ def processar_item(item_id, access, sid, detalhes):
             "custo": custo,
             "custo_envio": frete,
             "custo_envio_origem": frete_origem,
+            "estoque": it.get("available_quantity"),
             "grupo": grupo,
             "margem_minima": piso,
             "alternativas": max(len(seguras) - (1 if alvo in seguras else 0), 0),
