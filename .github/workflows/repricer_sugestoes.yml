@@ -20,7 +20,7 @@ on:
         default: "17"
 
 concurrency:
-  group: ml-puxador
+  group: ml-sugestoes        # pista PRÓPRIA — botão "Rodar sugestão" não fica preso atrás dos outros
   cancel-in-progress: false
 
 jobs:
