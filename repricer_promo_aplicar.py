@@ -251,21 +251,31 @@ def processar(fila, access):
     _diag["ITEM_price"] = it.get("price")                 # preço ATUAL do anúncio (referência da credibilidade?)
     _diag["ITEM_base_price"] = it.get("base_price")
     light_diag = " || DIAG " + json.dumps(_diag, ensure_ascii=False)
-    # RELÂMPAGO: o candidato JÁ traz o preço com desconto crível (suggested_discounted_price),
-    # dentro da faixa [min_discounted_price, max_discounted_price]. Mandar o "price" cru fica
-    # ACIMA do max => "não crível" (foi o bug). Usamos o sugerido, limitado pela faixa.
+    # RELÂMPAGO: o ML exige um desconto CRÍVEL (o suggested_discounted_price é só um teto e é
+    # recusado). A credibilidade quer desconto de verdade. Estratégia: oferecer o MAIOR desconto
+    # possível que ainda mantenha a margem >= piso (foi o que funcionou na mão: raspa o piso).
+    # Busca binária pelo menor preço com margem >= piso, dentro da faixa [min, max] do ML.
     if tipo == "LIGHTNING":
         try:
-            px = cand.get("suggested_discounted_price") or cand.get("max_discounted_price") or cand.get("price")
-            px = float(px)
-            mx = cand.get("max_discounted_price")
-            mn = cand.get("min_discounted_price")
-            if mx is not None:
-                px = min(px, float(mx))
-            if mn is not None:
-                px = max(px, float(mn))
-            cand = dict(cand)
-            cand["price"] = round(px, 2)
+            mn = float(cand.get("min_discounted_price") or 0)
+            mx = float(cand.get("max_discounted_price") or cand.get("price") or 0)
+            base = dict(cand)
+
+            def _marg(pb):
+                base["price"] = round(pb, 2)
+                e = rec.avaliar(base, cat, ltid, access, frete, custo)
+                return (e["margem"] if e else -999)
+
+            if mx > 0 and _marg(mx) >= piso:
+                lo, hi = max(mn, 0.5), mx      # queremos o MENOR preço (maior desconto) com margem >= piso
+                for _ in range(26):
+                    mid = (lo + hi) / 2.0
+                    if _marg(mid) >= piso:
+                        hi = mid
+                    else:
+                        lo = mid
+                cand = dict(cand)
+                cand["price"] = round(hi, 2)
         except (TypeError, ValueError):
             pass
     ev = rec.avaliar(cand, cat, ltid, access, frete, custo)
@@ -276,6 +286,18 @@ def processar(fila, access):
         gravar(fila["id"], {"status": "erro",
                             "resultado": f"margem caiu pra {ev['margem']:.1f}% (< piso {piso:.0f}%) — não apliquei"})
         return "abaixo_piso"
+
+    # cofinanciadas que exigem data no POST (ex.: "OFERTAS RELÂMPAGOS IMPERDÍVEIS" -> erro START_DATE):
+    # o candidato não traz as datas; pega do DETALHE da promoção e injeta no corpo.
+    if tipo in ("SMART", "PRICE_MATCHING", "PRICE_MATCHING_MELI_ALL", "DEAL") and not cand.get("start_date"):
+        pd = rec._promo_detalhe(cand.get("id"), tipo, access)
+        if isinstance(pd, dict):
+            cand = dict(cand)
+            if pd.get("start_date"):
+                cand["start_date"] = pd["start_date"]
+            if pd.get("finish_date"):
+                cand["finish_date"] = pd["finish_date"]
+            light_diag += " promo_datas=" + json.dumps({"ini": pd.get("start_date"), "fim": pd.get("finish_date"), "status": pd.get("status")}, ensure_ascii=False)
 
     corpo = corpo_post(tipo, cand, ev["pb"])
     if not corpo:
