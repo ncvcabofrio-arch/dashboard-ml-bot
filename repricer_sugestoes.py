@@ -19,6 +19,7 @@ API = "https://api.mercadolibre.com"
 MAX_ITENS = int(os.environ.get("MAX_ITENS", os.environ.get("AMOSTRA", "0")))
 MARGEM_PADRAO = float(os.environ.get("MARGEM_MIN", "18"))
 WORKERS = int(os.environ.get("WORKERS", "8"))   # itens processados em paralelo
+SELLER_ID_FILTRO = (os.environ.get("SELLER_ID") or "").strip()   # se setado, roda SÓ essa conta (ex.: testar a CF)
 sb = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"])
 
 # caches pré-carregados (evitam ida ao banco por item; seguros entre threads)
@@ -317,9 +318,11 @@ def processar_item(item_id, access, sid, detalhes):
         if not isinstance(ofertas, list) or not ofertas:
             return None
         ativas_raw = [o for o in ofertas if isinstance(o, dict) and eh_ativa(o)]
+        # AMPLIADO: antes só cofinanciadas (meli_percentage). Agora TODA candidata com preço
+        # avaliável — inclui relâmpago (LIGHTNING), Pix, DOD etc. (mp=0 é tratado em avaliar()).
         cand_raw = [o for o in ofertas if isinstance(o, dict)
                     and (o.get("status") or "").lower() == "candidate"
-                    and o.get("meli_percentage") and o.get("original_price")]
+                    and o.get("original_price") and preco_oferta(o)]
         if not ativas_raw and not cand_raw:
             return None
 
@@ -349,24 +352,20 @@ def processar_item(item_id, access, sid, detalhes):
         cand = [c for c in cand if c]
         seguras = [c for c in cand if c["margem"] >= piso]
 
-        # ---- decide a ação segundo a sua regra ----
+        # ---- decide a ação (sua regra) ----
+        # NUNCA sai de uma promoção que já está — mesmo abaixo do piso. Só TROCA se houver
+        # uma que respeite o piso E pague MAIS (recebe maior). Senão, MANTÉM (com alerta se abaixo).
         alerta = None
         alvo = None
         if ativa:
             if ativa["margem"] < piso:
                 alerta = "ativa_abaixo_piso"
-                if seguras:
-                    acao = "trocar"
-                    alvo = max(seguras, key=lambda a: a["recebe"])
-                else:
-                    acao = "sair"
+            melhores = [a for a in seguras if a["recebe"] > ativa["recebe"] + 0.01]
+            if melhores:
+                acao = "trocar"
+                alvo = max(melhores, key=lambda a: a["recebe"])
             else:
-                melhores = [a for a in seguras if a["recebe"] > ativa["recebe"] + 0.01]
-                if melhores:
-                    acao = "trocar"
-                    alvo = max(melhores, key=lambda a: a["recebe"])
-                else:
-                    acao = "manter"
+                acao = "manter"
         else:
             if seguras:
                 acao = "entrar"
@@ -452,13 +451,17 @@ def main():
     total_sug = 0
     contadores = {"entrar": 0, "trocar": 0, "sair": 0, "manter": 0}
     try:
-        sb.table("repricer_sugestoes").delete().eq("status", "pendente").execute()
-        sb.table("repricer_sugestoes").delete().eq("status", "ok").execute()
+        q = sb.table("repricer_sugestoes").delete().neq("status", "aplicada")  # limpa tudo menos aplicadas
+        if SELLER_ID_FILTRO:
+            q = q.eq("seller_id", SELLER_ID_FILTRO)                            # só a conta em teste
+        q.execute()
     except Exception as e:
         print("Aviso: não consegui limpar pendentes:", e, flush=True)
 
     for seller_id, refresh in contas():
         access, sid, refresh = obter_access(sb, seller_id, refresh)
+        if SELLER_ID_FILTRO and str(sid) != SELLER_ID_FILTRO:
+            continue                              # roda SÓ a conta escolhida (ex.: testar a CF)
         print(f"\n===== CONTA {sid} =====", flush=True)
         ids, total = todos_ativos(sid, access)
         cap = f" (varrendo {len(ids)}, limite de teste MAX_ITENS={MAX_ITENS})" if MAX_ITENS else ""
