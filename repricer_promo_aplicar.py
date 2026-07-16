@@ -20,7 +20,7 @@ import time
 import json
 import requests
 import repricer_sugestoes as rec
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from ml_auth import obter_access
 
 API = rec.API
@@ -288,16 +288,22 @@ def processar(fila, access):
         return "abaixo_piso"
 
     # cofinanciadas que exigem data no POST (ex.: "OFERTAS RELÂMPAGOS IMPERDÍVEIS" -> erro START_DATE):
-    # o candidato não traz as datas; pega do DETALHE da promoção e injeta no corpo.
+    # o candidato não traz as datas; pega do DETALHE da promoção. As datas têm que ir em formato
+    # LOCAL (sem 'Z') e o start NÃO pode ser no passado (regras da doc).
     if tipo in ("SMART", "PRICE_MATCHING", "PRICE_MATCHING_MELI_ALL", "DEAL") and not cand.get("start_date"):
         pd = rec._promo_detalhe(cand.get("id"), tipo, access)
         if isinstance(pd, dict):
+            hoje = (datetime.now(timezone.utc) - timedelta(hours=3)).strftime("%Y-%m-%d")   # hoje em BRT
+            ini = str(pd.get("start_date") or "")[:10]
+            fim = str(pd.get("finish_date") or "")[:10]
+            if ini and ini < hoje:
+                ini = hoje                                   # start não pode ser anterior a hoje
             cand = dict(cand)
-            if pd.get("start_date"):
-                cand["start_date"] = pd["start_date"]
-            if pd.get("finish_date"):
-                cand["finish_date"] = pd["finish_date"]
-            light_diag += " promo_datas=" + json.dumps({"ini": pd.get("start_date"), "fim": pd.get("finish_date"), "status": pd.get("status")}, ensure_ascii=False)
+            if ini:
+                cand["start_date"] = ini + "T00:00:00"       # começo do dia, formato local
+            if fim:
+                cand["finish_date"] = fim + "T23:59:59"
+            light_diag += " promo_datas=" + json.dumps({"ini": cand.get("start_date"), "fim": cand.get("finish_date"), "status": pd.get("status")}, ensure_ascii=False)
 
     corpo = corpo_post(tipo, cand, ev["pb"])
     if not corpo:
@@ -340,10 +346,17 @@ def processar(fila, access):
         else:
             aviso = f" | ⚠️ {resumo_del} MAS a RE-ENTRADA falhou — revise o anúncio no ML (pode ter ficado sem promoção)"
             ok = False
+    motivo = ""
+    if not ok:
+        _t = json.dumps(resp, ensure_ascii=False).upper()
+        if "CREDIBILITY" in _t:
+            motivo = "FAÇA NA MÃO — o ML só aceita a relâmpago com um desconto maior do que o seu piso de margem permite. "
+        elif "START_DATE" in _t:
+            motivo = "FAÇA NA MÃO — essa campanha exige data que o ML não aceitou pela API. "
     gravar(fila["id"], {
         "status": "aplicada" if ok else "erro",
         "resultado": (f"OK {sc}{aviso}: {json.dumps(resp, ensure_ascii=False)[:220]}{light_diag}" if ok
-                      else f"{'ERRO ' + str(sc) if not aviso else 'ATENÇÃO'}{aviso} [enviei {json.dumps(corpo, ensure_ascii=False)}]: {json.dumps(resp, ensure_ascii=False)[:180]}{light_diag}"),
+                      else f"{motivo}{'ERRO ' + str(sc) if not aviso else 'ATENÇÃO'}{aviso} [enviei {json.dumps(corpo, ensure_ascii=False)}]: {json.dumps(resp, ensure_ascii=False)[:170]}{light_diag}"),
         "preco_aplicado": ev["pb"] if ok else None,
         "margem_aplicada": ev["margem"] if ok else None,
     })
