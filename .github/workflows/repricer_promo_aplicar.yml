@@ -17,6 +17,11 @@ on:
         type: choice
         options: ["SIM", "NAO"]
         default: "SIM"
+      margem_min:
+        description: "Piso (%) dos itens 'Padrão' — o MESMO usado na simulação"
+        type: string
+        required: false
+        default: "17"
       item_id:
         description: "Aplicar só ESTE anúncio (vazio = todos os aprovados da conta)"
         type: string
@@ -59,4 +64,5 @@ jobs:
           ITEM_IDS:    ${{ github.event.inputs.item_ids }}
           DRY_RUN:     ${{ github.event.inputs.dry_run == 'NAO' && '0' || '1' }}
           MAX_APLICAR: ${{ github.event.inputs.max_aplicar || '0' }}
+          MARGEM_MIN:  ${{ github.event.inputs.margem_min || '17' }}
         run: python repricer_promo_aplicar.py
