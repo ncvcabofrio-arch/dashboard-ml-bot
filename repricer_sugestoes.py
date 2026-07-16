@@ -10,6 +10,7 @@ import os
 import time
 import threading
 import requests
+from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
 from supabase import create_client
 from ml_auth import obter_access
@@ -316,6 +317,27 @@ def _data_promo(o, *chaves):
     return None
 
 
+def _parse_dt(v):
+    try:
+        dt = datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+
+
+def _vigente(o):
+    """False se a promoção ainda NÃO começou (programada/futura) ou já terminou.
+    Sem data de início = tratamos como vigente (a maioria das cofinanciadas não trava data)."""
+    ini = _parse_dt(o.get("start_date"))
+    fim = _parse_dt(_data_promo(o, "finish_date", "end_date"))
+    agora = datetime.now(timezone.utc)
+    if ini and ini > agora:
+        return False
+    if fim and fim < agora:
+        return False
+    return True
+
+
 def _rotulo(a):
     o = a["o"]
     return f"{o.get('name') or o.get('type') or '?'} R${a['pb']:.2f}->{a['margem']:.1f}%"
@@ -366,6 +388,8 @@ def processar_item(item_id, access, sid, detalhes):
                 break
         cand = [avaliar(o, cat, ltid, access, frete, custo) for o in cand_raw]
         cand = [c for c in cand if c]
+        # NÃO recomenda promoção que ainda não está vigente (programada/futura) nem já encerrada
+        cand = [c for c in cand if _vigente(c["o"])]
         seguras = [c for c in cand if c["margem"] >= piso]
 
         # ---- decide a ação (sua regra) ----
