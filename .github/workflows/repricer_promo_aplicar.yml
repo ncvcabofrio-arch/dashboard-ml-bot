@@ -22,6 +22,11 @@ on:
         type: string
         required: false
         default: ""
+      item_ids:
+        description: "Lista de anúncios (separados por vírgula) — o painel manda os selecionados"
+        type: string
+        required: false
+        default: ""
       max_aplicar:
         description: "Máx. de itens nesta rodada (0 = todos; use 1 no primeiro teste real)"
         type: string
@@ -51,6 +56,7 @@ jobs:
           SUPABASE_KEY:     ${{ secrets.SUPABASE_KEY }}
           SELLER_ID:   ${{ github.event.inputs.seller_id }}
           ITEM_ID:     ${{ github.event.inputs.item_id }}
+          ITEM_IDS:    ${{ github.event.inputs.item_ids }}
           DRY_RUN:     ${{ github.event.inputs.dry_run == 'NAO' && '0' || '1' }}
           MAX_APLICAR: ${{ github.event.inputs.max_aplicar || '0' }}
         run: python repricer_promo_aplicar.py
