@@ -104,6 +104,13 @@ def carregar_config():
                 CONFIG[r["chave"]] = r.get("valor")
     except Exception as e:
         print(f"(aviso: sem tabela repricer_config ainda: {e})", flush=True)
+    # piso PADRÃO editável no painel (chave 'piso_padrao') — vira o piso de quem não tem grupo.
+    try:
+        pp = CONFIG.get("piso_padrao")
+        if pp not in (None, ""):
+            rec.MARGEM_PADRAO = float(str(pp).replace(",", "."))
+    except (TypeError, ValueError):
+        pass
 
 
 SELLER_ID = (os.environ.get("SELLER_ID") or "").strip()
