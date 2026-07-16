@@ -244,10 +244,13 @@ def processar(fila, access):
     piso, grupo = rec.margem_minima_do(sku)
     # DIAGNÓSTICO geral (qualquer tipo): despeja os campos do candidato que o ML traz,
     # pra sabermos exatamente o que o POST precisa (ex.: start_date nas cofinanciadas).
-    light_diag = " || DIAG " + json.dumps({k: cand.get(k) for k in (
+    _diag = {k: cand.get(k) for k in (
         "id", "ref_id", "type", "status", "price", "original_price", "min_discounted_price",
         "max_discounted_price", "suggested_discounted_price", "stock", "start_date", "finish_date",
-        "meli_percentage", "seller_percentage", "name")}, ensure_ascii=False)
+        "meli_percentage", "seller_percentage", "name")}
+    _diag["ITEM_price"] = it.get("price")                 # preço ATUAL do anúncio (referência da credibilidade?)
+    _diag["ITEM_base_price"] = it.get("base_price")
+    light_diag = " || DIAG " + json.dumps(_diag, ensure_ascii=False)
     # RELÂMPAGO: o candidato JÁ traz o preço com desconto crível (suggested_discounted_price),
     # dentro da faixa [min_discounted_price, max_discounted_price]. Mandar o "price" cru fica
     # ACIMA do max => "não crível" (foi o bug). Usamos o sugerido, limitado pela faixa.
