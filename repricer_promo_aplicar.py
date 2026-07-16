@@ -69,19 +69,31 @@ def achar_candidato(ofertas, fila):
     return cands[0] if len(cands) == 1 else None
 
 
+def _com_datas(corpo, cand):
+    """Algumas campanhas exigem start_date/finish_date no POST (erro START_DATE).
+    Inclui quando o candidato informa essas datas."""
+    ini = cand.get("start_date")
+    fim = cand.get("finish_date") or cand.get("end_date")
+    if ini:
+        corpo["start_date"] = ini
+    if fim:
+        corpo["finish_date"] = fim
+    return corpo
+
+
 def corpo_post(tipo, cand, preco_alvo):
     """Monta o corpo do POST conforme o tipo (docs seller-promotions v2)."""
     tipo = (tipo or "").upper()
     if tipo in ("SMART", "PRICE_MATCHING", "PRICE_MATCHING_MELI_ALL"):
         # cofinanciada automatizada / preços competitivos: precisa do offer_id do candidato
         oid = cand.get("ref_id") or cand.get("offer_id") or cand.get("candidate_id") or cand.get("id")
-        return {"promotion_id": cand.get("id"), "promotion_type": tipo, "offer_id": oid}
+        return _com_datas({"promotion_id": cand.get("id"), "promotion_type": tipo, "offer_id": oid}, cand)
     if tipo == "LIGHTNING":
         st = cand.get("stock") or {}
         estoque = st.get("min") or st.get("remaining_stock") or 1
         return {"deal_price": round(preco_alvo, 2), "stock": int(estoque), "promotion_type": "LIGHTNING"}
     if tipo == "DEAL":
-        return {"promotion_id": cand.get("id"), "promotion_type": "DEAL", "deal_price": round(preco_alvo, 2)}
+        return _com_datas({"promotion_id": cand.get("id"), "promotion_type": "DEAL", "deal_price": round(preco_alvo, 2)}, cand)
     return None
 
 
@@ -119,6 +131,21 @@ def req_delete(path, access, tent=3):
         return r.status_code, r.json()
     except Exception:
         return r.status_code, (r.text if r is not None else None)
+
+
+def remover_oferta(iid, o, access):
+    """Remove UMA oferta ativa (usada no 'trocar' DEPOIS de entrar na nova — a remoção
+    em massa tiraria a nova junto). Relâmpago/DOD não saem por API."""
+    otipo = (o.get("type") or "").upper()
+    if otipo in ("LIGHTNING", "DOD"):
+        return None, f"{otipo}(não sai por API)", None
+    qs = f"?promotion_type={otipo}&app_version=v2"
+    if o.get("id"):
+        qs += f"&promotion_id={o['id']}"
+    if o.get("ref_id"):
+        qs += f"&offer_id={o['ref_id']}"
+    sc, body = req_delete(f"/seller-promotions/items/{iid}{qs}", access)
+    return sc, otipo, body
 
 
 def remover_todas(iid, access):
@@ -253,35 +280,24 @@ def processar(fila, access):
         return "simulado"
 
     # ---- APLICAÇÃO REAL ----
-    aviso = ""
-    if acao == "trocar":
-        # consolida: REMOVE todas as atuais (bulk) e depois ENTRA só na sugerida.
-        # (a remoção em massa apagaria a nova também, por isso removemos ANTES de entrar.)
-        scb, resumo_del, body_del = remover_todas(iid, access)
-        aviso = " | " + resumo_del
-        # ids do candidato mudam após a remoção — re-busca e revalida
-        ofertas2 = rec.ofertas_do_item(iid, access)
-        cand2 = achar_candidato(ofertas2, fila)
-        if not cand2 or not rec.cand_vigente(cand2, access):
-            gravar(fila["id"], {"status": "erro",
-                                "resultado": f"removi as atuais ({resumo_del}) MAS o candidato sumiu — item pode ter ficado SEM promoção; reveja"})
-            print(f"  [ERRO] trocar {iid} candidato sumiu após remover", flush=True)
-            return "cand_sumiu_pos_del"
-        ev = rec.avaliar(cand2, cat, ltid, access, frete, custo)
-        if not ev or ev["margem"] < piso:
-            gravar(fila["id"], {"status": "erro",
-                                "resultado": f"removi as atuais ({resumo_del}) MAS margem ficou {(ev['margem'] if ev else '?')}% (< piso {piso:.0f}%) — item SEM promoção; reveja"})
-            print(f"  [ERRO] trocar {iid} margem pós-remoção", flush=True)
-            return "abaixo_piso_pos_del"
-        corpo = corpo_post(tipo, cand2, ev["pb"]) or corpo
-
+    # ORDEM SEGURA: ENTRA na nova PRIMEIRO. Se falhar, NÃO remove nada — o item fica
+    # exatamente como estava (nunca sem promoção). Só depois de entrar é que sai das antigas.
     sc, resp = post(f"/seller-promotions/items/{iid}?app_version=v2", access, corpo)
     ok = sc in (200, 201)
-    if not ok and acao == "trocar":
-        aviso += " ⚠️ removi as atuais mas a NOVA falhou — item pode ter ficado SEM promoção; reveja"
+    aviso = ""
+    if ok and acao == "trocar" and antigas:
+        removidas, falhas = [], []
+        for o in antigas:
+            scd, rot, _ = remover_oferta(iid, o, access)   # uma a uma (bulk tiraria a nova junto)
+            (removidas if scd in (200, 201) else falhas).append(rot)
+        if removidas:
+            aviso += f" | saiu de: {', '.join(removidas)}"
+        if falhas:
+            aviso += f" | não saiu de: {', '.join(falhas)}"
     gravar(fila["id"], {
         "status": "aplicada" if ok else "erro",
-        "resultado": (f"OK {sc}{aviso}: {json.dumps(resp, ensure_ascii=False)[:320]}" if ok else f"ERRO {sc}{aviso}: {json.dumps(resp, ensure_ascii=False)[:320]}"),
+        "resultado": (f"OK {sc}{aviso}: {json.dumps(resp, ensure_ascii=False)[:280]}" if ok
+                      else f"ERRO {sc} [enviei {json.dumps(corpo, ensure_ascii=False)}]: {json.dumps(resp, ensure_ascii=False)[:210]} — item mantido como estava"),
         "preco_aplicado": ev["pb"] if ok else None,
         "margem_aplicada": ev["margem"] if ok else None,
     })
