@@ -1,27 +1,49 @@
-name: Repricer - Sonda Competitiva (Fase 1, leitura)
+name: Repricer - Aplicar promocoes (Fase 2)
 
-# Cruza seus anúncios de CATÁLOGO com a concorrência (price_to_win + concorrentes)
-# e a sua margem, e imprime a DECISÃO que o robô tomaria. NÃO escreve nada.
+# Lê a FILA de promoções aprovadas no painel (repricer_promo_fila, status='aprovada'),
+# RE-CHECA a margem agora e entra na promoção no ML.
+# DRY_RUN=SIM (padrão) => só SIMULA: mostra o POST e a margem, não aplica nada.
+# DRY_RUN=NAO          => aplica de verdade. Comece sempre com SIM e 1 item (max_aplicar=1).
 on:
   workflow_dispatch:
     inputs:
       seller_id:
-        description: "Conta a analisar. Ex: 177795203"
-        type: string
-        required: true
-        default: ""
-      max_itens:
-        description: "Quantos anúncios amostrar (comece pequeno, ex 30)"
+        description: "Conta: 177795203=CF, 471489691=Cabo Frio, 3244206480=MG (vazio = todas)"
         type: string
         required: false
-        default: "30"
+        default: "177795203"
+      dry_run:
+        description: "SIM = só simula (recomendado) | NAO = aplica de verdade"
+        type: choice
+        options: ["SIM", "NAO"]
+        default: "SIM"
+      margem_min:
+        description: "Piso (%) dos itens 'Padrão' — o MESMO usado na simulação"
+        type: string
+        required: false
+        default: "17"
+      item_id:
+        description: "Aplicar só ESTE anúncio (vazio = todos os aprovados da conta)"
+        type: string
+        required: false
+        default: ""
+      item_ids:
+        description: "Lista de anúncios (separados por vírgula) — o painel manda os selecionados"
+        type: string
+        required: false
+        default: ""
+      max_aplicar:
+        description: "Máx. de itens nesta rodada (0 = todos; use 1 no primeiro teste real)"
+        type: string
+        required: false
+        default: "0"
 
 concurrency:
-  group: ml-puxador
+  group: ml-aplicar          # pista PRÓPRIA — não espera o piloto/sonda; roda na hora
   cancel-in-progress: false
 
 jobs:
-  competitivo:
+  aplicar:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -30,13 +52,17 @@ jobs:
           python-version: '3.11'
       - name: Instalar dependencias
         run: pip install requests supabase
-      - name: Sondar concorrencia (so leitura)
+      - name: Aplicar promocoes
         env:
           ML_CLIENT_ID:     ${{ secrets.ML_CLIENT_ID }}
           ML_CLIENT_SECRET: ${{ secrets.ML_CLIENT_SECRET }}
           ML_REFRESH_TOKEN: ${{ secrets.ML_REFRESH_TOKEN }}
           SUPABASE_URL:     ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY:     ${{ secrets.SUPABASE_KEY }}
-          SELLER_ID:  ${{ github.event.inputs.seller_id }}
-          MAX_ITENS:  ${{ github.event.inputs.max_itens }}
-        run: python repricer_competitivo.py
+          SELLER_ID:   ${{ github.event.inputs.seller_id }}
+          ITEM_ID:     ${{ github.event.inputs.item_id }}
+          ITEM_IDS:    ${{ github.event.inputs.item_ids }}
+          DRY_RUN:     ${{ github.event.inputs.dry_run == 'NAO' && '0' || '1' }}
+          MAX_APLICAR: ${{ github.event.inputs.max_aplicar || '0' }}
+          MARGEM_MIN:  ${{ github.event.inputs.margem_min || '17' }}
+        run: python repricer_promo_aplicar.py
