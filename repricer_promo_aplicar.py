@@ -30,6 +30,7 @@ SELLER_FILTRO = (os.environ.get("SELLER_ID") or "").strip()    # vazio = todas a
 ITEM_FILTRO = (os.environ.get("ITEM_ID") or "").strip()        # 1 anúncio só
 ITENS_FILTRO = [x.strip() for x in (os.environ.get("ITEM_IDS") or "").split(",") if x.strip()]  # lista (o painel manda os selecionados)
 MAX_APLICAR = int(os.environ.get("MAX_APLICAR", "0"))          # 0 = sem limite
+MARGEM_MIN = (os.environ.get("MARGEM_MIN") or "").strip()      # piso dos itens "Padrão" (mesmo da simulação)
 TIPOS_OK = {"SMART", "PRICE_MATCHING", "PRICE_MATCHING_MELI_ALL", "LIGHTNING", "DEAL"}
 
 
@@ -194,6 +195,23 @@ def processar(fila, access):
         return "sem_custo"
     frete, _ = rec.frete_de(sku, iid, access)
     piso, grupo = rec.margem_minima_do(sku)
+    # relâmpago exige preço "crível": encaixa o preço na faixa min/max que o ML informa
+    # (usa o sugerido do ML quando existe). avaliar()/corpo_post() já usam esse preço.
+    if tipo == "LIGHTNING":
+        try:
+            base = cand.get("suggested_discounted_price") or cand.get("price")
+            px = float(base) if base else None
+            if px is not None:
+                mx = cand.get("max_discounted_price")
+                mn = cand.get("min_discounted_price")
+                if mx is not None:
+                    px = min(px, float(mx))
+                if mn is not None:
+                    px = max(px, float(mn))
+                cand = dict(cand)
+                cand["price"] = round(px, 2)
+        except (TypeError, ValueError):
+            pass
     ev = rec.avaliar(cand, cat, ltid, access, frete, custo)
     if not ev:
         gravar(fila["id"], {"status": "erro", "resultado": "não deu pra avaliar a oferta agora"})
@@ -257,6 +275,14 @@ def processar(fila, access):
 
 def main():
     rec.preload()
+    # alinha o piso dos itens "Padrão" ao mesmo valor da simulação (ex.: 17),
+    # pra não recusar no apply o que a sugestão mostrou como OK.
+    if MARGEM_MIN:
+        try:
+            rec.MARGEM_PADRAO = float(MARGEM_MIN.replace(",", "."))
+            print(f"piso padrão (Padrão) = {rec.MARGEM_PADRAO}%", flush=True)
+        except ValueError:
+            pass
     q = sb.table("repricer_promo_fila").select("*").eq("status", "aprovada")
     if SELLER_FILTRO:
         q = q.eq("seller_id", SELLER_FILTRO)
