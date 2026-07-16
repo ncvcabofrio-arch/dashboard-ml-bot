@@ -26,6 +26,8 @@ sb = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"])
 CUSTOS = {}          # sku -> custo
 PISOS = {}           # sku -> (margem_minima, nome_grupo)
 _pct_lock = threading.Lock()
+SEM_CUSTO = []       # anúncios com promoção disponível MAS sem custo cadastrado (pra cadastrar)
+_sc_lock = threading.Lock()
 
 
 def _todas_linhas(tabela, cols, passo=1000):
@@ -305,6 +307,15 @@ def avaliar(o, cat, ltid, access, frete, custo):
             "recebe": round(recebe, 2), "margem": round(margem, 2)}
 
 
+def _data_promo(o, *chaves):
+    """Retorna a 1ª data preenchida entre as chaves (start_date/finish_date/end_date)."""
+    for k in chaves:
+        v = o.get(k)
+        if v:
+            return str(v)
+    return None
+
+
 def _rotulo(a):
     o = a["o"]
     return f"{o.get('name') or o.get('type') or '?'} R${a['pb']:.2f}->{a['margem']:.1f}%"
@@ -338,7 +349,12 @@ def processar_item(item_id, access, sid, detalhes):
         titulo = it.get("title")
         custo = custo_de(sku)
         if custo is None:
-            return None  # sem custo não dá pra avaliar margem
+            # tem promoção disponível, mas sem custo não dá pra avaliar margem —
+            # registra pra você saber quais cadastrar (aparece no painel)
+            with _sc_lock:
+                SEM_CUSTO.append({"seller_id": str(sid), "item_id": item_id,
+                                  "sku": sku, "titulo": titulo})
+            return None
         frete, frete_origem = frete_de(sku, item_id, access)
         piso, grupo = margem_minima_do(sku)
 
@@ -406,6 +422,8 @@ def processar_item(item_id, access, sid, detalhes):
                 "promocao_ref_id": o.get("ref_id"),
                 "promocao_nome": o.get("name"),
                 "promocao_tipo": o.get("type"),
+                "promocao_inicio": _data_promo(o, "start_date"),
+                "promocao_fim": _data_promo(o, "finish_date", "end_date"),
                 "preco_comprador": alvo["pb"],
                 "seller_percentage": alvo["sp"],
                 "meli_percentage": alvo["mp"],
@@ -414,9 +432,12 @@ def processar_item(item_id, access, sid, detalhes):
                 "margem_resultante": alvo["margem"],
             })
         elif acao == "manter" and ativa:
+            ao = ativa["o"]
             sug.update({
-                "promocao_nome": ativa["o"].get("name"),
-                "promocao_tipo": ativa["o"].get("type"),
+                "promocao_nome": ao.get("name"),
+                "promocao_tipo": ao.get("type"),
+                "promocao_inicio": _data_promo(ao, "start_date"),
+                "promocao_fim": _data_promo(ao, "finish_date", "end_date"),
                 "preco_comprador": ativa["pb"],
                 "recebe_liquido": ativa["recebe"],
                 "margem_resultante": ativa["margem"],
@@ -450,6 +471,7 @@ def main():
     preload()
     total_sug = 0
     contadores = {"entrar": 0, "trocar": 0, "sair": 0, "manter": 0}
+    SEM_CUSTO.clear()
     try:
         q = sb.table("repricer_sugestoes").delete().neq("status", "aplicada")  # limpa tudo menos aplicadas
         if SELLER_ID_FILTRO:
@@ -457,6 +479,13 @@ def main():
         q.execute()
     except Exception as e:
         print("Aviso: não consegui limpar pendentes:", e, flush=True)
+    try:
+        q = sb.table("repricer_sem_custo").delete().neq("item_id", "")         # limpa a lista anterior
+        if SELLER_ID_FILTRO:
+            q = q.eq("seller_id", SELLER_ID_FILTRO)
+        q.execute()
+    except Exception as e:
+        print("Aviso: não consegui limpar sem_custo:", e, flush=True)
 
     for seller_id, refresh in contas():
         access, sid, refresh = obter_access(sb, seller_id, refresh)
@@ -483,8 +512,16 @@ def main():
         total_sug += len(sugs)
         print(f"--- conta {sid}: {len(sugs)} registros gravados ---", flush=True)
 
+    # grava os "sem custo" (promoção disponível mas sem custo cadastrado)
+    if SEM_CUSTO:
+        try:
+            for i in range(0, len(SEM_CUSTO), 200):
+                sb.table("repricer_sem_custo").insert(SEM_CUSTO[i:i + 200]).execute()
+        except Exception as e:
+            print("Aviso: não consegui gravar sem_custo:", e, flush=True)
+
     resumo = ", ".join(f"{k}: {v}" for k, v in contadores.items())
-    print(f"\n=== {total_sug} registros gravados ({resumo}) — nada foi aplicado no ML ===", flush=True)
+    print(f"\n=== {total_sug} registros gravados ({resumo}) | {len(SEM_CUSTO)} sem custo — nada foi aplicado no ML ===", flush=True)
 
 
 if __name__ == "__main__":
