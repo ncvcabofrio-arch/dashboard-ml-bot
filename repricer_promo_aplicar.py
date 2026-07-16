@@ -242,30 +242,29 @@ def processar(fila, access):
         return "sem_custo"
     frete, _ = rec.frete_de(sku, iid, access)
     piso, grupo = rec.margem_minima_do(sku)
-    # relâmpago: o preço SUGERIDO e a faixa crível só vêm na consulta por promoção.
-    light_diag = ""
+    # DIAGNÓSTICO geral (qualquer tipo): despeja os campos do candidato que o ML traz,
+    # pra sabermos exatamente o que o POST precisa (ex.: start_date nas cofinanciadas).
+    light_diag = " || DIAG " + json.dumps({k: cand.get(k) for k in (
+        "id", "ref_id", "type", "status", "price", "original_price", "min_discounted_price",
+        "max_discounted_price", "suggested_discounted_price", "stock", "start_date", "finish_date",
+        "meli_percentage", "seller_percentage", "name")}, ensure_ascii=False)
+    # RELÂMPAGO: o candidato JÁ traz o preço com desconto crível (suggested_discounted_price),
+    # dentro da faixa [min_discounted_price, max_discounted_price]. Mandar o "price" cru fica
+    # ACIMA do max => "não crível" (foi o bug). Usamos o sugerido, limitado pela faixa.
     if tipo == "LIGHTNING":
-        det = detalhe_relampago(iid, cand.get("id"), access)
-        # DIAGNÓSTICO: despeja o que o ML traz de verdade (candidato cru + consulta por promoção)
-        _cf = {k: cand.get(k) for k in ("id", "ref_id", "status", "price", "original_price",
-               "min_discounted_price", "max_discounted_price", "suggested_discounted_price",
-               "stock", "start_date", "finish_date")}
-        _df = (det if isinstance(det, dict) else det)
-        light_diag = " || DIAG cand=" + json.dumps(_cf, ensure_ascii=False) + " det=" + json.dumps(_df, ensure_ascii=False)
-        if det and det.get("price"):
-            try:
-                px = float(det["price"])                       # preço sugerido pelo ML (crível)
-                mx = det.get("max_discounted_price")
-                mn = det.get("min_discounted_price")
-                if mx is not None:
-                    px = min(px, float(mx))
-                if mn is not None:
-                    px = max(px, float(mn))
-                cand = dict(cand)
-                cand["price"] = round(px, 2)
-                cand["stock"] = det.get("stock") or cand.get("stock")   # {min,max} da relâmpago
-            except (TypeError, ValueError):
-                pass
+        try:
+            px = cand.get("suggested_discounted_price") or cand.get("max_discounted_price") or cand.get("price")
+            px = float(px)
+            mx = cand.get("max_discounted_price")
+            mn = cand.get("min_discounted_price")
+            if mx is not None:
+                px = min(px, float(mx))
+            if mn is not None:
+                px = max(px, float(mn))
+            cand = dict(cand)
+            cand["price"] = round(px, 2)
+        except (TypeError, ValueError):
+            pass
     ev = rec.avaliar(cand, cat, ltid, access, frete, custo)
     if not ev:
         gravar(fila["id"], {"status": "erro", "resultado": "não deu pra avaliar a oferta agora"})
