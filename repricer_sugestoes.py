@@ -25,6 +25,7 @@ sb = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"])
 
 # caches pré-carregados (evitam ida ao banco por item; seguros entre threads)
 CUSTOS = {}          # sku -> custo
+CUSTO_ITEM = {}      # item_id -> custo (pra anúncios SEM SKU, preenchido no painel)
 PISOS = {}           # sku -> (margem_minima, nome_grupo)
 _pct_lock = threading.Lock()
 SEM_CUSTO = []       # anúncios com promoção disponível MAS sem custo cadastrado (pra cadastrar)
@@ -51,6 +52,12 @@ def preload():
                 CUSTOS[r["sku"]] = float(r["custo"])
     except Exception as e:
         print("Aviso: não consegui pré-carregar custos:", e, flush=True)
+    try:
+        for r in _todas_linhas("repricer_custo_item", "item_id, custo"):
+            if r.get("item_id") and r.get("custo") is not None:
+                CUSTO_ITEM[r["item_id"]] = float(r["custo"])
+    except Exception as e:
+        print("Aviso: não consegui pré-carregar custo por anúncio:", e, flush=True)
     try:
         grupos = {g["id"]: (float(g["margem_minima"]), g.get("nome") or "Grupo")
                   for g in _todas_linhas("repricer_grupos", "id, margem_minima, nome")}
@@ -141,6 +148,15 @@ def todos_ativos(sid, access):
 
 def custo_de(sku):
     return CUSTOS.get(sku) if sku else None
+
+
+def custo_efetivo(item_id, sku):
+    """Custo do anúncio: pelo SKU (tabela produtos) ou, se não tiver SKU/custo,
+    pelo custo POR ANÚNCIO preenchido no painel (repricer_custo_item)."""
+    c = CUSTOS.get(sku) if sku else None
+    if c is not None:
+        return c
+    return CUSTO_ITEM.get(item_id)
 
 
 CEP = os.environ.get("CEP", "01310100")   # destino de referência (Av. Paulista, SP)
@@ -369,7 +385,7 @@ def processar_item(item_id, access, sid, detalhes):
         cat = it.get("category_id")
         sku = it.get("seller_sku") or it.get("seller_custom_field")
         titulo = it.get("title")
-        custo = custo_de(sku)
+        custo = custo_efetivo(item_id, sku)
         if custo is None:
             # tem promoção disponível, mas sem custo não dá pra avaliar margem —
             # registra pra você saber quais cadastrar (aparece no painel)
