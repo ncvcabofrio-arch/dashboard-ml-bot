@@ -243,9 +243,15 @@ def processar(fila, access):
     frete, _ = rec.frete_de(sku, iid, access)
     piso, grupo = rec.margem_minima_do(sku)
     # relâmpago: o preço SUGERIDO e a faixa crível só vêm na consulta por promoção.
-    # usamos o preço sugerido pelo ML (crível) e o estoque mínimo pedido.
+    light_diag = ""
     if tipo == "LIGHTNING":
         det = detalhe_relampago(iid, cand.get("id"), access)
+        # DIAGNÓSTICO: despeja o que o ML traz de verdade (candidato cru + consulta por promoção)
+        _cf = {k: cand.get(k) for k in ("id", "ref_id", "status", "price", "original_price",
+               "min_discounted_price", "max_discounted_price", "suggested_discounted_price",
+               "stock", "start_date", "finish_date")}
+        _df = (det if isinstance(det, dict) else det)
+        light_diag = " || DIAG cand=" + json.dumps(_cf, ensure_ascii=False) + " det=" + json.dumps(_df, ensure_ascii=False)
         if det and det.get("price"):
             try:
                 px = float(det["price"])                       # preço sugerido pelo ML (crível)
@@ -312,15 +318,33 @@ def processar(fila, access):
             ok = False
     gravar(fila["id"], {
         "status": "aplicada" if ok else "erro",
-        "resultado": (f"OK {sc}{aviso}: {json.dumps(resp, ensure_ascii=False)[:260]}" if ok
-                      else f"{'ERRO ' + str(sc) if not aviso else 'ATENÇÃO'}{aviso} [enviei {json.dumps(corpo, ensure_ascii=False)}]: {json.dumps(resp, ensure_ascii=False)[:200]}"),
+        "resultado": (f"OK {sc}{aviso}: {json.dumps(resp, ensure_ascii=False)[:220]}{light_diag}" if ok
+                      else f"{'ERRO ' + str(sc) if not aviso else 'ATENÇÃO'}{aviso} [enviei {json.dumps(corpo, ensure_ascii=False)}]: {json.dumps(resp, ensure_ascii=False)[:180]}{light_diag}"),
         "preco_aplicado": ev["pb"] if ok else None,
         "margem_aplicada": ev["margem"] if ok else None,
     })
     return "aplicado" if ok else "erro_post"
 
 
+def grava_status(estado, resumo=None):
+    """Grava o status do aplicador pro painel ler (não depende da API do GitHub)."""
+    try:
+        agora = datetime.now(timezone.utc).isoformat()
+        row = {"workflow": "aplicador", "seller_id": SELLER_FILTRO or "todas", "estado": estado}
+        if estado == "rodando":
+            row["inicio"] = agora
+            row["fim"] = None
+            row["resumo"] = None
+        else:
+            row["fim"] = agora
+            row["resumo"] = resumo
+        sb.table("repricer_status").upsert(row, on_conflict="workflow").execute()
+    except Exception as e:
+        print("aviso: não gravei status:", e, flush=True)
+
+
 def main():
+    grava_status("rodando")
     rec.preload()
     # alinha o piso dos itens "Padrão" ao mesmo valor da simulação (ex.: 17),
     # pra não recusar no apply o que a sugestão mostrou como OK.
@@ -371,6 +395,7 @@ def main():
         resumo[r] = resumo.get(r, 0) + 1
         print(f"  = {f['item_id']} [{f.get('acao', '?')}] -> {r}", flush=True)  # 1 linha por item (todos aparecem)
     print("resumo:", json.dumps(resumo, ensure_ascii=False), flush=True)
+    grava_status("concluido", json.dumps(resumo, ensure_ascii=False))
 
 
 if __name__ == "__main__":
