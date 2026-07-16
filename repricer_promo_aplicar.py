@@ -27,7 +27,8 @@ API = rec.API
 sb = rec.sb
 DRY = (os.environ.get("DRY_RUN", "1").strip() != "0")          # padrão: simula
 SELLER_FILTRO = (os.environ.get("SELLER_ID") or "").strip()    # vazio = todas as contas
-ITEM_FILTRO = (os.environ.get("ITEM_ID") or "").strip()        # vazio = todos da fila; setado = só esse anúncio
+ITEM_FILTRO = (os.environ.get("ITEM_ID") or "").strip()        # 1 anúncio só
+ITENS_FILTRO = [x.strip() for x in (os.environ.get("ITEM_IDS") or "").split(",") if x.strip()]  # lista (o painel manda os selecionados)
 MAX_APLICAR = int(os.environ.get("MAX_APLICAR", "0"))          # 0 = sem limite
 TIPOS_OK = {"SMART", "PRICE_MATCHING", "PRICE_MATCHING_MELI_ALL", "LIGHTNING", "DEAL"}
 
@@ -243,30 +244,41 @@ def main():
     q = sb.table("repricer_promo_fila").select("*").eq("status", "aprovada")
     if SELLER_FILTRO:
         q = q.eq("seller_id", SELLER_FILTRO)
-    if ITEM_FILTRO:
+    # escopo por anúncio: lista (ITEM_IDS, o painel manda os selecionados) tem prioridade;
+    # senão 1 item (ITEM_ID); senão a fila inteira da conta.
+    if ITENS_FILTRO:
+        q = q.in_("item_id", ITENS_FILTRO)
+    elif ITEM_FILTRO:
         q = q.eq("item_id", ITEM_FILTRO)
     fila = (q.execute().data) or []
     if MAX_APLICAR:
         fila = fila[:MAX_APLICAR]
-    print(f"{'SIMULAÇÃO (DRY_RUN)' if DRY else 'APLICAÇÃO REAL'} — {len(fila)} item(ns) na fila"
-          + (f" | conta {SELLER_FILTRO}" if SELLER_FILTRO else "")
-          + (f" | item {ITEM_FILTRO}" if ITEM_FILTRO else ""), flush=True)
+    escopo = (f" | itens {len(ITENS_FILTRO)} selecionados" if ITENS_FILTRO
+              else (f" | item {ITEM_FILTRO}" if ITEM_FILTRO else " | FILA INTEIRA da conta"))
+    print(f"{'SIMULAÇÃO (DRY_RUN)' if DRY else 'APLICAÇÃO REAL'} — {len(fila)} item(ns)"
+          + (f" | conta {SELLER_FILTRO}" if SELLER_FILTRO else "") + escopo, flush=True)
     if not fila:
         return
 
-    tokens = {sid: rt for sid, rt in rec.contas()}
-    cache_access = {}
+    # resolve UM access token por conta — mesma mecânica do repricer_sugestoes.main()
+    # obter_access(sb, seller_id, refresh) -> (access, sid_real, refresh)
+    acessos = {}
+    for seller_id, refresh in rec.contas():
+        try:
+            access, sid, refresh = obter_access(sb, seller_id, refresh)
+            acessos[str(sid)] = access
+        except Exception as e:
+            print(f"  !! não consegui token de {seller_id}: {e}", flush=True)
+
     resumo = {}
     for f in fila:
         sid = str(f["seller_id"])
-        rt = tokens.get(sid) or tokens.get(int(sid) if sid.isdigit() else sid)
-        if not rt:
-            gravar(f["id"], {"status": "erro", "resultado": f"sem refresh_token da conta {sid}"})
+        access = acessos.get(sid)
+        if not access:
+            gravar(f["id"], {"status": "erro", "resultado": f"sem acesso à conta {sid} (token não resolveu)"})
             resumo["sem_token"] = resumo.get("sem_token", 0) + 1
             continue
-        if sid not in cache_access:
-            cache_access[sid] = obter_access(rt)
-        r = processar(f, cache_access[sid])
+        r = processar(f, access)
         resumo[r] = resumo.get(r, 0) + 1
     print("resumo:", json.dumps(resumo, ensure_ascii=False), flush=True)
 
