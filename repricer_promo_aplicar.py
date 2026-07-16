@@ -99,16 +99,21 @@ def corpo_post(tipo, cand, preco_alvo):
 
 def detalhe_relampago(iid, promotion_id, access):
     """Preço SUGERIDO e faixa crível da relâmpago só vêm na consulta POR PROMOÇÃO.
-    Retorna {price(sugerido), min_discounted_price, max_discounted_price, stock:{min,max}} ou None."""
+    IMPORTANTE: sem filtro de status o ML devolve só os ATIVOS — como o item é CANDIDATO,
+    precisa de status=candidate. Retorna {price(sugerido), min/max_discounted_price, stock, datas}."""
     if not promotion_id:
         return None
-    st, d = rec.get(f"/seller-promotions/promotions/{promotion_id}/items"
-                    f"?promotion_type=LIGHTNING&item_id={iid}&app_version=v2", access)
-    res = (d.get("results") if isinstance(d, dict) else None) or []
-    for r in res:
-        if r.get("id") == iid:
-            return r
-    return res[0] if res else None
+    base = (f"/seller-promotions/promotions/{promotion_id}/items"
+            f"?promotion_type=LIGHTNING&item_id={iid}&app_version=v2")
+    for extra in ("&status=candidate", "&status=pending", "", "&status=started"):
+        st, d = rec.get(base + extra, access)
+        res = (d.get("results") if isinstance(d, dict) else None) or []
+        for r in res:
+            if r.get("id") == iid:
+                return r
+        if res:
+            return res[0]
+    return None
 
 
 def gravar(fila_id, patch):
@@ -286,18 +291,29 @@ def processar(fila, access):
     ok = sc in (200, 201)
     aviso = ""
     if ok and acao == "trocar" and antigas:
-        removidas, falhas = [], []
-        for o in antigas:
-            scd, rot, _ = remover_oferta(iid, o, access)   # uma a uma (bulk tiraria a nova junto)
-            (removidas if scd in (200, 201) else falhas).append(rot)
-        if removidas:
-            aviso += f" | saiu de: {', '.join(removidas)}"
-        if falhas:
-            aviso += f" | não saiu de: {', '.join(falhas)}"
+        # O delete INDIVIDUAL de cofinanciada o ML aceita (200) mas NÃO remove. O delete EM MASSA
+        # funciona. Como a nova já entrou com sucesso (validado acima), consolidamos: remove tudo
+        # em massa e re-entra só na sugerida. O enter-first garante que promos que exigem start_date
+        # (ou preço não crível) já teriam falhado antes daqui — então não chega a remover à toa.
+        scb, resumo_del, _ = remover_todas(iid, access)
+        ofertas2 = rec.ofertas_do_item(iid, access)
+        cand2 = achar_candidato(ofertas2, fila)
+        reok = False
+        if cand2 and rec.cand_vigente(cand2, access):
+            corpo2 = corpo_post(tipo, cand2, ev["pb"]) or corpo
+            sc2, resp2 = post(f"/seller-promotions/items/{iid}?app_version=v2", access, corpo2)
+            reok = sc2 in (200, 201)
+            if reok:
+                resp = resp2
+        if reok:
+            aviso = f" | consolidado ({resumo_del}); ficou só na sugerida ✓"
+        else:
+            aviso = f" | ⚠️ {resumo_del} MAS a RE-ENTRADA falhou — revise o anúncio no ML (pode ter ficado sem promoção)"
+            ok = False
     gravar(fila["id"], {
         "status": "aplicada" if ok else "erro",
-        "resultado": (f"OK {sc}{aviso}: {json.dumps(resp, ensure_ascii=False)[:280]}" if ok
-                      else f"ERRO {sc} [enviei {json.dumps(corpo, ensure_ascii=False)}]: {json.dumps(resp, ensure_ascii=False)[:210]} — item mantido como estava"),
+        "resultado": (f"OK {sc}{aviso}: {json.dumps(resp, ensure_ascii=False)[:260]}" if ok
+                      else f"{'ERRO ' + str(sc) if not aviso else 'ATENÇÃO'}{aviso} [enviei {json.dumps(corpo, ensure_ascii=False)}]: {json.dumps(resp, ensure_ascii=False)[:200]}"),
         "preco_aplicado": ev["pb"] if ok else None,
         "margem_aplicada": ev["margem"] if ok else None,
     })
