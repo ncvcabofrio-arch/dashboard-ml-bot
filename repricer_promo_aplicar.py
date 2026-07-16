@@ -106,18 +106,17 @@ def req_delete(path, access, tent=3):
         return r.status_code, (r.text if r is not None else None)
 
 
-def remover_oferta(iid, o, access):
-    """Remove UMA oferta ativa do item (usada no 'trocar', pra sair das antigas)."""
-    otipo = (o.get("type") or "").upper()
-    if otipo in ("LIGHTNING", "DOD"):
-        return None, "relâmpago/DOD não sai por API"
-    qs = f"?promotion_type={otipo}&app_version=v2"
-    if o.get("id"):
-        qs += f"&promotion_id={o['id']}"
-    if o.get("ref_id"):
-        qs += f"&offer_id={o['ref_id']}"
-    sc, _ = req_delete(f"/seller-promotions/items/{iid}{qs}", access)
-    return sc, otipo
+def remover_todas(iid, access):
+    """Remove em MASSA todas as ofertas do item (endpoint bulk do ML).
+    Não remove relâmpago(LIGHTNING)/DOD — esses só pausando o anúncio.
+    Retorna (status, resumo_legível, corpo_bruto)."""
+    sc, body = req_delete(f"/seller-promotions/items/{iid}?app_version=v2", access)
+    ok_ids, errs = [], []
+    if isinstance(body, dict):
+        ok_ids = [x.get("offer_id") for x in (body.get("successful_ids") or [])]
+        errs = body.get("errors") or []
+    resumo = f"bulk {sc}: {len(ok_ids)} removida(s)" + (f", {len(errs)} erro(s)" if errs else "")
+    return sc, resumo, body
 
 
 def executar_sair(fila, iid, ofertas, access):
@@ -127,20 +126,21 @@ def executar_sair(fila, iid, ofertas, access):
         gravar(fila["id"], {"status": "aplicada", "resultado": "não havia promoção ativa (nada a remover)"})
         return "nada_a_remover"
     nomes = [(o.get("name") or o.get("type") or "?") for o in ativas]
+    lights = [(o.get("name") or o.get("type") or "?") for o in ativas
+              if (o.get("type") or "").upper() in ("LIGHTNING", "DOD")]
     if DRY:
         gravar(fila["id"], {"status": "aprovada", "resultado": f"[SIMULADO] SAIR de: {', '.join(nomes)}"})
         print(f"  [DRY] sair {iid} -> {nomes}", flush=True)
         return "simulado"
-    removidas, falhas = [], []
-    for o in ativas:
-        scd, rot = remover_oferta(iid, o, access)
-        (removidas if scd in (200, 201) else falhas).append(rot)
+    sc, resumo, body = remover_todas(iid, access)
+    ok = sc in (200, 201)
+    aviso = (f" | relâmpago/DOD não sai por API: {', '.join(lights)} (pause o anúncio)" if lights else "")
     gravar(fila["id"], {
-        "status": "aplicada" if removidas else "erro",
-        "resultado": (f"saiu de: {', '.join(removidas)}" + (f" | NÃO saiu de: {', '.join(falhas)} (remova na mão)" if falhas else "")),
+        "status": "aplicada" if ok else "erro",
+        "resultado": f"{resumo}{aviso} | {json.dumps(body, ensure_ascii=False)[:300]}",
     })
-    print(f"  [{'OK' if removidas else 'ERRO'}] sair {iid} removidas={removidas} falhas={falhas}", flush=True)
-    return "saiu" if removidas else "erro_sair"
+    print(f"  [{'OK' if ok else 'ERRO'}] sair {iid} {resumo}", flush=True)
+    return "saiu" if ok else "erro_sair"
 
 
 def processar(fila, access):
@@ -174,6 +174,11 @@ def processar(fila, access):
         msg = "essa promoção já está ATIVA no item" if ja else "candidato aprovado não está mais disponível"
         gravar(fila["id"], {"status": "erro", "resultado": msg})
         return "sem_candidato"
+    # trava de vigência: nunca entrar numa promoção que ainda não começou (programada/futura)
+    if not rec._vigente(cand):
+        gravar(fila["id"], {"status": "erro",
+                            "resultado": "promoção ainda não está vigente (programada) — não apliquei"})
+        return "programada"
 
     # ---- RE-CHECAGEM de margem (a trava de segurança) ----
     st, it = rec.get(f"/items/{iid}", access)
@@ -213,25 +218,36 @@ def processar(fila, access):
               + (f" | sairia de {sair_de}" if sair_de else ""), flush=True)
         return "simulado"
 
-    # ---- APLICAÇÃO REAL: ordem segura = ENTRA na nova primeiro; só depois SAI das antigas ----
+    # ---- APLICAÇÃO REAL ----
+    aviso = ""
+    if acao == "trocar":
+        # consolida: REMOVE todas as atuais (bulk) e depois ENTRA só na sugerida.
+        # (a remoção em massa apagaria a nova também, por isso removemos ANTES de entrar.)
+        scb, resumo_del, body_del = remover_todas(iid, access)
+        aviso = " | " + resumo_del
+        # ids do candidato mudam após a remoção — re-busca e revalida
+        ofertas2 = rec.ofertas_do_item(iid, access)
+        cand2 = achar_candidato(ofertas2, fila)
+        if not cand2 or not rec._vigente(cand2):
+            gravar(fila["id"], {"status": "erro",
+                                "resultado": f"removi as atuais ({resumo_del}) MAS o candidato sumiu — item pode ter ficado SEM promoção; reveja"})
+            print(f"  [ERRO] trocar {iid} candidato sumiu após remover", flush=True)
+            return "cand_sumiu_pos_del"
+        ev = rec.avaliar(cand2, cat, ltid, access, frete, custo)
+        if not ev or ev["margem"] < piso:
+            gravar(fila["id"], {"status": "erro",
+                                "resultado": f"removi as atuais ({resumo_del}) MAS margem ficou {(ev['margem'] if ev else '?')}% (< piso {piso:.0f}%) — item SEM promoção; reveja"})
+            print(f"  [ERRO] trocar {iid} margem pós-remoção", flush=True)
+            return "abaixo_piso_pos_del"
+        corpo = corpo_post(tipo, cand2, ev["pb"]) or corpo
+
     sc, resp = post(f"/seller-promotions/items/{iid}?app_version=v2", access, corpo)
     ok = sc in (200, 201)
-    aviso = ""
-    if ok and acao == "trocar" and antigas:
-        removidas, falhas = [], []
-        for o in antigas:
-            scd, rot = remover_oferta(iid, o, access)
-            if scd in (200, 201):
-                removidas.append(rot)
-            else:
-                falhas.append(rot)
-        if removidas:
-            aviso += f" | saiu de: {', '.join(removidas)}"
-        if falhas:
-            aviso += f" | NÃO saiu de: {', '.join(falhas)} (remova na mão)"
+    if not ok and acao == "trocar":
+        aviso += " ⚠️ removi as atuais mas a NOVA falhou — item pode ter ficado SEM promoção; reveja"
     gravar(fila["id"], {
         "status": "aplicada" if ok else "erro",
-        "resultado": (f"OK {sc}{aviso}: {json.dumps(resp)[:340]}" if ok else f"ERRO {sc}: {json.dumps(resp)[:340]}"),
+        "resultado": (f"OK {sc}{aviso}: {json.dumps(resp, ensure_ascii=False)[:320]}" if ok else f"ERRO {sc}{aviso}: {json.dumps(resp, ensure_ascii=False)[:320]}"),
         "preco_aplicado": ev["pb"] if ok else None,
         "margem_aplicada": ev["margem"] if ok else None,
     })
