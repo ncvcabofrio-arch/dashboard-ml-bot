@@ -85,6 +85,20 @@ def corpo_post(tipo, cand, preco_alvo):
     return None
 
 
+def detalhe_relampago(iid, promotion_id, access):
+    """Preço SUGERIDO e faixa crível da relâmpago só vêm na consulta POR PROMOÇÃO.
+    Retorna {price(sugerido), min_discounted_price, max_discounted_price, stock:{min,max}} ou None."""
+    if not promotion_id:
+        return None
+    st, d = rec.get(f"/seller-promotions/promotions/{promotion_id}/items"
+                    f"?promotion_type=LIGHTNING&item_id={iid}&app_version=v2", access)
+    res = (d.get("results") if isinstance(d, dict) else None) or []
+    for r in res:
+        if r.get("id") == iid:
+            return r
+    return res[0] if res else None
+
+
 def gravar(fila_id, patch):
     patch["aplicado_em"] = datetime.now(timezone.utc).isoformat()
     try:
@@ -175,10 +189,11 @@ def processar(fila, access):
         msg = "essa promoção já está ATIVA no item" if ja else "candidato aprovado não está mais disponível"
         gravar(fila["id"], {"status": "erro", "resultado": msg})
         return "sem_candidato"
-    # trava de vigência: nunca entrar numa promoção que ainda não começou (programada/futura)
-    if not rec._vigente(cand):
+    # trava de vigência (consulta o detalhe da promoção): nunca entrar em promo programada/futura.
+    # Fica ANTES da remoção das outras, pra nunca deixar o item sem promoção por causa disso.
+    if not rec.cand_vigente(cand, access):
         gravar(fila["id"], {"status": "erro",
-                            "resultado": "promoção ainda não está vigente (programada) — não apliquei"})
+                            "resultado": "promoção ainda não está vigente (programada) — não apliquei (item mantido como estava)"})
         return "programada"
 
     # ---- RE-CHECAGEM de margem (a trava de segurança) ----
@@ -195,23 +210,24 @@ def processar(fila, access):
         return "sem_custo"
     frete, _ = rec.frete_de(sku, iid, access)
     piso, grupo = rec.margem_minima_do(sku)
-    # relâmpago exige preço "crível": encaixa o preço na faixa min/max que o ML informa
-    # (usa o sugerido do ML quando existe). avaliar()/corpo_post() já usam esse preço.
+    # relâmpago: o preço SUGERIDO e a faixa crível só vêm na consulta por promoção.
+    # usamos o preço sugerido pelo ML (crível) e o estoque mínimo pedido.
     if tipo == "LIGHTNING":
-        try:
-            base = cand.get("suggested_discounted_price") or cand.get("price")
-            px = float(base) if base else None
-            if px is not None:
-                mx = cand.get("max_discounted_price")
-                mn = cand.get("min_discounted_price")
+        det = detalhe_relampago(iid, cand.get("id"), access)
+        if det and det.get("price"):
+            try:
+                px = float(det["price"])                       # preço sugerido pelo ML (crível)
+                mx = det.get("max_discounted_price")
+                mn = det.get("min_discounted_price")
                 if mx is not None:
                     px = min(px, float(mx))
                 if mn is not None:
                     px = max(px, float(mn))
                 cand = dict(cand)
                 cand["price"] = round(px, 2)
-        except (TypeError, ValueError):
-            pass
+                cand["stock"] = det.get("stock") or cand.get("stock")   # {min,max} da relâmpago
+            except (TypeError, ValueError):
+                pass
     ev = rec.avaliar(cand, cat, ltid, access, frete, custo)
     if not ev:
         gravar(fila["id"], {"status": "erro", "resultado": "não deu pra avaliar a oferta agora"})
@@ -246,7 +262,7 @@ def processar(fila, access):
         # ids do candidato mudam após a remoção — re-busca e revalida
         ofertas2 = rec.ofertas_do_item(iid, access)
         cand2 = achar_candidato(ofertas2, fila)
-        if not cand2 or not rec._vigente(cand2):
+        if not cand2 or not rec.cand_vigente(cand2, access):
             gravar(fila["id"], {"status": "erro",
                                 "resultado": f"removi as atuais ({resumo_del}) MAS o candidato sumiu — item pode ter ficado SEM promoção; reveja"})
             print(f"  [ERRO] trocar {iid} candidato sumiu após remover", flush=True)
@@ -269,7 +285,6 @@ def processar(fila, access):
         "preco_aplicado": ev["pb"] if ok else None,
         "margem_aplicada": ev["margem"] if ok else None,
     })
-    print(f"  [{'OK' if ok else 'ERRO'}] {acao} {iid} {tipo} {sc}{aviso}", flush=True)
     return "aplicado" if ok else "erro_post"
 
 
@@ -322,6 +337,7 @@ def main():
             continue
         r = processar(f, access)
         resumo[r] = resumo.get(r, 0) + 1
+        print(f"  = {f['item_id']} [{f.get('acao', '?')}] -> {r}", flush=True)  # 1 linha por item (todos aparecem)
     print("resumo:", json.dumps(resumo, ensure_ascii=False), flush=True)
 
 
