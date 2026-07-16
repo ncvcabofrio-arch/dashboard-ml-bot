@@ -380,9 +380,11 @@ def cand_vigente(o, access):
     if o.get("start_date") or o.get("finish_date"):
         return _vigente(o)
     d = _promo_detalhe(o.get("id"), o.get("type"), access)
-    if not isinstance(d, dict):
-        return True                       # sem info nenhuma, não descarta
-    status = (d.get("status") or "").lower()
+    # resposta de erro do ML vem como dict com "status" inteiro (404, 400...) e "error";
+    # nesse caso não dá pra determinar — não descarta (a trava do aplicador ainda pega).
+    if not isinstance(d, dict) or d.get("error") or not d.get("id"):
+        return True
+    status = str(d.get("status") or "").lower()
     if status == "started":
         return True
     if status in ("pending", "programmed", "scheduled", "finished"):
