@@ -119,19 +119,48 @@ def remover_oferta(iid, o, access):
     return sc, otipo
 
 
+def executar_sair(fila, iid, ofertas, access):
+    """SAIR: remove a(s) promoção(ões) ATIVA(s) do item (ex.: promo com prejuízo)."""
+    ativas = [o for o in ofertas if rec.eh_ativa(o)]
+    if not ativas:
+        gravar(fila["id"], {"status": "aplicada", "resultado": "não havia promoção ativa (nada a remover)"})
+        return "nada_a_remover"
+    nomes = [(o.get("name") or o.get("type") or "?") for o in ativas]
+    if DRY:
+        gravar(fila["id"], {"status": "aprovada", "resultado": f"[SIMULADO] SAIR de: {', '.join(nomes)}"})
+        print(f"  [DRY] sair {iid} -> {nomes}", flush=True)
+        return "simulado"
+    removidas, falhas = [], []
+    for o in ativas:
+        scd, rot = remover_oferta(iid, o, access)
+        (removidas if scd in (200, 201) else falhas).append(rot)
+    gravar(fila["id"], {
+        "status": "aplicada" if removidas else "erro",
+        "resultado": (f"saiu de: {', '.join(removidas)}" + (f" | NÃO saiu de: {', '.join(falhas)} (remova na mão)" if falhas else "")),
+    })
+    print(f"  [{'OK' if removidas else 'ERRO'}] sair {iid} removidas={removidas} falhas={falhas}", flush=True)
+    return "saiu" if removidas else "erro_sair"
+
+
 def processar(fila, access):
     iid = fila["item_id"]
     tipo = (fila.get("promocao_tipo") or "").upper()
     acao = fila.get("acao")
-    if acao not in ("entrar", "trocar"):
+    if acao not in ("entrar", "trocar", "sair"):
         gravar(fila["id"], {"status": "erro", "resultado": f"ação '{acao}' não aplicável aqui"})
         return "acao_invalida"
+
+    ofertas = rec.ofertas_do_item(iid, access)
+    if not isinstance(ofertas, list):
+        ofertas = []
+
+    if acao == "sair":
+        return executar_sair(fila, iid, ofertas, access)
+
     if tipo not in TIPOS_OK:
         gravar(fila["id"], {"status": "erro", "resultado": f"tipo {tipo} ainda não suportado pelo aplicador"})
         return "tipo_nao_suportado"
-
-    ofertas = rec.ofertas_do_item(iid, access)
-    if not isinstance(ofertas, list) or not ofertas:
+    if not ofertas:
         gravar(fila["id"], {"status": "erro", "resultado": "sem promoções no item agora (candidato expirou?)"})
         return "sem_oferta"
 
