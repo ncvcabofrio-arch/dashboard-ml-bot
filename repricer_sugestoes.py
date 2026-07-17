@@ -10,10 +10,10 @@ import os
 import time
 import threading
 import requests
+from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
 from supabase import create_client
 from ml_auth import obter_access
-
 API = "https://api.mercadolibre.com"
 # 0 = TODOS os ativos (pagina tudo). Ponha um número só pra testar rápido (ex.: 40).
 MAX_ITENS = int(os.environ.get("MAX_ITENS", os.environ.get("AMOSTRA", "0")))
@@ -21,15 +21,13 @@ MARGEM_PADRAO = float(os.environ.get("MARGEM_MIN", "18"))
 WORKERS = int(os.environ.get("WORKERS", "8"))   # itens processados em paralelo
 SELLER_ID_FILTRO = (os.environ.get("SELLER_ID") or "").strip()   # se setado, roda SÓ essa conta (ex.: testar a CF)
 sb = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"])
-
 # caches pré-carregados (evitam ida ao banco por item; seguros entre threads)
 CUSTOS = {}          # sku -> custo
+CUSTO_ITEM = {}      # item_id -> custo (pra anúncios SEM SKU, preenchido no painel)
 PISOS = {}           # sku -> (margem_minima, nome_grupo)
 _pct_lock = threading.Lock()
 SEM_CUSTO = []       # anúncios com promoção disponível MAS sem custo cadastrado (pra cadastrar)
 _sc_lock = threading.Lock()
-
-
 def _todas_linhas(tabela, cols, passo=1000):
     """Lê a tabela INTEIRA paginando (PostgREST devolve no máx 1000 linhas por vez)."""
     linhas, ini = [], 0
@@ -40,8 +38,6 @@ def _todas_linhas(tabela, cols, passo=1000):
             break
         ini += passo
     return linhas
-
-
 def preload():
     """Carrega custos e grupos de uma vez só, pra não bater no banco por item."""
     try:
@@ -50,6 +46,12 @@ def preload():
                 CUSTOS[r["sku"]] = float(r["custo"])
     except Exception as e:
         print("Aviso: não consegui pré-carregar custos:", e, flush=True)
+    try:
+        for r in _todas_linhas("repricer_custo_item", "item_id, custo"):
+            if r.get("item_id") and r.get("custo") is not None:
+                CUSTO_ITEM[r["item_id"]] = float(r["custo"])
+    except Exception as e:
+        print("Aviso: não consegui pré-carregar custo por anúncio:", e, flush=True)
     try:
         grupos = {g["id"]: (float(g["margem_minima"]), g.get("nome") or "Grupo")
                   for g in _todas_linhas("repricer_grupos", "id, margem_minima, nome")}
@@ -60,8 +62,6 @@ def preload():
     except Exception as e:
         print("Aviso: não consegui pré-carregar grupos:", e, flush=True)
     print(f"pré-carregado: {len(CUSTOS)} custos, {len(PISOS)} etiquetas de grupo", flush=True)
-
-
 def get(path, access, tent=3):
     r = None
     for i in range(tent):
@@ -74,8 +74,6 @@ def get(path, access, tent=3):
         return r.status_code, r.json()
     except Exception:
         return r.status_code, None
-
-
 def contas():
     res = sb.table("contas").select("seller_id, refresh_token").execute()
     cs = [(c["seller_id"], c.get("refresh_token")) for c in (res.data or []) if c.get("refresh_token")]
@@ -83,8 +81,6 @@ def contas():
     if not cs and seed:
         cs = [(None, seed)]
     return cs
-
-
 def todos_ativos(sid, access):
     """Retorna TODOS os item_ids ativos da conta (pagina de verdade).
     Usa offset até 1000; se a conta tiver mais que isso, muda pro modo 'scan'.
@@ -104,7 +100,6 @@ def todos_ativos(sid, access):
             break
         if not res or offset >= 1000 or (total is not None and offset >= total):
             break
-
     # conta grande (> 1000 ativos): refaz pelo 'scan', que não tem teto
     if not (MAX_ITENS and len(ids) >= MAX_ITENS) and total and total > 1000:
         ids = []
@@ -125,7 +120,6 @@ def todos_ativos(sid, access):
                 break
             if not scroll:
                 break
-
     # dedup preservando ordem
     seen = set()
     out = []
@@ -136,19 +130,19 @@ def todos_ativos(sid, access):
     if MAX_ITENS:
         out = out[:MAX_ITENS]
     return out, total
-
-
 def custo_de(sku):
     return CUSTOS.get(sku) if sku else None
-
-
+def custo_efetivo(item_id, sku):
+    """Custo do anúncio: pelo SKU (tabela produtos) ou, se não tiver SKU/custo,
+    pelo custo POR ANÚNCIO preenchido no painel (repricer_custo_item)."""
+    c = CUSTOS.get(sku) if sku else None
+    if c is not None:
+        return c
+    return CUSTO_ITEM.get(item_id)
 CEP = os.environ.get("CEP", "01310100")   # destino de referência (Av. Paulista, SP)
-
-
 def frete_anuncio(item_id, access):
     """Custo de envio DO ANÚNCIO (o que VOCÊ paga no frete grátis), lido de
     /items/{id}/shipping_options com um CEP de referência.
-
     Retorna (custo, origem):
       - custo = list_cost da opção de frete grátis (o valor que o ML te cobra,
         já com o desconto do Mercado Envios) — é o que bate com o
@@ -174,8 +168,6 @@ def frete_anuncio(item_id, access):
     if bc is not None:
         return round(float(bc), 2), "base_cost"
     return None, None
-
-
 def frete_de(sku, item_id, access):
     """Frete do anúncio (list_cost do shipping_options). Se a API não trouxer,
     usa 0.0 (não bate no banco aqui pra ser seguro entre threads)."""
@@ -183,20 +175,14 @@ def frete_de(sku, item_id, access):
     if custo is not None:
         return custo, origem
     return 0.0, "indisponivel"
-
-
 def margem_minima_do(sku):
     """Piso do grupo do produto (etiqueta -> grupo, pré-carregado); senão, padrão."""
     return PISOS.get(sku, (MARGEM_PADRAO, "Padrão"))
-
-
 # comissão = % fixa por (categoria, tipo de anúncio). Acima do "custo fixo"
 # (itens > R$79) a tarifa é só preço × %. Cacheamos a % pra não chamar a API
 # uma vez por oferta — isso derruba MUITO o tempo de execução.
 LIMITE_CUSTO_FIXO = 79.0
 _pct_cache = {}
-
-
 def _consulta_listing(preco, cat, ltid, access):
     path = f"/sites/MLB/listing_prices?price={preco}"
     if ltid:
@@ -207,8 +193,6 @@ def _consulta_listing(preco, cat, ltid, access):
     if isinstance(d, list) and d:
         d = d[0]
     return d if isinstance(d, dict) else None
-
-
 def _percentual(cat, ltid, access):
     key = (cat, ltid)
     if key in _pct_cache:
@@ -223,8 +207,6 @@ def _percentual(cat, ltid, access):
     with _pct_lock:
         _pct_cache[key] = pct
     return pct
-
-
 def comissao(preco, cat, ltid, access):
     if not preco:
         return None
@@ -236,12 +218,10 @@ def comissao(preco, cat, ltid, access):
     # itens baratos (tem custo fixo por unidade): consulta exata na API
     d = _consulta_listing(round(preco, 2), cat, ltid, access)
     return d.get("sale_fee_amount") if d else None
-
-
 def detalhes_itens(ids, access):
     """Busca detalhes de VÁRIOS itens de uma vez (multiget, 20 por chamada)."""
     out = {}
-    attrs = "id,price,listing_type_id,category_id,seller_sku,seller_custom_field,title,status"
+    attrs = "id,price,listing_type_id,category_id,seller_sku,seller_custom_field,title,status,available_quantity"
     for i in range(0, len(ids), 20):
         lote = ids[i:i + 20]
         st, d = get(f"/items?ids={','.join(lote)}&attributes={attrs}", access)
@@ -251,8 +231,6 @@ def detalhes_itens(ids, access):
                 if isinstance(b, dict) and b.get("id"):
                     out[b["id"]] = b
     return out
-
-
 def ofertas_do_item(item_id, access):
     """Lista as promoções do item. O RESUMO já traz preço, original e percentuais
     de cada oferta — o 'detalhe' devolvia a mesma lista, então uma chamada basta.
@@ -261,8 +239,6 @@ def ofertas_do_item(item_id, access):
     REALMENTE ativo (e sair delas), use participacoes_ativas()."""
     st, resumo = get(f"/seller-promotions/items/{item_id}?app_version=v2", access)
     return resumo if isinstance(resumo, list) else []
-
-
 def promocoes_do_vendedor(seller_id, access, limit=50, teto_paginas=40):
     """TODAS as promoções do vendedor (id, type, status), paginando com search_after.
     Doc: GET /seller-promotions/users/{USER_ID}?app_version=v2 ."""
@@ -282,8 +258,6 @@ def promocoes_do_vendedor(seller_id, access, limit=50, teto_paginas=40):
         if not sa:
             break
     return out
-
-
 def participacoes_ativas(item_id, seller_id, access):
     """Descobre em quais promoções ESTE item está ATIVO/programado — o caminho CONFIÁVEL
     da doc (o /seller-promotions/items/{id} não traz as ativas de campanha marketplace):
@@ -321,19 +295,13 @@ def participacoes_ativas(item_id, seller_id, access):
                 "status": sti,
             })
     return achadas
-
-
 # Você JÁ está participando quando o status é "started" (confirmado na sonda)
 # ou quando o ref_id começa com "OFFER-" (candidatas vêm como "CANDIDATE-").
 STATUS_ATIVA = {"started", "active", "in_progress", "ongoing"}
-
-
 def eh_ativa(o):
     if (o.get("status") or "").lower() in STATUS_ATIVA:
         return True
     return str(o.get("ref_id") or "").upper().startswith("OFFER-")
-
-
 def preco_oferta(o):
     """Preço que o comprador paga nessa oferta (candidatas têm 'price';
     ativas podem trazer o preço aplicado em outro campo)."""
@@ -346,8 +314,6 @@ def preco_oferta(o):
         except (TypeError, ValueError):
             pass
     return None
-
-
 def avaliar(o, cat, ltid, access, frete, custo):
     """Calcula a margem de UMA oferta (candidata ou ativa).
     Retorna None se não der pra avaliar (sem preço ou sem preço original)."""
@@ -368,8 +334,6 @@ def avaliar(o, cat, ltid, access, frete, custo):
     return {"o": o, "pb": round(pb, 2), "sp": sp, "mp": mp,
             "tarifa": round(tarifa, 2), "frete": round(frete, 2),
             "recebe": round(recebe, 2), "margem": round(margem, 2)}
-
-
 def _data_promo(o, *chaves):
     """Retorna a 1ª data preenchida entre as chaves (start_date/finish_date/end_date)."""
     for k in chaves:
@@ -377,13 +341,58 @@ def _data_promo(o, *chaves):
         if v:
             return str(v)
     return None
-
-
+def _parse_dt(v):
+    try:
+        dt = datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+def _vigente(o):
+    """False se a promoção ainda NÃO começou (programada/futura) ou já terminou.
+    Sem data de início = tratamos como vigente (a maioria das cofinanciadas não trava data)."""
+    ini = _parse_dt(o.get("start_date"))
+    fim = _parse_dt(_data_promo(o, "finish_date", "end_date"))
+    agora = datetime.now(timezone.utc)
+    if ini and ini > agora:
+        return False
+    if fim and fim < agora:
+        return False
+    return True
+_promo_cache = {}
+_promo_lock = threading.Lock()
+def _promo_detalhe(promotion_id, tipo, access):
+    """Detalhe da promoção (traz status: started/pending/finished e datas). Com cache
+    porque a MESMA promoção vale pra muitos itens (ex.: 'DESTAQUE 8.8' em 200 anúncios)."""
+    if not promotion_id:
+        return None
+    with _promo_lock:
+        if promotion_id in _promo_cache:
+            return _promo_cache[promotion_id]
+    st, d = get(f"/seller-promotions/promotions/{promotion_id}?promotion_type={tipo}&app_version=v2", access)
+    d = d if isinstance(d, dict) else None
+    with _promo_lock:
+        _promo_cache[promotion_id] = d
+    return d
+def cand_vigente(o, access):
+    """Vigência de um candidato. Usa a data do próprio candidato; se ela não vier
+    (comum nas cofinanciadas), consulta o DETALHE da promoção (status started=ativa,
+    pending=programada). É o jeito confiável de não recomendar/entrar em promo futura."""
+    if o.get("start_date") or o.get("finish_date"):
+        return _vigente(o)
+    d = _promo_detalhe(o.get("id"), o.get("type"), access)
+    # resposta de erro do ML vem como dict com "status" inteiro (404, 400...) e "error";
+    # nesse caso não dá pra determinar — não descarta (a trava do aplicador ainda pega).
+    if not isinstance(d, dict) or d.get("error") or not d.get("id"):
+        return True
+    status = str(d.get("status") or "").lower()
+    if status == "started":
+        return True
+    if status in ("pending", "programmed", "scheduled", "finished"):
+        return False
+    return _vigente(d)
 def _rotulo(a):
     o = a["o"]
     return f"{o.get('name') or o.get('type') or '?'} R${a['pb']:.2f}->{a['margem']:.1f}%"
-
-
 def processar_item(item_id, access, sid, detalhes):
     """Processa UM anúncio (só leitura) e devolve o dict da sugestão, ou None.
     Sem gravar no banco — é chamado em paralelo por várias threads."""
@@ -399,7 +408,6 @@ def processar_item(item_id, access, sid, detalhes):
                     and o.get("original_price") and preco_oferta(o)]
         if not ativas_raw and not cand_raw:
             return None
-
         it = detalhes.get(item_id)
         if not isinstance(it, dict):
             st, it = get(f"/items/{item_id}", access)
@@ -410,7 +418,7 @@ def processar_item(item_id, access, sid, detalhes):
         cat = it.get("category_id")
         sku = it.get("seller_sku") or it.get("seller_custom_field")
         titulo = it.get("title")
-        custo = custo_de(sku)
+        custo = custo_efetivo(item_id, sku)
         if custo is None:
             # tem promoção disponível, mas sem custo não dá pra avaliar margem —
             # registra pra você saber quais cadastrar (aparece no painel)
@@ -420,7 +428,6 @@ def processar_item(item_id, access, sid, detalhes):
             return None
         frete, frete_origem = frete_de(sku, item_id, access)
         piso, grupo = margem_minima_do(sku)
-
         ativa = None
         for o in ativas_raw:
             ev = avaliar(o, cat, ltid, access, frete, custo)
@@ -429,8 +436,10 @@ def processar_item(item_id, access, sid, detalhes):
                 break
         cand = [avaliar(o, cat, ltid, access, frete, custo) for o in cand_raw]
         cand = [c for c in cand if c]
+        # NÃO recomenda promoção que ainda não está vigente (programada/futura) nem já encerrada.
+        # cand_vigente consulta o detalhe da promoção quando a data não vem no candidato.
+        cand = [c for c in cand if cand_vigente(c["o"], access)]
         seguras = [c for c in cand if c["margem"] >= piso]
-
         # ---- decide a ação (sua regra) ----
         # NUNCA sai de uma promoção que já está — mesmo abaixo do piso. Só TROCA se houver
         # uma que respeite o piso E pague MAIS (recebe maior). Senão, MANTÉM (com alerta se abaixo).
@@ -451,12 +460,10 @@ def processar_item(item_id, access, sid, detalhes):
                 alvo = min(seguras, key=lambda a: a["pb"])
             else:
                 return None
-
         rejeitadas = " | ".join(
             _rotulo(a) + (" (ok)" if a["margem"] >= piso else f" (<{piso:.0f}%)")
             for a in sorted(cand, key=lambda x: x["pb"]) if a is not alvo
         )
-
         sug = {
             "seller_id": str(sid),
             "item_id": item_id,
@@ -472,6 +479,7 @@ def processar_item(item_id, access, sid, detalhes):
             "custo": custo,
             "custo_envio": frete,
             "custo_envio_origem": frete_origem,
+            "estoque": it.get("available_quantity"),
             "grupo": grupo,
             "margem_minima": piso,
             "alternativas": max(len(seguras) - (1 if alvo in seguras else 0), 0),
@@ -509,8 +517,6 @@ def processar_item(item_id, access, sid, detalhes):
     except Exception as e:
         print(f"  erro ao processar {item_id}: {e}", flush=True)
         return None
-
-
 def _linha_log(s):
     at = (f" | ATIVA {s.get('ativa_nome')} R${s.get('ativa_preco')} margem {s.get('ativa_margem')}%"
           if s.get("tem_ativa") else "")
@@ -520,16 +526,12 @@ def _linha_log(s):
                     f"recebe R${s.get('recebe_liquido')} ({s.get('margem_resultante')}%)")
     flag = " ⚠️ABAIXO DO PISO" if s.get("alerta") else ""
     return f"[{s['acao']}]{flag} {s['item_id']} {str(s.get('titulo'))[:26]}{at}{alvo_txt} (piso {s['margem_minima']})"
-
-
 def gravar_em_lote(sugs, tam=200):
     for i in range(0, len(sugs), tam):
         try:
             sb.table("repricer_sugestoes").insert(sugs[i:i + tam]).execute()
         except Exception as e:
             print(f"  erro ao gravar lote {i}: {e}", flush=True)
-
-
 def main():
     preload()
     total_sug = 0
@@ -549,7 +551,6 @@ def main():
         q.execute()
     except Exception as e:
         print("Aviso: não consegui limpar sem_custo:", e, flush=True)
-
     for seller_id, refresh in contas():
         access, sid, refresh = obter_access(sb, seller_id, refresh)
         if SELLER_ID_FILTRO and str(sid) != SELLER_ID_FILTRO:
@@ -559,22 +560,18 @@ def main():
         cap = f" (varrendo {len(ids)}, limite de teste MAX_ITENS={MAX_ITENS})" if MAX_ITENS else ""
         print(f"itens ativos: {len(ids)} de {total if total is not None else '?'}{cap}", flush=True)
         detalhes = detalhes_itens(ids, access)
-
         # processa os itens em paralelo (só leitura); grava em lote no fim
         sugs = []
         with ThreadPoolExecutor(max_workers=WORKERS) as ex:
             for sug in ex.map(lambda i: processar_item(i, access, sid, detalhes), ids):
                 if sug:
                     sugs.append(sug)
-
         for s in sugs:
             contadores[s["acao"]] = contadores.get(s["acao"], 0) + 1
             print(_linha_log(s), flush=True)
-
         gravar_em_lote(sugs)
         total_sug += len(sugs)
         print(f"--- conta {sid}: {len(sugs)} registros gravados ---", flush=True)
-
     # grava os "sem custo" (promoção disponível mas sem custo cadastrado)
     if SEM_CUSTO:
         try:
@@ -582,10 +579,7 @@ def main():
                 sb.table("repricer_sem_custo").insert(SEM_CUSTO[i:i + 200]).execute()
         except Exception as e:
             print("Aviso: não consegui gravar sem_custo:", e, flush=True)
-
     resumo = ", ".join(f"{k}: {v}" for k, v in contadores.items())
     print(f"\n=== {total_sug} registros gravados ({resumo}) | {len(SEM_CUSTO)} sem custo — nada foi aplicado no ML ===", flush=True)
-
-
 if __name__ == "__main__":
     main()
