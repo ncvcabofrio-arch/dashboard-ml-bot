@@ -10,7 +10,6 @@ import os
 import time
 import threading
 import requests
-from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
 from supabase import create_client
 from ml_auth import obter_access
@@ -25,7 +24,6 @@ sb = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"])
 
 # caches pré-carregados (evitam ida ao banco por item; seguros entre threads)
 CUSTOS = {}          # sku -> custo
-CUSTO_ITEM = {}      # item_id -> custo (pra anúncios SEM SKU, preenchido no painel)
 PISOS = {}           # sku -> (margem_minima, nome_grupo)
 _pct_lock = threading.Lock()
 SEM_CUSTO = []       # anúncios com promoção disponível MAS sem custo cadastrado (pra cadastrar)
@@ -52,12 +50,6 @@ def preload():
                 CUSTOS[r["sku"]] = float(r["custo"])
     except Exception as e:
         print("Aviso: não consegui pré-carregar custos:", e, flush=True)
-    try:
-        for r in _todas_linhas("repricer_custo_item", "item_id, custo"):
-            if r.get("item_id") and r.get("custo") is not None:
-                CUSTO_ITEM[r["item_id"]] = float(r["custo"])
-    except Exception as e:
-        print("Aviso: não consegui pré-carregar custo por anúncio:", e, flush=True)
     try:
         grupos = {g["id"]: (float(g["margem_minima"]), g.get("nome") or "Grupo")
                   for g in _todas_linhas("repricer_grupos", "id, margem_minima, nome")}
@@ -148,15 +140,6 @@ def todos_ativos(sid, access):
 
 def custo_de(sku):
     return CUSTOS.get(sku) if sku else None
-
-
-def custo_efetivo(item_id, sku):
-    """Custo do anúncio: pelo SKU (tabela produtos) ou, se não tiver SKU/custo,
-    pelo custo POR ANÚNCIO preenchido no painel (repricer_custo_item)."""
-    c = CUSTOS.get(sku) if sku else None
-    if c is not None:
-        return c
-    return CUSTO_ITEM.get(item_id)
 
 
 CEP = os.environ.get("CEP", "01310100")   # destino de referência (Av. Paulista, SP)
@@ -258,7 +241,7 @@ def comissao(preco, cat, ltid, access):
 def detalhes_itens(ids, access):
     """Busca detalhes de VÁRIOS itens de uma vez (multiget, 20 por chamada)."""
     out = {}
-    attrs = "id,price,listing_type_id,category_id,seller_sku,seller_custom_field,title,status,available_quantity"
+    attrs = "id,price,listing_type_id,category_id,seller_sku,seller_custom_field,title,status"
     for i in range(0, len(ids), 20):
         lote = ids[i:i + 20]
         st, d = get(f"/items?ids={','.join(lote)}&attributes={attrs}", access)
@@ -272,9 +255,72 @@ def detalhes_itens(ids, access):
 
 def ofertas_do_item(item_id, access):
     """Lista as promoções do item. O RESUMO já traz preço, original e percentuais
-    de cada oferta — o 'detalhe' devolvia a mesma lista, então uma chamada basta."""
+    de cada oferta — o 'detalhe' devolvia a mesma lista, então uma chamada basta.
+    ATENÇÃO: este endpoint NÃO traz as participações ATIVAS de campanha
+    cofinanciada/marketplace (só candidatas). Pra saber em quais o item está
+    REALMENTE ativo (e sair delas), use participacoes_ativas()."""
     st, resumo = get(f"/seller-promotions/items/{item_id}?app_version=v2", access)
     return resumo if isinstance(resumo, list) else []
+
+
+def promocoes_do_vendedor(seller_id, access, limit=50, teto_paginas=40):
+    """TODAS as promoções do vendedor (id, type, status), paginando com search_after.
+    Doc: GET /seller-promotions/users/{USER_ID}?app_version=v2 ."""
+    out, sa = [], None
+    if not seller_id:
+        return out
+    for _ in range(teto_paginas):
+        p = f"/seller-promotions/users/{seller_id}?app_version=v2&limit={limit}"
+        if sa:
+            p += f"&search_after={sa}"
+        st, d = get(p, access)
+        if not isinstance(d, dict):
+            break
+        out.extend(d.get("results") or [])
+        pag = d.get("paging") or {}
+        sa = d.get("search_after") or pag.get("search_after") or pag.get("searchAfter")
+        if not sa:
+            break
+    return out
+
+
+def participacoes_ativas(item_id, seller_id, access):
+    """Descobre em quais promoções ESTE item está ATIVO/programado — o caminho CONFIÁVEL
+    da doc (o /seller-promotions/items/{id} não traz as ativas de campanha marketplace):
+      1) users/{seller}                       -> todas as promoções do vendedor;
+      2) promotions/{id}/items?item_id=...     -> se o item participa (status started/pending)
+         e o offer_id (obrigatório pra sair de cofinanciada).
+    Retorna lista de dicts: {promotion_id, type, offer_id, name, status}."""
+    achadas, vistos = [], set()
+    for pr in promocoes_do_vendedor(seller_id, access):
+        stp = (pr.get("status") or "").lower()
+        if stp not in ("started", "pending"):
+            continue
+        pid = pr.get("id")
+        ptipo = (pr.get("type") or "")
+        if not pid or not ptipo:
+            continue
+        st, d = get(f"/seller-promotions/promotions/{pid}/items"
+                    f"?promotion_type={ptipo}&item_id={item_id}&app_version=v2", access)
+        res = (d.get("results") if isinstance(d, dict) else None) or []
+        for it in res:
+            if str(it.get("id")) != str(item_id):
+                continue
+            sti = (it.get("status") or "").lower()
+            if sti not in ("started", "pending"):
+                continue
+            chave = (pid, ptipo.upper())
+            if chave in vistos:
+                continue
+            vistos.add(chave)
+            achadas.append({
+                "promotion_id": pid,
+                "type": ptipo.upper(),
+                "offer_id": it.get("offer_id") or it.get("ref_id"),
+                "name": pr.get("name"),
+                "status": sti,
+            })
+    return achadas
 
 
 # Você JÁ está participando quando o status é "started" (confirmado na sonda)
@@ -333,65 +379,6 @@ def _data_promo(o, *chaves):
     return None
 
 
-def _parse_dt(v):
-    try:
-        dt = datetime.fromisoformat(str(v).replace("Z", "+00:00"))
-        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
-    except Exception:
-        return None
-
-
-def _vigente(o):
-    """False se a promoção ainda NÃO começou (programada/futura) ou já terminou.
-    Sem data de início = tratamos como vigente (a maioria das cofinanciadas não trava data)."""
-    ini = _parse_dt(o.get("start_date"))
-    fim = _parse_dt(_data_promo(o, "finish_date", "end_date"))
-    agora = datetime.now(timezone.utc)
-    if ini and ini > agora:
-        return False
-    if fim and fim < agora:
-        return False
-    return True
-
-
-_promo_cache = {}
-_promo_lock = threading.Lock()
-
-
-def _promo_detalhe(promotion_id, tipo, access):
-    """Detalhe da promoção (traz status: started/pending/finished e datas). Com cache
-    porque a MESMA promoção vale pra muitos itens (ex.: 'DESTAQUE 8.8' em 200 anúncios)."""
-    if not promotion_id:
-        return None
-    with _promo_lock:
-        if promotion_id in _promo_cache:
-            return _promo_cache[promotion_id]
-    st, d = get(f"/seller-promotions/promotions/{promotion_id}?promotion_type={tipo}&app_version=v2", access)
-    d = d if isinstance(d, dict) else None
-    with _promo_lock:
-        _promo_cache[promotion_id] = d
-    return d
-
-
-def cand_vigente(o, access):
-    """Vigência de um candidato. Usa a data do próprio candidato; se ela não vier
-    (comum nas cofinanciadas), consulta o DETALHE da promoção (status started=ativa,
-    pending=programada). É o jeito confiável de não recomendar/entrar em promo futura."""
-    if o.get("start_date") or o.get("finish_date"):
-        return _vigente(o)
-    d = _promo_detalhe(o.get("id"), o.get("type"), access)
-    # resposta de erro do ML vem como dict com "status" inteiro (404, 400...) e "error";
-    # nesse caso não dá pra determinar — não descarta (a trava do aplicador ainda pega).
-    if not isinstance(d, dict) or d.get("error") or not d.get("id"):
-        return True
-    status = str(d.get("status") or "").lower()
-    if status == "started":
-        return True
-    if status in ("pending", "programmed", "scheduled", "finished"):
-        return False
-    return _vigente(d)
-
-
 def _rotulo(a):
     o = a["o"]
     return f"{o.get('name') or o.get('type') or '?'} R${a['pb']:.2f}->{a['margem']:.1f}%"
@@ -423,7 +410,7 @@ def processar_item(item_id, access, sid, detalhes):
         cat = it.get("category_id")
         sku = it.get("seller_sku") or it.get("seller_custom_field")
         titulo = it.get("title")
-        custo = custo_efetivo(item_id, sku)
+        custo = custo_de(sku)
         if custo is None:
             # tem promoção disponível, mas sem custo não dá pra avaliar margem —
             # registra pra você saber quais cadastrar (aparece no painel)
@@ -442,9 +429,6 @@ def processar_item(item_id, access, sid, detalhes):
                 break
         cand = [avaliar(o, cat, ltid, access, frete, custo) for o in cand_raw]
         cand = [c for c in cand if c]
-        # NÃO recomenda promoção que ainda não está vigente (programada/futura) nem já encerrada.
-        # cand_vigente consulta o detalhe da promoção quando a data não vem no candidato.
-        cand = [c for c in cand if cand_vigente(c["o"], access)]
         seguras = [c for c in cand if c["margem"] >= piso]
 
         # ---- decide a ação (sua regra) ----
@@ -488,7 +472,6 @@ def processar_item(item_id, access, sid, detalhes):
             "custo": custo,
             "custo_envio": frete,
             "custo_envio_origem": frete_origem,
-            "estoque": it.get("available_quantity"),
             "grupo": grupo,
             "margem_minima": piso,
             "alternativas": max(len(seguras) - (1 if alvo in seguras else 0), 0),
@@ -547,25 +530,7 @@ def gravar_em_lote(sugs, tam=200):
             print(f"  erro ao gravar lote {i}: {e}", flush=True)
 
 
-def grava_status(estado, resumo=None):
-    """Grava o status do robô pro painel ler (não depende da API do GitHub)."""
-    try:
-        agora = datetime.now(timezone.utc).isoformat()
-        row = {"workflow": "sugestoes", "seller_id": SELLER_ID_FILTRO or "todas", "estado": estado}
-        if estado == "rodando":
-            row["inicio"] = agora
-            row["fim"] = None
-            row["resumo"] = None
-        else:
-            row["fim"] = agora
-            row["resumo"] = resumo
-        sb.table("repricer_status").upsert(row, on_conflict="workflow").execute()
-    except Exception as e:
-        print("aviso: não gravei status:", e, flush=True)
-
-
 def main():
-    grava_status("rodando")
     preload()
     total_sug = 0
     contadores = {"entrar": 0, "trocar": 0, "sair": 0, "manter": 0}
@@ -620,7 +585,6 @@ def main():
 
     resumo = ", ".join(f"{k}: {v}" for k, v in contadores.items())
     print(f"\n=== {total_sug} registros gravados ({resumo}) | {len(SEM_CUSTO)} sem custo — nada foi aplicado no ML ===", flush=True)
-    grava_status("concluido", f"{total_sug} sugestões ({resumo}) · {len(SEM_CUSTO)} sem custo")
 
 
 if __name__ == "__main__":
