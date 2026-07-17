@@ -281,12 +281,10 @@ def participacoes_ativas(item_id, seller_id, access):
             continue
         base = (f"/seller-promotions/promotions/{pid}/items"
                 f"?promotion_type={ptipo}&item_id={item_id}&app_version=v2")
-        # status_item=active devolve só quem participa de verdade (exclui candidatas)
-        st, d = get(base + "&status_item=active", access)
+        # NÃO usar status_item=active como filtro: comprovado (mapa) que ele devolve candidata
+        # também. O filtro confiável é o STATUS do item == 'started' (participação real).
+        st, d = get(base, access)
         res = d.get("results") if isinstance(d, dict) else None
-        if res is None:                       # tipo sem suporte a status_item (400) -> sem filtro
-            st, d = get(base, access)
-            res = d.get("results") if isinstance(d, dict) else None
         for it in (res or []):
             if str(it.get("id")) != str(item_id):
                 continue
