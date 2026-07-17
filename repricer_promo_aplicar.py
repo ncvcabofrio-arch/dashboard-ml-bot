@@ -160,30 +160,39 @@ def sair_das_outras(iid, seller_id, access, manter_pid=None, manter_tipo=None):
                  and not (manter_pid is None and manter_tipo and (p.get("type") or "").upper() == manter_tipo)]
     return saiu, falhou, restantes
 def executar_sair(fila, iid, ofertas, access):
-    """SAIR: remove a(s) promoção(ões) ATIVA(s) do item (ex.: promo com prejuízo).
-    Usa o caminho confiável (participacoes_ativas) pra pegar inclusive cofinanciadas."""
+    """SAIR (modo diagnóstico): tira o item de TODAS as promoções e DESPEJA a resposta
+    CRUA do ML em cada passo, pra vermos exatamente o que ele responde:
+      1) lista as participações ATIVAS (participacoes_ativas: nome/tipo/promotion_id/offer_id);
+      2) remoção em MASSA (bulk /items/{id}) — dump de successful_ids/errors;
+      3) re-lista e remove por TIPO o que sobrou — dump da resposta de cada DELETE;
+      4) re-lista de novo pra ver o que RESTOU ativo."""
     seller_id = str(fila.get("seller_id") or "")
     ativas = rec.participacoes_ativas(iid, seller_id, access)
-    if not ativas:
-        gravar(fila["id"], {"status": "aplicada", "resultado": "não havia promoção ativa (nada a remover)"})
-        return "nada_a_remover"
-    nomes = [(p.get("name") or p.get("type") or "?") for p in ativas]
+    achadas = " ;; ".join(
+        f"{p.get('name')}[{p.get('type')} pid={p.get('promotion_id')} off={p.get('offer_id')}]"
+        for p in ativas) or "nenhuma"
     if DRY:
-        gravar(fila["id"], {"status": "aprovada", "resultado": f"[SIMULADO] SAIR de: {', '.join(nomes)}"})
-        print(f"  [DRY] sair {iid} -> {nomes}", flush=True)
+        gravar(fila["id"], {"status": "aprovada", "resultado": f"[SIMULADO] SAIR de: {achadas}"})
+        print(f"  [DRY] sair {iid} -> {achadas}", flush=True)
         return "simulado"
-    saiu, falhou, restantes = sair_das_outras(iid, seller_id, access)  # sem manter nada
-    ok = not restantes
-    aviso = (" | saiu de TODAS ✓" if ok else " | ⚠️ ainda ativas: " + ", ".join((p.get("name") or p.get("type")) for p in restantes))
-    if saiu:
-        aviso += " | saiu de: " + ", ".join(saiu)
-    if falhou:
-        aviso += " | NÃO saiu: " + ", ".join(falhou)
-    gravar(fila["id"], {
-        "status": "aplicada" if ok else "erro",
-        "resultado": f"SAIR{aviso}",
-    })
-    print(f"  [{'OK' if ok else 'ERRO'}] sair {iid}{aviso}", flush=True)
+    # 1) BULK — sai de todas de uma vez (menos LIGHTNING/DOD). Guarda a resposta crua.
+    scb, resumob, bodyb = remover_todas(iid, access)
+    bulk_txt = f"{resumob} :: {json.dumps(bodyb, ensure_ascii=False)[:260]}"
+    # 2) o que o bulk não tirou (LIGHTNING/DOD ou o que persistiu): remove por TIPO, com resposta crua
+    rest1 = rec.participacoes_ativas(iid, seller_id, access)
+    dels = []
+    for p in rest1:
+        scd, body = remover_participacao(iid, p, access)
+        dels.append(f"{p.get('name')}({p.get('type')}:{scd} {json.dumps(body, ensure_ascii=False)[:90]})")
+    # 3) re-lista final
+    rest2 = rec.participacoes_ativas(iid, seller_id, access)
+    sobrou = " ;; ".join(f"{p.get('name')}[{p.get('type')}]" for p in rest2) or "nada ✓"
+    ok = not rest2
+    resultado = (f"[SÓ SAIR] ACHADAS: {achadas} || BULK: {bulk_txt} || POR-TIPO: "
+                 + (" ;; ".join(dels) if dels else "nada sobrou pro bulk")
+                 + f" || SOBROU NO FIM: {sobrou}")
+    gravar(fila["id"], {"status": "aplicada" if ok else "erro", "resultado": resultado})
+    print(f"  [{'OK' if ok else 'ERRO'}] sair {iid} | sobrou: {sobrou}", flush=True)
     return "saiu" if ok else "erro_sair"
 def processar(fila, access):
     iid = fila["item_id"]
