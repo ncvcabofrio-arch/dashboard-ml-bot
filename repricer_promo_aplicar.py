@@ -160,39 +160,62 @@ def sair_das_outras(iid, seller_id, access, manter_pid=None, manter_tipo=None):
                  and not (manter_pid is None and manter_tipo and (p.get("type") or "").upper() == manter_tipo)]
     return saiu, falhou, restantes
 def executar_sair(fila, iid, ofertas, access):
-    """SAIR (modo diagnóstico): tira o item de TODAS as promoções e DESPEJA a resposta
-    CRUA do ML em cada passo, pra vermos exatamente o que ele responde:
-      1) lista as participações ATIVAS (participacoes_ativas: nome/tipo/promotion_id/offer_id);
-      2) remoção em MASSA (bulk /items/{id}) — dump de successful_ids/errors;
-      3) re-lista e remove por TIPO o que sobrou — dump da resposta de cada DELETE;
-      4) re-lista de novo pra ver o que RESTOU ativo."""
+    """SAIR (modo diagnóstico COMPLETO): descobre TODAS as promoções do vendedor (agora
+    paginando certo), acha em quais ESTE item participa, e tenta sair por CADA método,
+    despejando a resposta CRUA do ML. Serve pra entender promoções teimosas (ex.: Inverno).
+    Passos, tudo gravado no resultado:
+      A) o que o endpoint do ITEM (/items/{id}) traz;
+      B) TOTAL de promoções do vendedor + as started/pending (nome/tipo/id);
+      C) pra cada started/pending: o item participa? (status + offer_id) e TENTA o DELETE por tipo;
+      D) BULK (/items/{id}) — successful_ids/errors;
+      E) o que sobrou ativo no fim."""
     seller_id = str(fila.get("seller_id") or "")
-    ativas = rec.participacoes_ativas(iid, seller_id, access)
-    achadas = " ;; ".join(
-        f"{p.get('name')}[{p.get('type')} pid={p.get('promotion_id')} off={p.get('offer_id')}]"
-        for p in ativas) or "nenhuma"
+    L = []
+    # A) endpoint do item
+    of = rec.ofertas_do_item(iid, access)
+    L.append("A_ITEM: " + (" ;; ".join(f"{o.get('type')}/{o.get('status')}" for o in of if isinstance(o, dict)) or "vazio"))
+    # B) todas as promoções do vendedor
+    todas = rec.promocoes_do_vendedor(seller_id, access)
+    ativas_v = [p for p in todas if (p.get("status") or "").lower() in ("started", "pending")]
+    L.append(f"B_VENDEDOR total={len(todas)} started/pending={len(ativas_v)}")
+    L.append("B_ATIVAS: " + (" ;; ".join(f"{p.get('name')}[{p.get('type')}/{p.get('status')}/{p.get('id')}]" for p in ativas_v) or "nenhuma"))
     if DRY:
-        gravar(fila["id"], {"status": "aprovada", "resultado": f"[SIMULADO] SAIR de: {achadas}"})
-        print(f"  [DRY] sair {iid} -> {achadas}", flush=True)
+        gravar(fila["id"], {"status": "aprovada", "resultado": " || ".join(L)[:1600]})
+        print(f"  [DRY] sair {iid} (diagnóstico)", flush=True)
         return "simulado"
-    # 1) BULK — sai de todas de uma vez (menos LIGHTNING/DOD). Guarda a resposta crua.
+    # C) participação do item em cada promo ativa do vendedor + tentativa de saída por tipo
+    tentativas = []
+    for p in ativas_v:
+        pid = p.get("id")
+        ptipo = (p.get("type") or "")
+        st, d = rec.get(f"/seller-promotions/promotions/{pid}/items"
+                        f"?promotion_type={ptipo}&item_id={iid}&app_version=v2", access)
+        res = (d.get("results") if isinstance(d, dict) else None) or []
+        mine = [it for it in res if str(it.get("id")) == str(iid)]
+        if not mine:
+            continue
+        it0 = mine[0]
+        oid = it0.get("offer_id") or it0.get("ref_id")
+        qs = f"?promotion_type={ptipo}&promotion_id={pid}&app_version=v2" + (f"&offer_id={oid}" if oid else "")
+        scd, body = req_delete(f"/seller-promotions/items/{iid}{qs}", access)
+        tentativas.append(f"{p.get('name')}[{ptipo}] st={it0.get('status')} off={oid} -> DEL {scd} {json.dumps(body, ensure_ascii=False)[:70]}")
+    L.append("C_PARTICIPA+DELETE: " + (" ;; ".join(tentativas) if tentativas else "o item NÃO apareceu em nenhuma promo started/pending do vendedor"))
+    # D) bulk
     scb, resumob, bodyb = remover_todas(iid, access)
-    bulk_txt = f"{resumob} :: {json.dumps(bodyb, ensure_ascii=False)[:260]}"
-    # 2) o que o bulk não tirou (LIGHTNING/DOD ou o que persistiu): remove por TIPO, com resposta crua
-    rest1 = rec.participacoes_ativas(iid, seller_id, access)
-    dels = []
-    for p in rest1:
-        scd, body = remover_participacao(iid, p, access)
-        dels.append(f"{p.get('name')}({p.get('type')}:{scd} {json.dumps(body, ensure_ascii=False)[:90]})")
-    # 3) re-lista final
-    rest2 = rec.participacoes_ativas(iid, seller_id, access)
-    sobrou = " ;; ".join(f"{p.get('name')}[{p.get('type')}]" for p in rest2) or "nada ✓"
-    ok = not rest2
-    resultado = (f"[SÓ SAIR] ACHADAS: {achadas} || BULK: {bulk_txt} || POR-TIPO: "
-                 + (" ;; ".join(dels) if dels else "nada sobrou pro bulk")
-                 + f" || SOBROU NO FIM: {sobrou}")
-    gravar(fila["id"], {"status": "aplicada" if ok else "erro", "resultado": resultado})
-    print(f"  [{'OK' if ok else 'ERRO'}] sair {iid} | sobrou: {sobrou}", flush=True)
+    L.append(f"D_BULK: {resumob}")
+    # E) sobrou?
+    todas2 = rec.promocoes_do_vendedor(seller_id, access)
+    sobrou = []
+    for p in [x for x in todas2 if (x.get("status") or "").lower() in ("started", "pending")]:
+        st, d = rec.get(f"/seller-promotions/promotions/{p.get('id')}/items"
+                        f"?promotion_type={p.get('type')}&item_id={iid}&app_version=v2", access)
+        res = (d.get("results") if isinstance(d, dict) else None) or []
+        if any(str(it.get("id")) == str(iid) for it in res):
+            sobrou.append(f"{p.get('name')}[{p.get('type')}]")
+    L.append("E_SOBROU: " + (" ;; ".join(sobrou) if sobrou else "nada ✓"))
+    ok = not sobrou
+    gravar(fila["id"], {"status": "aplicada" if ok else "erro", "resultado": " || ".join(L)[:1900]})
+    print(f"  [{'OK' if ok else 'ERRO'}] sair {iid} | sobrou: {sobrou or 'nada'}", flush=True)
     return "saiu" if ok else "erro_sair"
 def processar(fila, access):
     iid = fila["item_id"]
