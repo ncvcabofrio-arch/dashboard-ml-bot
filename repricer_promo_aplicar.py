@@ -172,34 +172,26 @@ def executar_sair(fila, iid, ofertas, access):
     (Meli Essencial, Inverno) e com qual status/offer_id — sem ficar tentando às cegas.
     Formato por promo onde o item aparece: nome[TIPO: status_no_plain | act=Y/N/400 | off=S/N]."""
     seller_id = str(fila.get("seller_id") or "")
-    todas = rec.promocoes_do_vendedor(seller_id, access)
-    ativas_v = [p for p in todas if (p.get("status") or "").lower() in ("started", "pending")]
-    linhas = []
-    for p in ativas_v:
-        pid = p.get("id")
-        ptipo = (p.get("type") or "")
-        base = f"/seller-promotions/promotions/{pid}/items?promotion_type={ptipo}&item_id={iid}&app_version=v2"
-        # 1) consulta SEM filtro (a que funcionava): pega o item e seu status
-        st, d = rec.get(base, access)
-        res = (d.get("results") if isinstance(d, dict) else None) or []
-        mine = [it for it in res if str(it.get("id")) == str(iid)]
-        if not mine:
-            continue
-        it0 = mine[0]
-        stt = (it0.get("status") or "?")
-        oid = it0.get("offer_id")
-        # 2) mesma consulta COM status_item=active: devolve o item?
-        st2, d2 = rec.get(base + "&status_item=active", access)
-        if not isinstance(d2, dict):
-            actv = "400"
-        else:
-            r2 = d2.get("results") or []
-            actv = "Y" if any(str(x.get("id")) == str(iid) for x in r2) else "N"
-        linhas.append(f"{(p.get('name') or '?')[:12]}[{ptipo}:{stt}|act={actv}|off={'S' if oid else 'N'}]")
-    resultado = "MAPA(read-only): " + (" ;; ".join(linhas) if linhas else "item não apareceu em NENHUMA das promos do vendedor")
-    gravar(fila["id"], {"status": "aplicada", "resultado": resultado[:1900]})
-    print(f"  [MAPA] {iid}: apareceu em {len(linhas)} promo(s) — NADA foi removido", flush=True)
-    return "saiu"
+    ativas = rec.participacoes_ativas(iid, seller_id, access)   # só status started, offer_id certo
+    achou = " ;; ".join(f"{(p.get('name') or '?')[:16]}[{p.get('type')}]" for p in ativas) or "nenhuma"
+    if DRY:
+        gravar(fila["id"], {"status": "aprovada", "resultado": f"[SIMULADO] SAIR de: {achou}"})
+        print(f"  [DRY] sair {iid} -> {achou}", flush=True)
+        return "simulado"
+    dels = []
+    for p in ativas:
+        scd, body = remover_participacao(iid, p, access)   # DELETE por tipo (offer_id só onde a doc exige)
+        dels.append(f"{(p.get('name') or '?')[:16]}[{p.get('type')}]:{scd}")
+    scb, resumob, _ = remover_todas(iid, access)   # catch-all (menos LIGHTNING/DOD)
+    rest = rec.participacoes_ativas(iid, seller_id, access)
+    sobrou = " ;; ".join(f"{(p.get('name') or '?')[:16]}[{p.get('type')}]" for p in rest) or "nada ✓"
+    ok = not rest
+    gravar(fila["id"], {
+        "status": "aplicada" if ok else "erro",
+        "resultado": f"ACHOU: {achou} || DELETE: {' ;; '.join(dels) or 'nada'} || {resumob} || SOBROU: {sobrou}",
+    })
+    print(f"  [{'OK' if ok else 'ERRO'}] sair {iid} | sobrou: {sobrou}", flush=True)
+    return "saiu" if ok else "erro_sair"
 def processar(fila, access):
     iid = fila["item_id"]
     tipo = (fila.get("promocao_tipo") or "").upper()
