@@ -172,25 +172,50 @@ def executar_sair(fila, iid, ofertas, access):
     (Meli Essencial, Inverno) e com qual status/offer_id — sem ficar tentando às cegas.
     Formato por promo onde o item aparece: nome[TIPO: status_no_plain | act=Y/N/400 | off=S/N]."""
     seller_id = str(fila.get("seller_id") or "")
-    ativas = rec.participacoes_ativas(iid, seller_id, access)   # só status started, offer_id certo
+    ativas = rec.participacoes_ativas(iid, seller_id, access)   # status started, offer_id certo
     achou = " ;; ".join(f"{(p.get('name') or '?')[:16]}[{p.get('type')}]" for p in ativas) or "nenhuma"
     if DRY:
         gravar(fila["id"], {"status": "aprovada", "resultado": f"[SIMULADO] SAIR de: {achou}"})
         print(f"  [DRY] sair {iid} -> {achou}", flush=True)
         return "simulado"
-    dels = []
+    # 1ª PASSADA: sai de cada uma. NÃO confere agora (o ML leva segundos pra propagar) —
+    # o sucesso é o 200 do DELETE. A conferência final acontece na 2ª passada, no fim do main().
+    dels, todos_ok = [], True
     for p in ativas:
         scd, body = remover_participacao(iid, p, access)   # DELETE por tipo (offer_id só onde a doc exige)
+        if scd not in (200, 201):
+            todos_ok = False
         dels.append(f"{(p.get('name') or '?')[:16]}[{p.get('type')}]:{scd}")
-    scb, resumob, _ = remover_todas(iid, access)   # catch-all (menos LIGHTNING/DOD)
+    remover_todas(iid, access)   # catch-all (menos LIGHTNING/DOD)
+    gravar(fila["id"], {
+        "status": "aplicada" if todos_ok else "erro",
+        "resultado": f"1ª passada — ACHOU: {achou} || DELETE: {' ;; '.join(dels) or 'nada'} (confere na 2ª passada)",
+    })
+    print(f"  [{'OK' if todos_ok else 'ERRO'}] sair {iid} (1ª passada) | {len(ativas)} promo(s)", flush=True)
+    return "saiu" if todos_ok else "erro_sair"
+
+
+def revarrer_sair(fila, access):
+    """2ª PASSADA (chamada no fim do main, depois de sair de TODOS os itens — o intervalo já
+    deu tempo do ML propagar): varre o item de novo, remove qualquer teimoso e CONFERE."""
+    iid = fila["item_id"]
+    seller_id = str(fila.get("seller_id") or "")
     rest = rec.participacoes_ativas(iid, seller_id, access)
-    sobrou = " ;; ".join(f"{(p.get('name') or '?')[:16]}[{p.get('type')}]" for p in rest) or "nada ✓"
-    ok = not rest
+    dels2 = []
+    for p in rest:
+        scd, body = remover_participacao(iid, p, access)
+        dels2.append(f"{(p.get('name') or '?')[:16]}[{p.get('type')}]:{scd}")
+    if dels2:
+        remover_todas(iid, access)
+    final = rec.participacoes_ativas(iid, seller_id, access)   # conferência de verdade
+    sobrou = " ;; ".join(f"{(p.get('name') or '?')[:16]}[{p.get('type')}]" for p in final) or "nada ✓"
+    ok = not final
+    base = (fila.get("resultado") or "").split(" || 2ª passada")[0]
     gravar(fila["id"], {
         "status": "aplicada" if ok else "erro",
-        "resultado": f"ACHOU: {achou} || DELETE: {' ;; '.join(dels) or 'nada'} || {resumob} || SOBROU: {sobrou}",
+        "resultado": f"{base} || 2ª passada — teimosos: {' ;; '.join(dels2) or 'nenhum'} || SOBROU: {sobrou}",
     })
-    print(f"  [{'OK' if ok else 'ERRO'}] sair {iid} | sobrou: {sobrou}", flush=True)
+    print(f"  [{'OK' if ok else 'ERRO'}] sair {iid} (2ª passada) | sobrou: {sobrou}", flush=True)
     return "saiu" if ok else "erro_sair"
 def processar(fila, access):
     iid = fila["item_id"]
@@ -420,6 +445,20 @@ def main():
         r = processar(f, access)
         resumo[r] = resumo.get(r, 0) + 1
         print(f"  = {f['item_id']} [{f.get('acao', '?')}] -> {r}", flush=True)  # 1 linha por item (todos aparecem)
+    # 2ª PASSADA do SAIR: depois de sair de TODOS (o que já deu tempo do ML propagar), varre
+    # cada um de novo, remove teimosos e CONFERE. É aqui que o status final do 'sair' é gravado.
+    sair_rows = [f for f in fila if f.get("acao") == "sair" and acessos.get(str(f["seller_id"]))]
+    if sair_rows:
+        time.sleep(8)   # respiro extra de propagação
+        for f in sair_rows:
+            # relê o resultado da 1ª passada pra anexar a 2ª
+            try:
+                atual = sb.table("repricer_promo_fila").select("resultado").eq("id", f["id"]).execute().data
+                f["resultado"] = (atual[0].get("resultado") if atual else None) or ""
+            except Exception:
+                pass
+            rr = revarrer_sair(f, acessos.get(str(f["seller_id"])))
+            resumo["sair_2p_" + rr] = resumo.get("sair_2p_" + rr, 0) + 1
     print("resumo:", json.dumps(resumo, ensure_ascii=False), flush=True)
     grava_status("concluido", json.dumps(resumo, ensure_ascii=False))
 if __name__ == "__main__":
