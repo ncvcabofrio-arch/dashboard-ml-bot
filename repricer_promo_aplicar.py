@@ -117,19 +117,16 @@ def req_delete(path, access, tent=3):
         return r.status_code, r.json()
     except Exception:
         return r.status_code, (r.text if r is not None else None)
-def remover_oferta(iid, o, access):
-    """Remove UMA oferta ativa (usada no 'trocar' DEPOIS de entrar na nova — a remoção
-    em massa tiraria a nova junto). Relâmpago/DOD não saem por API."""
-    otipo = (o.get("type") or "").upper()
-    if otipo in ("LIGHTNING", "DOD"):
-        return None, f"{otipo}(não sai por API)", None
-    qs = f"?promotion_type={otipo}&app_version=v2"
-    if o.get("id"):
-        qs += f"&promotion_id={o['id']}"
-    if o.get("ref_id"):
-        qs += f"&offer_id={o['ref_id']}"
-    sc, body = req_delete(f"/seller-promotions/items/{iid}{qs}", access)
-    return sc, otipo, body
+def remover_participacao(iid, p, access):
+    """SAI de UMA promoção pelo TIPO (caminho da doc): promotion_type + promotion_id
+    (+ offer_id, obrigatório na cofinanciada/marketplace). 'p' é um dict vindo de
+    rec.participacoes_ativas: {promotion_id, type, offer_id, name}.
+    Retorna (status, corpo_bruto)."""
+    ptipo = (p.get("type") or "").upper()
+    qs = f"?promotion_type={ptipo}&promotion_id={p.get('promotion_id')}&app_version=v2"
+    if p.get("offer_id"):
+        qs += f"&offer_id={p['offer_id']}"
+    return req_delete(f"/seller-promotions/items/{iid}{qs}", access)
 def remover_todas(iid, access):
     """Remove em MASSA todas as ofertas do item (endpoint bulk do ML).
     Não remove relâmpago(LIGHTNING)/DOD — esses só pausando o anúncio.
@@ -141,27 +138,52 @@ def remover_todas(iid, access):
         errs = body.get("errors") or []
     resumo = f"bulk {sc}: {len(ok_ids)} removida(s)" + (f", {len(errs)} erro(s)" if errs else "")
     return sc, resumo, body
+def sair_das_outras(iid, seller_id, access, manter_pid=None, manter_tipo=None):
+    """SAI de TODAS as promoções em que o item está ATIVO, exceto a que queremos manter.
+    Usa o caminho CONFIÁVEL da doc (rec.participacoes_ativas): users/{seller} cruzado com
+    promotions/{id}/items?item_id=... — porque /seller-promotions/items/{id} NÃO traz as
+    ativas de campanha cofinanciada/marketplace (só candidatas). Sai por TIPO, uma a uma.
+    Retorna (saiu[], falhou[], restantes[])."""
+    ativas = rec.participacoes_ativas(iid, seller_id, access)
+    saiu, falhou = [], []
+    for p in ativas:
+        if manter_pid and p.get("promotion_id") == manter_pid:
+            continue
+        if manter_pid is None and manter_tipo and (p.get("type") or "").upper() == manter_tipo:
+            continue  # sem id da nova (ex.: relâmpago): não sai de outra do mesmo tipo
+        scd, body = remover_participacao(iid, p, access)
+        rot = f"{p.get('name') or p.get('type')}({p.get('type')}:{scd})"
+        (saiu if scd in (200, 201) else falhou).append(rot)
+    # confere de novo: o que sobrou ativo além da que mantivemos
+    restantes = [p for p in rec.participacoes_ativas(iid, seller_id, access)
+                 if not (manter_pid and p.get("promotion_id") == manter_pid)
+                 and not (manter_pid is None and manter_tipo and (p.get("type") or "").upper() == manter_tipo)]
+    return saiu, falhou, restantes
 def executar_sair(fila, iid, ofertas, access):
-    """SAIR: remove a(s) promoção(ões) ATIVA(s) do item (ex.: promo com prejuízo)."""
-    ativas = [o for o in ofertas if rec.eh_ativa(o)]
+    """SAIR: remove a(s) promoção(ões) ATIVA(s) do item (ex.: promo com prejuízo).
+    Usa o caminho confiável (participacoes_ativas) pra pegar inclusive cofinanciadas."""
+    seller_id = str(fila.get("seller_id") or "")
+    ativas = rec.participacoes_ativas(iid, seller_id, access)
     if not ativas:
         gravar(fila["id"], {"status": "aplicada", "resultado": "não havia promoção ativa (nada a remover)"})
         return "nada_a_remover"
-    nomes = [(o.get("name") or o.get("type") or "?") for o in ativas]
-    lights = [(o.get("name") or o.get("type") or "?") for o in ativas
-              if (o.get("type") or "").upper() in ("LIGHTNING", "DOD")]
+    nomes = [(p.get("name") or p.get("type") or "?") for p in ativas]
     if DRY:
         gravar(fila["id"], {"status": "aprovada", "resultado": f"[SIMULADO] SAIR de: {', '.join(nomes)}"})
         print(f"  [DRY] sair {iid} -> {nomes}", flush=True)
         return "simulado"
-    sc, resumo, body = remover_todas(iid, access)
-    ok = sc in (200, 201)
-    aviso = (f" | relâmpago/DOD não sai por API: {', '.join(lights)} (pause o anúncio)" if lights else "")
+    saiu, falhou, restantes = sair_das_outras(iid, seller_id, access)  # sem manter nada
+    ok = not restantes
+    aviso = (" | saiu de TODAS ✓" if ok else " | ⚠️ ainda ativas: " + ", ".join((p.get("name") or p.get("type")) for p in restantes))
+    if saiu:
+        aviso += " | saiu de: " + ", ".join(saiu)
+    if falhou:
+        aviso += " | NÃO saiu: " + ", ".join(falhou)
     gravar(fila["id"], {
         "status": "aplicada" if ok else "erro",
-        "resultado": f"{resumo}{aviso} | {json.dumps(body, ensure_ascii=False)[:300]}",
+        "resultado": f"SAIR{aviso}",
     })
-    print(f"  [{'OK' if ok else 'ERRO'}] sair {iid} {resumo}", flush=True)
+    print(f"  [{'OK' if ok else 'ERRO'}] sair {iid}{aviso}", flush=True)
     return "saiu" if ok else "erro_sair"
 def processar(fila, access):
     iid = fila["item_id"]
@@ -281,49 +303,37 @@ def processar(fila, access):
         return "sem_corpo"
     sair_de = [(o.get("name") or o.get("type") or "?") for o in antigas] if acao == "trocar" else []
     if DRY:
-        plano = (f"TROCA: entra na sugerida e SAI de {sair_de} " if acao == "trocar" else "ENTRADA ")
+        plano = (f"TROCA: entra na sugerida e SAI das ativas " if acao == "trocar" else "ENTRADA ")
         gravar(fila["id"], {"status": "aprovada",
                             "resultado": f"[SIMULADO] {plano}| POST {json.dumps(corpo)} | margem prevista {ev['margem']:.1f}%",
                             "preco_aplicado": ev["pb"], "margem_aplicada": ev["margem"]})
-        print(f"  [DRY] {acao} {iid} {tipo} -> {json.dumps(corpo)} (margem {ev['margem']:.1f}%)"
-              + (f" | sairia de {sair_de}" if sair_de else ""), flush=True)
+        print(f"  [DRY] {acao} {iid} {tipo} -> {json.dumps(corpo)} (margem {ev['margem']:.1f}%)", flush=True)
         return "simulado"
     # ---- APLICAÇÃO REAL ----
     # ORDEM SEGURA: ENTRA na nova PRIMEIRO. Se falhar, NÃO remove nada — o item fica
-    # exatamente como estava (nunca sem promoção). Só depois de entrar é que tenta sair das antigas.
+    # exatamente como estava (nunca sem promoção). Só depois de entrar é que sai das outras.
     sc, resp = post(f"/seller-promotions/items/{iid}?app_version=v2", access, corpo)
     ok = sc in (200, 201)
     aviso = ""
     if ok and acao == "trocar":
-        # SAIR DE TODAS e ficar só na sugerida — estratégia ROBUSTA (a que já deu certo):
-        # NÃO depende de listar corretamente as "antigas" (essa lista volta vazia às vezes).
-        #   1) já entrou na nova (POST acima) — assim validamos o corpo antes de mexer em nada;
-        #   2) remoção em MASSA: tira o item de TODAS as ofertas de uma vez (menos LIGHTNING/DOD);
-        #   3) re-entra só na sugerida;
-        #   4) LIGHTNING/DOD que a massa não tira: remove uma a uma (do snapshot antes da troca);
-        #   5) relista e confere o que sobrou ativo — reporta a verdade.
-        novo_pid = corpo.get("promotion_id")
-        scb, resumob, bodyb = remover_todas(iid, access)
-        sc2, resp2 = post(f"/seller-promotions/items/{iid}?app_version=v2", access, corpo)
-        if sc2 in (200, 201):
-            resp = resp2  # a re-entrada é o estado final do item
-        extras = []
-        for o in antigas:
-            if (o.get("type") or "").upper() in ("LIGHTNING", "DOD"):
-                scd, rot, body = remover_oferta(iid, o, access)
-                extras.append(f"{o.get('type')}->{scd}")
-        ofertas2 = rec.ofertas_do_item(iid, access)
-        ainda = [o for o in ofertas2 if rec.eh_ativa(o)
-                 and o.get("id") != novo_pid
-                 and (o.get("type") or "").upper() != tipo]
-        if ainda:
-            nomes = ", ".join((o.get("name") or o.get("type") or "?") for o in ainda)
-            aviso = f" | ⚠️ ainda ativas: {nomes}"
+        # SAIR DE TODAS e ficar só na sugerida — caminho CONFIÁVEL (confirmado na doc do ML):
+        # o endpoint /seller-promotions/items/{id} NÃO traz as participações ATIVAS de campanha
+        # cofinanciada/marketplace (só candidatas). A verdade vem de:
+        #   users/{seller} -> promotions/{id}/items?item_id=...  (status started + offer_id).
+        # Entramos na nova PRIMEIRO (validação/segurança) e então saímos de cada OUTRA pelo tipo.
+        # NÃO precisa re-entrar: a sugerida fica intacta (sem entrada dupla).
+        seller_id = str(fila.get("seller_id") or "")
+        novo_pid = corpo.get("promotion_id")          # None na relâmpago (não tem promotion_id)
+        saiu, falhou, restantes = sair_das_outras(iid, seller_id, access,
+                                                   manter_pid=novo_pid, manter_tipo=tipo)
+        if restantes:
+            aviso = " | ⚠️ ainda ativas: " + ", ".join((p.get("name") or p.get("type")) for p in restantes)
         else:
             aviso = " | saiu de TODAS, ficou só na sugerida ✓"
-        aviso += f" || consolidado ({resumob}; reentrada {sc2})"
-        if extras:
-            aviso += " | extras: " + ", ".join(extras)
+        if saiu:
+            aviso += " | saiu de: " + ", ".join(saiu)
+        if falhou:
+            aviso += " | NÃO saiu: " + ", ".join(falhou)
     motivo = ""
     if not ok:
         _t = json.dumps(resp, ensure_ascii=False).upper()
