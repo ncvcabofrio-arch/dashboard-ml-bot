@@ -239,23 +239,24 @@ def ofertas_do_item(item_id, access):
     REALMENTE ativo (e sair delas), use participacoes_ativas()."""
     st, resumo = get(f"/seller-promotions/items/{item_id}?app_version=v2", access)
     return resumo if isinstance(resumo, list) else []
-def promocoes_do_vendedor(seller_id, access, limit=50, teto_paginas=40):
-    """TODAS as promoções do vendedor (id, type, status), paginando com search_after.
-    Doc: GET /seller-promotions/users/{USER_ID}?app_version=v2 ."""
-    out, sa = [], None
+def promocoes_do_vendedor(seller_id, access, limit=50, teto_paginas=80):
+    """TODAS as promoções do vendedor (id, type, status). O endpoint /users pagina por
+    OFFSET (a resposta traz paging.total) — não é search_after. Doc:
+    GET /seller-promotions/users/{USER_ID}?app_version=v2&limit=50&offset=N ."""
+    out = []
     if not seller_id:
         return out
+    offset = 0
     for _ in range(teto_paginas):
-        p = f"/seller-promotions/users/{seller_id}?app_version=v2&limit={limit}"
-        if sa:
-            p += f"&search_after={sa}"
+        p = f"/seller-promotions/users/{seller_id}?app_version=v2&limit={limit}&offset={offset}"
         st, d = get(p, access)
         if not isinstance(d, dict):
             break
-        out.extend(d.get("results") or [])
-        pag = d.get("paging") or {}
-        sa = d.get("search_after") or pag.get("search_after") or pag.get("searchAfter")
-        if not sa:
+        res = d.get("results") or []
+        out.extend(res)
+        total = (d.get("paging") or {}).get("total")
+        offset += limit
+        if not res or (total is not None and offset >= total) or offset >= 4000:
             break
     return out
 def participacoes_ativas(item_id, seller_id, access):
