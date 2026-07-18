@@ -143,19 +143,27 @@ def req_delete(path, access, tent=3):
         return r.status_code, r.json()
     except Exception:
         return r.status_code, (r.text if r is not None else None)
-# Tipos cujo DELETE EXIGE offer_id (doc). DEAL/SELLER_CAMPAIGN/etc saem só com
-# promotion_type+promotion_id — mandar offer_id nesses faz o ML responder 200 SEM remover.
-TIPOS_COM_OFFER = {"SMART", "PRICE_MATCHING", "PRICE_MATCHING_MELI_ALL", "MARKETPLACE_CAMPAIGN"}
+# Forma do DELETE por tipo (confirmado na doc de CADA campanha):
+#  (A) só promotion_type (nível de item, SEM promotion_id/offer_id): PRICE_DISCOUNT, LIGHTNING, DOD.
+#      OBS: relâmpago/DOD, uma vez ATIVAS, não saem por API (só pausando o anúncio).
+#  (B) promotion_type + promotion_id + offer_id (obrigatório):
+#      SMART, PRICE_MATCHING, PRICE_MATCHING_MELI_ALL, MARKETPLACE_CAMPAIGN, PRE_NEGOTIATED,
+#      UNHEALTHY_STOCK, VOLUME.  (mandar offer_id errado/faltando => 200 sem remover)
+#  (C) promotion_type + promotion_id (SEM offer_id): DEAL, SELLER_CAMPAIGN, SELLER_COUPON_CAMPAIGN.
+TIPOS_SO_TIPO = {"PRICE_DISCOUNT", "LIGHTNING", "DOD"}
+TIPOS_COM_OFFER = {"SMART", "PRICE_MATCHING", "PRICE_MATCHING_MELI_ALL", "MARKETPLACE_CAMPAIGN",
+                   "PRE_NEGOTIATED", "UNHEALTHY_STOCK", "VOLUME"}
 def remover_participacao(iid, p, access):
-    """SAI de UMA promoção pelo TIPO, como a doc manda:
-      - SMART/PRICE_MATCHING/PRICE_MATCHING_MELI_ALL/MARKETPLACE_CAMPAIGN: type+id+offer_id;
-      - DEAL/SELLER_CAMPAIGN/etc: type+id (SEM offer_id).
-    'p' vem de rec.participacoes_ativas: {promotion_id, type, offer_id, name}.
-    Retorna (status, corpo_bruto)."""
+    """SAI de UMA promoção pelo TIPO, na forma EXATA que a doc de cada campanha manda (A/B/C acima).
+    'p' vem de rec.participacoes_ativas: {promotion_id, type, offer_id, name}. Retorna (status, corpo)."""
     ptipo = (p.get("type") or "").upper()
-    qs = f"?promotion_type={ptipo}&promotion_id={p.get('promotion_id')}&app_version=v2"
-    if ptipo in TIPOS_COM_OFFER and p.get("offer_id"):
-        qs += f"&offer_id={p['offer_id']}"
+    if ptipo in TIPOS_SO_TIPO:                         # (A) nível de item
+        qs = f"?promotion_type={ptipo}&app_version=v2"
+    else:
+        qs = f"?promotion_type={ptipo}&promotion_id={p.get('promotion_id')}&app_version=v2"
+        if ptipo in TIPOS_COM_OFFER and p.get("offer_id"):   # (B) precisa do offer_id
+            qs += f"&offer_id={p['offer_id']}"
+        # (C) DEAL/SELLER_CAMPAIGN/SELLER_COUPON_CAMPAIGN: fica só type+id
     return req_delete(f"/seller-promotions/items/{iid}{qs}", access)
 def remover_todas(iid, access):
     """Remove em MASSA todas as ofertas do item (endpoint bulk do ML).
