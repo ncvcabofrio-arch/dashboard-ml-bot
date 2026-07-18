@@ -533,7 +533,24 @@ def gravar_em_lote(sugs, tam=200):
             sb.table("repricer_sugestoes").insert(sugs[i:i + tam]).execute()
         except Exception as e:
             print(f"  erro ao gravar lote {i}: {e}", flush=True)
+def grava_status(estado, resumo=None):
+    """Grava o status do robô de SUGESTÕES no Supabase pro painel ler (rodando/concluido).
+    Sem isso o painel não sabe quando a sugestão termina e não recarrega sozinho."""
+    try:
+        agora = datetime.now(timezone.utc).isoformat()
+        row = {"workflow": "sugestoes", "seller_id": SELLER_ID_FILTRO or "todas", "estado": estado}
+        if estado == "rodando":
+            row["inicio"] = agora
+            row["fim"] = None
+            row["resumo"] = None
+        else:
+            row["fim"] = agora
+            row["resumo"] = resumo
+        sb.table("repricer_status").upsert(row, on_conflict="workflow").execute()
+    except Exception as e:
+        print("aviso: não gravei status:", e, flush=True)
 def main():
+    grava_status("rodando")
     preload()
     total_sug = 0
     contadores = {"entrar": 0, "trocar": 0, "sair": 0, "manter": 0}
@@ -582,5 +599,6 @@ def main():
             print("Aviso: não consegui gravar sem_custo:", e, flush=True)
     resumo = ", ".join(f"{k}: {v}" for k, v in contadores.items())
     print(f"\n=== {total_sug} registros gravados ({resumo}) | {len(SEM_CUSTO)} sem custo — nada foi aplicado no ML ===", flush=True)
+    grava_status("concluido", f"{total_sug} sugestões ({resumo}) · {len(SEM_CUSTO)} sem custo")
 if __name__ == "__main__":
     main()
