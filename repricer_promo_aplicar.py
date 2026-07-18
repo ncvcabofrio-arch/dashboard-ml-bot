@@ -153,6 +153,10 @@ def req_delete(path, access, tent=3):
 TIPOS_SO_TIPO = {"PRICE_DISCOUNT", "LIGHTNING", "DOD"}
 TIPOS_COM_OFFER = {"SMART", "PRICE_MATCHING", "PRICE_MATCHING_MELI_ALL", "MARKETPLACE_CAMPAIGN",
                    "PRE_NEGOTIATED", "UNHEALTHY_STOCK", "VOLUME"}
+# Relâmpago e Oferta do dia, uma vez ATIVAS (started), a doc oficial diz que NÃO saem por API
+# ("Uma vez ativadas, as ofertas não podem ser removidas... pode pausar o item"). Estado terminal:
+# só pausando o anúncio ou esperando acabar estoque/horário. Não adianta reconferir/re-tentar.
+LIGHTNING_DOD = {"LIGHTNING", "DOD"}
 def remover_participacao(iid, p, access):
     """SAI de UMA promoção pelo TIPO, na forma EXATA que a doc de cada campanha manda (A/B/C acima).
     'p' vem de rec.participacoes_ativas: {promotion_id, type, offer_id, name}. Retorna (status, corpo)."""
@@ -223,26 +227,49 @@ def executar_sair(fila, iid, ofertas, access):
     return "saiu" if todos_ok else "erro_sair"
 def revarrer_sair(fila, access):
     """SAIR — 2ª PASSADA (no fim do main, já com tempo de propagação): varre o item de novo,
-    remove qualquer teimoso e CONFERE de verdade que não sobrou nenhuma promoção ativa."""
+    remove qualquer teimoso e CLASSIFICA o que sobrou (aprendizado da doc — remoção é ASSÍNCRONA):
+      • sobrou NADA                       -> 'aplicada' ✓ (saiu de tudo)
+      • sobrou só RELÂMPAGO/DOD ativa     -> 'erro' terminal honesto: NÃO sai por API (só pausando)
+      • sobrou outro tipo mas DELETE=200  -> 'aprovada': é propagação assíncrona (restore_requested);
+                                             o main só processa 'aprovada', então RECONFERE na próxima rodada
+      • sobrou e algum DELETE != 200      -> 'erro' real (ex.: offer_id errado)."""
     iid = fila["item_id"]
     seller_id = str(fila.get("seller_id") or "")
     rest = rec.participacoes_ativas(iid, seller_id, access)
-    dels2 = []
+    dels2 = []                          # (rótulo, status_http)
     for p in rest:
         scd, body = remover_participacao(iid, p, access)
-        dels2.append(f"{(p.get('name') or '?')[:16]}[{p.get('type')}]:{scd}")
+        dels2.append((f"{(p.get('name') or '?')[:16]}[{p.get('type')}]:{scd}", scd))
     if dels2:
         remover_todas(iid, access)
     final = rec.participacoes_ativas(iid, seller_id, access)   # conferência final
     sobrou = " ;; ".join(f"{(p.get('name') or '?')[:16]}[{p.get('type')}]" for p in final) or "nada ✓"
-    ok = not final
+    dels_txt = " ;; ".join(d[0] for d in dels2) or "nenhum"
     base = (fila.get("resultado") or "").split(" || 2ª passada")[0]
+    if not final:
+        novo_status, resfim, ret = "aplicada", f"SOBROU: {sobrou}", "saiu"
+    else:
+        tipos_final = {(p.get("type") or "").upper() for p in final}
+        so_luz_dod = bool(tipos_final) and tipos_final <= LIGHTNING_DOD
+        del_falhou = any(sc not in (200, 201) for _, sc in dels2)
+        if so_luz_dod:
+            novo_status, ret = "erro", "bloqueada_luz_dod"
+            resfim = (f"⚠️ SOBROU relâmpago/oferta-do-dia ATIVA ({sobrou}) — pela regra da ML NÃO sai "
+                      f"por API; só PAUSANDO o anúncio ou esperando acabar o estoque/horário")
+        elif del_falhou:
+            novo_status, resfim, ret = "erro", f"SOBROU: {sobrou} (algum DELETE não deu 200)", "erro_sair"
+        else:
+            # DELETE respondeu 200 mas ainda consta ativo => propagação assíncrona da ML.
+            # Mantém 'aprovada' pra RECONFERIR na próxima rodada (não é erro, nem está resolvido).
+            novo_status, ret = "aprovada", "aguardando_ml"
+            resfim = (f"⏳ aguardando processamento da ML (assíncrono): pedi p/ sair, ainda consta ativo "
+                      f"({sobrou}). Reconfiro na próxima rodada")
     gravar(fila["id"], {
-        "status": "aplicada" if ok else "erro",
-        "resultado": f"{base} || 2ª passada — teimosos: {' ;; '.join(dels2) or 'nenhum'} || SOBROU: {sobrou}",
+        "status": novo_status,
+        "resultado": f"{base} || 2ª passada — teimosos: {dels_txt} || {resfim}",
     })
-    print(f"  [{'OK' if ok else 'ERRO'}] sair {iid} (2ª passada) | sobrou: {sobrou}", flush=True)
-    return "saiu" if ok else "erro_sair"
+    print(f"  [{ret}] sair {iid} (2ª passada) | sobrou: {sobrou}", flush=True)
+    return ret
 def confirmar_pos_entrada(fila, access):
     """ENTRAR/TROCAR — 2ª PASSADA (no fim do main, com tempo de propagação):
       - CONFIRMA que o anúncio ficou ATIVO (started) na promoção alvo (confirmar_entrada);
@@ -254,9 +281,12 @@ def confirmar_pos_entrada(fila, access):
     tipo = (fila.get("promocao_tipo") or "").upper()
     base = (fila.get("resultado") or "").split(" || 2ª passada")[0]
     conf = confirmar_entrada(iid, pid, tipo, access)
+    # APRENDIZADO DA DOC: ativação é ASSÍNCRONA. O POST já foi ACEITO na 1ª passada (senão nem
+    # chegava aqui). Se ainda não virou 'started', é propagação (candidate/sync_requested) — NÃO
+    # é falha. Por isso NÃO rebaixamos pra 'erro' vermelho; mantemos 'aplicada' com aviso ⏳.
     nota = ("entrada CONFIRMADA ✓" if conf is True
-            else "⚠️ entrada NÃO confirmou — verifique" if conf is False
-            else "entrada não conferível (relâmpago)")
+            else "⏳ aceita pelo ML, ainda ATIVANDO (assíncrono) — não confirmou 'started' ainda; costuma levar um tempo" if conf is False
+            else "entrada não conferível por API (relâmpago)")
     extra = ""
     if (fila.get("acao") or "") == "trocar":
         rest = [p for p in rec.participacoes_ativas(iid, seller_id, access) if p.get("promotion_id") != pid]
@@ -265,11 +295,10 @@ def confirmar_pos_entrada(fila, access):
         rest2 = [p for p in rec.participacoes_ativas(iid, seller_id, access) if p.get("promotion_id") != pid]
         extra = " | " + ("saiu das outras ✓" if not rest2
                          else "⚠️ ainda ativas: " + ", ".join((p.get('name') or p.get('type')) for p in rest2))
-    ok = conf is not False
-    gravar(fila["id"], {"status": "aplicada" if ok else "erro",
+    gravar(fila["id"], {"status": "aplicada",
                         "resultado": f"{base} || 2ª passada — {nota}{extra}"})
-    print(f"  [{'OK' if ok else 'ATENCAO'}] {fila.get('acao')} {iid} (2ª passada) | {nota}", flush=True)
-    return "confirmado" if ok else "nao_confirmou"
+    print(f"  [OK] {fila.get('acao')} {iid} (2ª passada) | {nota}", flush=True)
+    return "confirmado" if conf is True else ("ativando" if conf is False else "confirmado")
 def processar(fila, access):
     iid = fila["item_id"]
     tipo = (fila.get("promocao_tipo") or "").upper()
@@ -410,24 +439,27 @@ def processar(fila, access):
         print(f"  [DRY] {acao} {iid} {tipo} -> {json.dumps(corpo)} (margem {ev['margem']:.1f}%)", flush=True)
         return "simulado"
     # ---- APLICAÇÃO REAL ----
-    # ORDEM ESCOLHIDA: SAIR DE TODAS PRIMEIRO, depois ENTRAR só na sugerida.
-    # Todas as validações (vigência do item, margem, preço crível, corpo) já passaram acima —
-    # então só saímos das outras quando a entrada já está validada. Risco residual: se o POST
-    # for recusado pelo ML mesmo assim, o anúncio pode ficar sem promoção (avisado no resultado).
+    # ORDEM (julgamento técnico, à prova de falha): ENTRAR PRIMEIRO na sugerida e só SAIR das
+    # outras se a entrada for ACEITA (200/201). Falha SEGURA: se o ML recusar a entrada, não
+    # mexemos em nada e o anúncio segue com as promoções que já tinha (nunca fica descoberto).
+    # O ML aceita o item em VÁRIAS promoções ao mesmo tempo (doc), então entrar antes de sair não
+    # gera conflito; a sobra sai uma a uma por tipo e é reconferida na 2ª passada.
     aviso = ""
-    if acao == "trocar":
-        seller_id = str(fila.get("seller_id") or "")
-        saiu, falhou, _ = sair_das_outras(iid, seller_id, access)   # sai de TODAS (não mantém nenhuma)
-        if saiu:
-            aviso += " | saiu de: " + ", ".join(saiu)
-        if falhou:
-            aviso += " | NÃO saiu: " + ", ".join(falhou)
     sc, resp = post(f"/seller-promotions/items/{iid}?app_version=v2", access, corpo)
     ok = sc in (200, 201)
     if acao == "trocar":
-        aviso = ((" | entrou na sugerida ✓" if ok
-                  else " | ⚠️ SAIU DE TODAS mas a ENTRADA FALHOU — anúncio pode estar sem promoção!")
-                 + aviso)
+        if ok:
+            seller_id = str(fila.get("seller_id") or "")
+            # mantém a NOVA (por promotion_id) e sai de TODAS as outras, uma a uma, por tipo
+            saiu, falhou, _ = sair_das_outras(iid, seller_id, access, manter_pid=cand.get("id"))
+            aviso = " | entrou na sugerida ✓"
+            if saiu:
+                aviso += " | saiu das outras: " + ", ".join(saiu)
+            if falhou:
+                aviso += " | NÃO saiu (confere 2ª passada): " + ", ".join(falhou)
+        else:
+            # entrada recusada -> NÃO removemos nada: rede de segurança intacta
+            aviso = " | ⚠️ entrada recusada — NÃO mexi nas promoções atuais (anúncio segue como estava)"
     motivo = ""
     if not ok:
         _t = json.dumps(resp, ensure_ascii=False).upper()
