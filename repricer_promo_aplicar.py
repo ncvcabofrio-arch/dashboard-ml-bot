@@ -80,8 +80,34 @@ def corpo_post(tipo, cand, preco_alvo):
         estoque = st.get("min") or st.get("remaining_stock") or 1
         return {"deal_price": round(preco_alvo, 2), "stock": int(estoque), "promotion_type": "LIGHTNING"}
     if tipo == "DEAL":
-        return _com_datas({"promotion_id": cand.get("id"), "promotion_type": "DEAL", "deal_price": round(preco_alvo, 2)}, cand)
+        # PROVA DE ERRO (credibilidade): o deal_price TEM que ficar dentro da faixa crível
+        # [min_discounted_price, max_discounted_price], senão o ML devolve 400 CREDIBILITY.
+        preco = round(preco_alvo, 2)
+        try:
+            mx = cand.get("max_discounted_price")
+            mn = cand.get("min_discounted_price")
+            if mx is not None:
+                preco = min(preco, float(mx))     # não pode ter desconto MENOR que o mínimo exigido
+            if mn is not None:
+                preco = max(preco, float(mn))     # nem desconto MAIOR que o permitido
+        except (TypeError, ValueError):
+            pass
+        return _com_datas({"promotion_id": cand.get("id"), "promotion_type": "DEAL", "deal_price": round(preco, 2)}, cand)
     return None
+def confirmar_entrada(iid, pid, tipo, access):
+    """PROVA DE ERRO do entrar: confere DIRETO na promoção alvo se o anúncio ficou ATIVO
+    (status started). Retorna True (confirmado), False (não confirmou) ou None (sem como
+    conferir — ex.: relâmpago sem promotion_id)."""
+    tipo = (tipo or "").upper()
+    if not pid or not tipo:
+        return None
+    st, d = rec.get(f"/seller-promotions/promotions/{pid}/items"
+                    f"?promotion_type={tipo}&item_id={iid}&app_version=v2", access)
+    res = (d.get("results") if isinstance(d, dict) else None) or []
+    for it in res:
+        if str(it.get("id")) == str(iid) and (it.get("status") or "").lower() == "started":
+            return True
+    return False
 def detalhe_relampago(iid, promotion_id, access):
     """Preço SUGERIDO e faixa crível da relâmpago só vêm na consulta POR PROMOÇÃO.
     IMPORTANTE: sem filtro de status o ML devolve só os ATIVOS — como o item é CANDIDATO,
@@ -117,15 +143,13 @@ def req_delete(path, access, tent=3):
         return r.status_code, r.json()
     except Exception:
         return r.status_code, (r.text if r is not None else None)
-# Tipos cujo DELETE EXIGE offer_id (doc: cofinanciadas/preços competitivos/marketplace).
-# DEAL, SELLER_CAMPAIGN, VOLUME, PRE_NEGOTIATED saem só com promotion_type+promotion_id
-# (mandar offer_id nesses faz o ML responder 200 SEM remover — foi o nosso bug).
+# Tipos cujo DELETE EXIGE offer_id (doc). DEAL/SELLER_CAMPAIGN/etc saem só com
+# promotion_type+promotion_id — mandar offer_id nesses faz o ML responder 200 SEM remover.
 TIPOS_COM_OFFER = {"SMART", "PRICE_MATCHING", "PRICE_MATCHING_MELI_ALL", "MARKETPLACE_CAMPAIGN"}
 def remover_participacao(iid, p, access):
-    """SAI de UMA promoção pelo TIPO, exatamente como a doc manda:
-      - SMART/PRICE_MATCHING/PRICE_MATCHING_MELI_ALL/MARKETPLACE_CAMPAIGN:
-        promotion_type + promotion_id + offer_id (o OFFER-..., obrigatório);
-      - DEAL/SELLER_CAMPAIGN/etc: promotion_type + promotion_id (SEM offer_id).
+    """SAI de UMA promoção pelo TIPO, como a doc manda:
+      - SMART/PRICE_MATCHING/PRICE_MATCHING_MELI_ALL/MARKETPLACE_CAMPAIGN: type+id+offer_id;
+      - DEAL/SELLER_CAMPAIGN/etc: type+id (SEM offer_id).
     'p' vem de rec.participacoes_ativas: {promotion_id, type, offer_id, name}.
     Retorna (status, corpo_bruto)."""
     ptipo = (p.get("type") or "").upper()
@@ -166,20 +190,16 @@ def sair_das_outras(iid, seller_id, access, manter_pid=None, manter_tipo=None):
                  and not (manter_pid is None and manter_tipo and (p.get("type") or "").upper() == manter_tipo)]
     return saiu, falhou, restantes
 def executar_sair(fila, iid, ofertas, access):
-    """MAPA (READ-ONLY: não remove nada): pra CADA promoção started/pending do vendedor,
-    consulta se ESTE anúncio aparece e COM QUE STATUS, testando as variantes de consulta.
-    Serve pra descobrir, de uma vez, qual consulta devolve as participações reais
-    (Meli Essencial, Inverno) e com qual status/offer_id — sem ficar tentando às cegas.
-    Formato por promo onde o item aparece: nome[TIPO: status_no_plain | act=Y/N/400 | off=S/N]."""
+    """SAIR — 1ª PASSADA: sai de cada promoção em que o item participa (status started).
+    NÃO confere agora (o ML leva segundos pra propagar): o sucesso é o 200 do DELETE.
+    A conferência de verdade acontece na 2ª passada (revarrer_sair), no fim do main()."""
     seller_id = str(fila.get("seller_id") or "")
-    ativas = rec.participacoes_ativas(iid, seller_id, access)   # status started, offer_id certo
+    ativas = rec.participacoes_ativas(iid, seller_id, access)
     achou = " ;; ".join(f"{(p.get('name') or '?')[:16]}[{p.get('type')}]" for p in ativas) or "nenhuma"
     if DRY:
         gravar(fila["id"], {"status": "aprovada", "resultado": f"[SIMULADO] SAIR de: {achou}"})
         print(f"  [DRY] sair {iid} -> {achou}", flush=True)
         return "simulado"
-    # 1ª PASSADA: sai de cada uma. NÃO confere agora (o ML leva segundos pra propagar) —
-    # o sucesso é o 200 do DELETE. A conferência final acontece na 2ª passada, no fim do main().
     dels, todos_ok = [], True
     for p in ativas:
         scd, body = remover_participacao(iid, p, access)   # DELETE por tipo (offer_id só onde a doc exige)
@@ -193,11 +213,9 @@ def executar_sair(fila, iid, ofertas, access):
     })
     print(f"  [{'OK' if todos_ok else 'ERRO'}] sair {iid} (1ª passada) | {len(ativas)} promo(s)", flush=True)
     return "saiu" if todos_ok else "erro_sair"
-
-
 def revarrer_sair(fila, access):
-    """2ª PASSADA (chamada no fim do main, depois de sair de TODOS os itens — o intervalo já
-    deu tempo do ML propagar): varre o item de novo, remove qualquer teimoso e CONFERE."""
+    """SAIR — 2ª PASSADA (no fim do main, já com tempo de propagação): varre o item de novo,
+    remove qualquer teimoso e CONFERE de verdade que não sobrou nenhuma promoção ativa."""
     iid = fila["item_id"]
     seller_id = str(fila.get("seller_id") or "")
     rest = rec.participacoes_ativas(iid, seller_id, access)
@@ -207,7 +225,7 @@ def revarrer_sair(fila, access):
         dels2.append(f"{(p.get('name') or '?')[:16]}[{p.get('type')}]:{scd}")
     if dels2:
         remover_todas(iid, access)
-    final = rec.participacoes_ativas(iid, seller_id, access)   # conferência de verdade
+    final = rec.participacoes_ativas(iid, seller_id, access)   # conferência final
     sobrou = " ;; ".join(f"{(p.get('name') or '?')[:16]}[{p.get('type')}]" for p in final) or "nada ✓"
     ok = not final
     base = (fila.get("resultado") or "").split(" || 2ª passada")[0]
@@ -217,6 +235,33 @@ def revarrer_sair(fila, access):
     })
     print(f"  [{'OK' if ok else 'ERRO'}] sair {iid} (2ª passada) | sobrou: {sobrou}", flush=True)
     return "saiu" if ok else "erro_sair"
+def confirmar_pos_entrada(fila, access):
+    """ENTRAR/TROCAR — 2ª PASSADA (no fim do main, com tempo de propagação):
+      - CONFIRMA que o anúncio ficou ATIVO (started) na promoção alvo (confirmar_entrada);
+      - no TROCAR, re-varre e sai de qualquer OUTRA que ainda esteja ativa.
+    Só mexe se a 1ª passada marcou 'aplicada' (se o POST falhou, mantém o erro)."""
+    iid = fila["item_id"]
+    seller_id = str(fila.get("seller_id") or "")
+    pid = fila.get("promocao_id")
+    tipo = (fila.get("promocao_tipo") or "").upper()
+    base = (fila.get("resultado") or "").split(" || 2ª passada")[0]
+    conf = confirmar_entrada(iid, pid, tipo, access)
+    nota = ("entrada CONFIRMADA ✓" if conf is True
+            else "⚠️ entrada NÃO confirmou — verifique" if conf is False
+            else "entrada não conferível (relâmpago)")
+    extra = ""
+    if (fila.get("acao") or "") == "trocar":
+        rest = [p for p in rec.participacoes_ativas(iid, seller_id, access) if p.get("promotion_id") != pid]
+        for p in rest:
+            remover_participacao(iid, p, access)
+        rest2 = [p for p in rec.participacoes_ativas(iid, seller_id, access) if p.get("promotion_id") != pid]
+        extra = " | " + ("saiu das outras ✓" if not rest2
+                         else "⚠️ ainda ativas: " + ", ".join((p.get('name') or p.get('type')) for p in rest2))
+    ok = conf is not False
+    gravar(fila["id"], {"status": "aplicada" if ok else "erro",
+                        "resultado": f"{base} || 2ª passada — {nota}{extra}"})
+    print(f"  [{'OK' if ok else 'ATENCAO'}] {fila.get('acao')} {iid} (2ª passada) | {nota}", flush=True)
+    return "confirmado" if ok else "nao_confirmou"
 def processar(fila, access):
     iid = fila["item_id"]
     tipo = (fila.get("promocao_tipo") or "").upper()
@@ -445,20 +490,27 @@ def main():
         r = processar(f, access)
         resumo[r] = resumo.get(r, 0) + 1
         print(f"  = {f['item_id']} [{f.get('acao', '?')}] -> {r}", flush=True)  # 1 linha por item (todos aparecem)
-    # 2ª PASSADA do SAIR: depois de sair de TODOS (o que já deu tempo do ML propagar), varre
-    # cada um de novo, remove teimosos e CONFERE. É aqui que o status final do 'sair' é gravado.
-    sair_rows = [f for f in fila if f.get("acao") == "sair" and acessos.get(str(f["seller_id"]))]
-    if sair_rows:
+    # ---- 2ª PASSADA (depois de mexer em TODOS os itens -> deu tempo do ML propagar) ----
+    # sair: varre de novo e confere; entrar/trocar: confirma a entrada (e o trocar sai das outras).
+    alvos = [f for f in fila if f.get("acao") in ("sair", "entrar", "trocar") and acessos.get(str(f["seller_id"]))]
+    if alvos:
         time.sleep(8)   # respiro extra de propagação
-        for f in sair_rows:
-            # relê o resultado da 1ª passada pra anexar a 2ª
+        for f in alvos:
+            access = acessos.get(str(f["seller_id"]))
+            # relê status/resultado da 1ª passada
+            st1, res1 = "", ""
             try:
-                atual = sb.table("repricer_promo_fila").select("resultado").eq("id", f["id"]).execute().data
-                f["resultado"] = (atual[0].get("resultado") if atual else None) or ""
+                atual = sb.table("repricer_promo_fila").select("status,resultado").eq("id", f["id"]).execute().data
+                if atual:
+                    st1 = (atual[0].get("status") or "")
+                    res1 = (atual[0].get("resultado") or "")
             except Exception:
                 pass
-            rr = revarrer_sair(f, acessos.get(str(f["seller_id"])))
-            resumo["sair_2p_" + rr] = resumo.get("sair_2p_" + rr, 0) + 1
+            f["resultado"] = res1
+            if st1 != "aplicada":
+                continue   # 1ª passada falhou (ex.: margem/credibilidade) — não sobrescreve o erro
+            rr = revarrer_sair(f, access) if f.get("acao") == "sair" else confirmar_pos_entrada(f, access)
+            resumo["2p_" + rr] = resumo.get("2p_" + rr, 0) + 1
     print("resumo:", json.dumps(resumo, ensure_ascii=False), flush=True)
     grava_status("concluido", json.dumps(resumo, ensure_ascii=False))
 if __name__ == "__main__":
