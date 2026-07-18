@@ -299,6 +299,20 @@ def confirmar_pos_entrada(fila, access):
                         "resultado": f"{base} || 2ª passada — {nota}{extra}"})
     print(f"  [OK] {fila.get('acao')} {iid} (2ª passada) | {nota}", flush=True)
     return "confirmado" if conf is True else ("ativando" if conf is False else "confirmado")
+def _sugestao_atual(iid, seller_id):
+    """Lê a sugestão MAIS NOVA e VIVA do robô pra este item (status != 'aplicada', que é leftover
+    congelado). Serve pra o aplicador agir na recomendação ATUAL, não numa ordem antiga da fila.
+    Retorna o dict da sugestão fresca ou None."""
+    try:
+        rows = (sb.table("repricer_sugestoes")
+                .select("acao,promocao_id,promocao_tipo,promocao_nome,status,criado_em")
+                .eq("seller_id", str(seller_id)).eq("item_id", iid)
+                .neq("status", "aplicada")
+                .order("criado_em", desc=True).limit(1).execute().data) or []
+        return rows[0] if rows else None
+    except Exception as e:
+        print(f"  aviso: não li a sugestão atual de {iid}: {e}", flush=True)
+        return None
 def processar(fila, access):
     iid = fila["item_id"]
     tipo = (fila.get("promocao_tipo") or "").upper()
@@ -311,6 +325,26 @@ def processar(fila, access):
         ofertas = []
     if acao == "sair":
         return executar_sair(fila, iid, ofertas, access)
+    # ---- RE-SINCRONIZA com a sugestão MAIS NOVA do robô (não age em ordem antiga da fila) ----
+    # A fila guarda a decisão do momento em que você aprovou; se a sugestão foi rerodada depois,
+    # a recomendação pode ter mudado (ex.: o item entrou na promoção e virou 'manter'). Usa sempre
+    # a sugestão fresca do robô. 'aplicada' (leftover congelado) é ignorada por _sugestao_atual.
+    nova = _sugestao_atual(iid, fila.get("seller_id"))
+    if nova is not None:
+        nacao = (nova.get("acao") or "").lower()
+        if nacao == "manter":
+            gravar(fila["id"], {"status": "aplicada",
+                "resultado": "já estava ATIVA no item ✓ (sugestão atual do robô: manter — não precisou entrar)"})
+            return "ja_ativa"
+        if nacao in ("entrar", "trocar"):
+            acao = nacao
+            fila = {**fila, "acao": nacao,
+                    "promocao_id": nova.get("promocao_id") or fila.get("promocao_id"),
+                    "promocao_tipo": nova.get("promocao_tipo") or fila.get("promocao_tipo"),
+                    "promocao_nome": nova.get("promocao_nome") or fila.get("promocao_nome")}
+            tipo = (fila.get("promocao_tipo") or "").upper()
+        # outras ações (raro): segue com o que veio na fila
+    # (se nova is None: não há sugestão VIVA; o estado ao vivo abaixo decide já-ativa × candidato sumiu)
     if tipo not in TIPOS_OK:
         gravar(fila["id"], {"status": "erro", "resultado": f"tipo {tipo} ainda não suportado pelo aplicador"})
         return "tipo_nao_suportado"
@@ -322,9 +356,15 @@ def processar(fila, access):
     antigas = [o for o in ofertas if rec.eh_ativa(o)]
     cand = achar_candidato(ofertas, fila)
     if not cand:
+        # NÃO achou candidato do tipo alvo. Se o item JÁ ESTÁ ATIVO nesse tipo, não é erro:
+        # é um resultado BOM (o anúncio já está na promoção) — marca 'já ativa ✓', não vermelho.
         ja = any((o.get("type") or "").upper() == tipo and rec.eh_ativa(o) for o in ofertas)
-        msg = "essa promoção já está ATIVA no item" if ja else "candidato aprovado não está mais disponível"
-        gravar(fila["id"], {"status": "erro", "resultado": msg})
+        if ja:
+            gravar(fila["id"], {"status": "aplicada",
+                "resultado": "já estava ATIVA no item ✓ (não precisou entrar)"})
+            return "ja_ativa"
+        gravar(fila["id"], {"status": "erro",
+            "resultado": "candidato aprovado não está mais disponível — rode a sugestão de novo"})
         return "sem_candidato"
     # trava de vigência (consulta o detalhe da promoção): nunca entrar em promo programada/futura.
     # Fica ANTES da remoção das outras, pra nunca deixar o item sem promoção por causa disso.
@@ -558,6 +598,9 @@ def main():
             f["resultado"] = res1
             if st1 != "aplicada":
                 continue   # 1ª passada falhou (ex.: margem/credibilidade) — não sobrescreve o erro
+            # 'já ativa' (não precisou entrar) não tem 2ª passada de confirmação
+            if "já estava ATIVA" in res1:
+                continue
             rr = revarrer_sair(f, access) if f.get("acao") == "sair" else confirmar_pos_entrada(f, access)
             resumo["2p_" + rr] = resumo.get("2p_" + rr, 0) + 1
     print("resumo:", json.dumps(resumo, ensure_ascii=False), flush=True)
