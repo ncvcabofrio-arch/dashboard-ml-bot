@@ -260,15 +260,11 @@ def promocoes_do_vendedor(seller_id, access, limit=50, teto_paginas=80):
             break
     return out
 def participacoes_ativas(item_id, seller_id, access):
-    """Descobre em quais promoções ESTE item está REALMENTE participando (status started) —
-    o caminho CONFIÁVEL da doc (o /seller-promotions/items/{id} não traz as ativas de campanha
-    cofinanciada/marketplace, e a lista sem filtro mistura CANDIDATAS):
-      1) users/{seller}                                  -> todas as promoções do vendedor;
-      2) promotions/{id}/items?item_id=...&status_item=active
-                                                         -> SÓ os itens participando de verdade,
-                                                            com o offer_id (OFFER-...) que o
-                                                            DELETE de SMART/PM/marketplace exige.
-    Filtra por status do item == 'started' pra NUNCA confundir candidata com participação.
+    """Descobre em quais promoções ESTE item está ATIVO/programado — o caminho CONFIÁVEL
+    da doc (o /seller-promotions/items/{id} não traz as ativas de campanha marketplace):
+      1) users/{seller}                       -> todas as promoções do vendedor;
+      2) promotions/{id}/items?item_id=...     -> se o item participa (status started/pending)
+         e o offer_id (obrigatório pra sair de cofinanciada).
     Retorna lista de dicts: {promotion_id, type, offer_id, name, status}."""
     achadas, vistos = [], set()
     for pr in promocoes_do_vendedor(seller_id, access):
@@ -279,16 +275,14 @@ def participacoes_ativas(item_id, seller_id, access):
         ptipo = (pr.get("type") or "")
         if not pid or not ptipo:
             continue
-        base = (f"/seller-promotions/promotions/{pid}/items"
-                f"?promotion_type={ptipo}&item_id={item_id}&app_version=v2")
-        # NÃO usar status_item=active como filtro: comprovado (mapa) que ele devolve candidata
-        # também. O filtro confiável é o STATUS do item == 'started' (participação real).
-        st, d = get(base, access)
-        res = d.get("results") if isinstance(d, dict) else None
-        for it in (res or []):
+        st, d = get(f"/seller-promotions/promotions/{pid}/items"
+                    f"?promotion_type={ptipo}&item_id={item_id}&app_version=v2", access)
+        res = (d.get("results") if isinstance(d, dict) else None) or []
+        for it in res:
             if str(it.get("id")) != str(item_id):
                 continue
-            if (it.get("status") or "").lower() != "started":   # SÓ participação real
+            sti = (it.get("status") or "").lower()
+            if sti not in ("started", "pending"):
                 continue
             chave = (pid, ptipo.upper())
             if chave in vistos:
@@ -297,9 +291,9 @@ def participacoes_ativas(item_id, seller_id, access):
             achadas.append({
                 "promotion_id": pid,
                 "type": ptipo.upper(),
-                "offer_id": it.get("offer_id"),   # OFFER-... (só existe quando started)
+                "offer_id": it.get("offer_id") or it.get("ref_id"),
                 "name": pr.get("name"),
-                "status": "started",
+                "status": sti,
             })
     return achadas
 # Você JÁ está participando quando o status é "started" (confirmado na sonda)
