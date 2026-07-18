@@ -295,6 +295,21 @@ def processar(fila, access):
         gravar(fila["id"], {"status": "erro",
                             "resultado": "promoção ainda não está vigente (programada) — não apliquei (item mantido como estava)"})
         return "programada"
+    # VIGÊNCIA A NÍVEL DE ITEM: a campanha pode estar 'started' mas a participação DESTE anúncio
+    # começar no futuro (ex.: amanhã). Consulta a data do item na promoção e bloqueia se for futura.
+    try:
+        stx, dix = rec.get(f"/seller-promotions/promotions/{cand.get('id')}/items"
+                           f"?promotion_type={tipo}&item_id={iid}&app_version=v2", access)
+        for it in ((dix.get("results") if isinstance(dix, dict) else None) or []):
+            if str(it.get("id")) == str(iid):
+                ini = it.get("start_date")
+                if ini and not rec._vigente({"start_date": ini}):
+                    gravar(fila["id"], {"status": "erro",
+                        "resultado": f"vigência do ITEM é futura (começa {str(ini)[:10]}) — não apliquei (mantido como estava)"})
+                    return "vigencia_futura"
+                break
+    except Exception:
+        pass
     # ---- RE-CHECAGEM de margem (a trava de segurança) ----
     st, it = rec.get(f"/items/{iid}", access)
     if not isinstance(it, dict):
@@ -387,30 +402,24 @@ def processar(fila, access):
         print(f"  [DRY] {acao} {iid} {tipo} -> {json.dumps(corpo)} (margem {ev['margem']:.1f}%)", flush=True)
         return "simulado"
     # ---- APLICAÇÃO REAL ----
-    # ORDEM SEGURA: ENTRA na nova PRIMEIRO. Se falhar, NÃO remove nada — o item fica
-    # exatamente como estava (nunca sem promoção). Só depois de entrar é que sai das outras.
-    sc, resp = post(f"/seller-promotions/items/{iid}?app_version=v2", access, corpo)
-    ok = sc in (200, 201)
+    # ORDEM ESCOLHIDA: SAIR DE TODAS PRIMEIRO, depois ENTRAR só na sugerida.
+    # Todas as validações (vigência do item, margem, preço crível, corpo) já passaram acima —
+    # então só saímos das outras quando a entrada já está validada. Risco residual: se o POST
+    # for recusado pelo ML mesmo assim, o anúncio pode ficar sem promoção (avisado no resultado).
     aviso = ""
-    if ok and acao == "trocar":
-        # SAIR DE TODAS e ficar só na sugerida — caminho CONFIÁVEL (confirmado na doc do ML):
-        # o endpoint /seller-promotions/items/{id} NÃO traz as participações ATIVAS de campanha
-        # cofinanciada/marketplace (só candidatas). A verdade vem de:
-        #   users/{seller} -> promotions/{id}/items?item_id=...  (status started + offer_id).
-        # Entramos na nova PRIMEIRO (validação/segurança) e então saímos de cada OUTRA pelo tipo.
-        # NÃO precisa re-entrar: a sugerida fica intacta (sem entrada dupla).
+    if acao == "trocar":
         seller_id = str(fila.get("seller_id") or "")
-        novo_pid = corpo.get("promotion_id")          # None na relâmpago (não tem promotion_id)
-        saiu, falhou, restantes = sair_das_outras(iid, seller_id, access,
-                                                   manter_pid=novo_pid, manter_tipo=tipo)
-        if restantes:
-            aviso = " | ⚠️ ainda ativas: " + ", ".join((p.get("name") or p.get("type")) for p in restantes)
-        else:
-            aviso = " | saiu de TODAS, ficou só na sugerida ✓"
+        saiu, falhou, _ = sair_das_outras(iid, seller_id, access)   # sai de TODAS (não mantém nenhuma)
         if saiu:
             aviso += " | saiu de: " + ", ".join(saiu)
         if falhou:
             aviso += " | NÃO saiu: " + ", ".join(falhou)
+    sc, resp = post(f"/seller-promotions/items/{iid}?app_version=v2", access, corpo)
+    ok = sc in (200, 201)
+    if acao == "trocar":
+        aviso = ((" | entrou na sugerida ✓" if ok
+                  else " | ⚠️ SAIU DE TODAS mas a ENTRADA FALHOU — anúncio pode estar sem promoção!")
+                 + aviso)
     motivo = ""
     if not ok:
         _t = json.dumps(resp, ensure_ascii=False).upper()
