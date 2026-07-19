@@ -308,6 +308,14 @@ def main():
     else:
         print("  (nenhuma via encontrou o item como 'started')", flush=True)
     # 5) SIMULAÇÃO DE ENTRADA (só leitura) — reproduz o aplicador e mostra o POST exato
+    # PRECISA carregar os custos/grupos ANTES (senão custo_efetivo vem vazio e dá 'sem custo').
+    mm = (os.environ.get("MARGEM_MIN") or "").strip()
+    if mm:
+        try:
+            rec.MARGEM_PADRAO = float(mm.replace(",", "."))
+        except ValueError:
+            pass
+    rec.preload()
     simular_entrada(ITEM, access, SID)
     print("\n################ FIM — nada foi alterado (só leitura) ################", flush=True)
 if __name__ == "__main__":
