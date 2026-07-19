@@ -26,9 +26,155 @@ ITEM_FILTRO = (os.environ.get("ITEM_ID") or "").strip()        # 1 anúncio só
 ITENS_FILTRO = [x.strip() for x in (os.environ.get("ITEM_IDS") or "").split(",") if x.strip()]  # lista (o painel manda os selecionados)
 MAX_APLICAR = int(os.environ.get("MAX_APLICAR", "0"))          # 0 = sem limite
 MARGEM_MIN = (os.environ.get("MARGEM_MIN") or "").strip()      # piso dos itens "Padrão" (mesmo da simulação)
+RETRY_ONLY = (os.environ.get("RETRY_ONLY", "0").strip() == "1")  # 1 = SÓ reprocessa a fila de retry (cron horário)
 TIPOS_OK = {"SMART", "PRICE_MATCHING", "PRICE_MATCHING_MELI_ALL", "LIGHTNING", "DEAL",
             "DOD", "MARKETPLACE_CAMPAIGN", "VOLUME", "SELLER_CAMPAIGN",
             "PRE_NEGOTIATED", "UNHEALTHY_STOCK", "BANK", "PRICE_DISCOUNT"}
+
+# ===================== FILA DE REPROCESSAMENTO (tabela separada) =====================
+# Só entram aqui itens que ERRARAM ou DIVERGIRAM na entrada. Fica numa tabela PRÓPRIA
+# (repricer_promo_retry), separada da fila de aprovação, pra o painel mostrar num bloco
+# à parte SEM dar refresh a cada sugestão nova.
+#
+# categoria      -> o que aconteceu e como a fila trata:
+#   ok                   resolveu (entrou / já estava ativa) -> sai da fila
+#   transitorio          erro recuperável (candidato sumiu, POST falhou) -> retenta de hora em hora
+#   aguardando_ml        ML aceitou, ativação assíncrona -> reconfere de hora em hora
+#   aguardando_vigencia  promoção/participação ainda não começou -> espera a data (retenta espaçado)
+#   terminal             precisa de humano (sem custo, tipo não suportado, relâmpago já ativa) -> NÃO retenta
+#   divergencia          a sugestão MUDOU de promoção -> NÃO troca sozinho, te avisa
+#
+# RETRY_PLAN[categoria] = (intervalo_horas, teto_de_tentativas)
+RETRY_PLAN = {
+    "transitorio":         (1, 8),    # ~8 h
+    "aguardando_ml":       (1, 6),    # ~6 h confirmando ativação
+    "aguardando_vigencia": (6, 12),   # ~3 dias esperando a vigência começar
+}
+# código de resultado (1ª/2ª passada) -> categoria da fila de retry
+CODIGO_CATEGORIA = {
+    # resolvido
+    "ja_ativa": "ok", "simulado": "ok", "saiu": "ok", "confirmado": "ok",
+    # postou / assíncrono
+    "aplicado": "aguardando_ml", "ativando": "aguardando_ml", "aguardando_ml": "aguardando_ml",
+    # recuperável -> retenta
+    "sem_candidato": "transitorio", "sem_oferta": "transitorio",
+    "erro_post": "transitorio", "erro_sair": "transitorio",
+    # espera a vigência
+    "programada": "aguardando_vigencia", "vigencia_futura": "aguardando_vigencia",
+    # precisa de humano -> não retenta
+    "acao_invalida": "terminal", "tipo_nao_suportado": "terminal", "sem_item": "terminal",
+    "sem_custo": "terminal", "sem_avaliar": "terminal", "abaixo_piso": "terminal",
+    "sem_corpo": "terminal", "bloqueada_luz_dod": "terminal",
+    # a sugestão mudou de promoção
+    "divergencia": "divergencia",
+}
+RETRY_TAB = "repricer_promo_retry"
+
+def _agora():
+    return datetime.now(timezone.utc)
+
+def _retry_atual(seller_id, item_id):
+    """Lê a linha da fila de retry deste item (ou None)."""
+    try:
+        r = (sb.table(RETRY_TAB).select("*")
+             .eq("seller_id", str(seller_id)).eq("item_id", item_id)
+             .limit(1).execute().data) or []
+        return r[0] if r else None
+    except Exception as e:
+        print(f"  aviso: não li retry de {item_id}: {e}", flush=True)
+        return None
+
+def registrar_retry(fila, codigo, resultado_txt=None):
+    """Depois de processar um item, atualiza a tabela de retry conforme o desfecho.
+    NÃO roda em simulação (DRY). Mantém 1 linha por (seller_id,item_id)."""
+    if DRY:
+        return
+    seller_id = str(fila.get("seller_id") or "")
+    item_id = fila.get("item_id")
+    if not item_id:
+        return
+    cat = CODIGO_CATEGORIA.get(codigo, "transitorio")
+    prev = _retry_atual(seller_id, item_id)
+    agora = _agora()
+    base = {
+        "seller_id": seller_id, "item_id": item_id,
+        "sku": fila.get("sku"), "titulo": fila.get("titulo"),
+        "acao": fila.get("acao"),
+        "promocao_id": fila.get("promocao_id"), "promocao_tipo": fila.get("promocao_tipo"),
+        "promocao_nome": fila.get("promocao_nome"), "preco_alvo": fila.get("preco_alvo"),
+        "categoria": cat, "ultimo_resultado": (resultado_txt or codigo)[:500],
+        "atualizado_em": agora.isoformat(),
+    }
+    if cat == "ok":
+        # resolveu: se havia linha, marca resolvida (some do bloco ativo do painel); senão nem cria.
+        if prev:
+            base.update({"status": "resolvido", "proxima_tentativa": None})
+            _upsert_retry(base)
+        return
+    if cat in RETRY_PLAN:
+        tent = int((prev.get("tentativas") if prev else 0) or 0) + 1
+        horas, teto = RETRY_PLAN[cat]
+        if tent >= teto:
+            base.update({"status": "esgotado", "tentativas": tent, "max_tentativas": teto,
+                         "proxima_tentativa": None,
+                         "ultimo_resultado": f"esgotou {tent} tentativas — reveja no painel ({base['ultimo_resultado']})"})
+        else:
+            base.update({"status": "ativo", "tentativas": tent, "max_tentativas": teto,
+                         "proxima_tentativa": (agora + timedelta(hours=horas)).isoformat()})
+        _upsert_retry(base)
+        return
+    # terminal / divergencia: fica visível pra revisão manual, sem auto-retry
+    base.update({"status": "revisar", "proxima_tentativa": None,
+                 "tentativas": int((prev.get("tentativas") if prev else 0) or 0),
+                 "max_tentativas": (prev.get("max_tentativas") if prev else None)})
+    _upsert_retry(base)
+
+def _upsert_retry(row):
+    try:
+        if "criado_em" not in row:
+            row["criado_em"] = _agora().isoformat()
+        sb.table(RETRY_TAB).upsert(row, on_conflict="seller_id,item_id").execute()
+    except Exception as e:
+        print(f"  aviso: não gravei retry de {row.get('item_id')}: {e}", flush=True)
+
+def _sugestoes_rodando():
+    """True se o robô de SUGESTÕES está rodando agora (pra não reprocessar em cima de
+    sugestão meio-escrita). Best-effort: se não houver o registro, assume que não."""
+    try:
+        r = (sb.table("repricer_status").select("estado")
+             .eq("workflow", "sugestoes").limit(1).execute().data) or []
+        return bool(r) and (r[0].get("estado") == "rodando")
+    except Exception:
+        return False
+
+def carregar_retry_devidos():
+    """Lê os itens da fila de retry que já estão na hora (proxima_tentativa <= agora),
+    ainda ativos e abaixo do teto. Devolve dicts no MESMO formato da fila de aprovação."""
+    if DRY:
+        return []
+    try:
+        q = (sb.table(RETRY_TAB).select("*")
+             .eq("status", "ativo")
+             .lte("proxima_tentativa", _agora().isoformat()))
+        if SELLER_FILTRO:
+            q = q.eq("seller_id", SELLER_FILTRO)
+        if ITENS_FILTRO:
+            q = q.in_("item_id", ITENS_FILTRO)
+        elif ITEM_FILTRO:
+            q = q.eq("item_id", ITEM_FILTRO)
+        rows = (q.execute().data) or []
+    except Exception as e:
+        print(f"aviso: não li a fila de retry: {e}", flush=True)
+        return []
+    devidos = []
+    for r in rows:
+        teto = int(r.get("max_tentativas") or 8)
+        if int(r.get("tentativas") or 0) >= teto:
+            continue
+        # id-sentinela: o gravar() NÃO deve tocar em repricer_promo_fila com o id da tabela de retry.
+        r = {**r, "id": f"retry:{r.get('seller_id')}:{r.get('item_id')}", "_retry": True}
+        devidos.append(r)   # já tem seller_id/item_id/acao/promocao_id/tentativas -> serve na processar()
+    return devidos
 def post(path, access, body, tent=3):
     r = None
     for i in range(tent):
@@ -150,8 +296,15 @@ def detalhe_relampago(iid, promotion_id, access):
         if res:
             return res[0]
     return None
+_RETRY_PATCH = {}   # guarda o último patch de itens vindos da fila de retry (id "retry:...")
 def gravar(fila_id, patch):
     patch["aplicado_em"] = datetime.now(timezone.utc).isoformat()
+    # Itens que vieram da FILA DE RETRY têm id "retry:<seller>:<item>" (não são linha de
+    # repricer_promo_fila). NÃO escrevo em repricer_promo_fila (id colidiria com outro item):
+    # só guardo o texto pro registrar_retry usar; a tabela de retry é a fonte da verdade deles.
+    if isinstance(fila_id, str) and fila_id.startswith("retry:"):
+        _RETRY_PATCH[fila_id] = patch
+        return
     try:
         sb.table("repricer_promo_fila").update(patch).eq("id", fila_id).execute()
     except Exception as e:
@@ -362,6 +515,18 @@ def processar(fila, access):
                 "resultado": "já estava ATIVA no item ✓ (sugestão atual do robô: manter — não precisou entrar)"})
             return "ja_ativa"
         if nacao in ("entrar", "trocar"):
+            # REGRA DE OURO: auto-retenta só a MESMA promoção aprovada. Se estamos num RETRY
+            # (tentativas>0) e a sugestão fresca aponta pra OUTRA promoção, NÃO troco sozinho —
+            # oferta nova é decisão sua. Marca divergência e sai do auto-retry.
+            orig_pid = str(fila.get("promocao_id") or "")
+            nova_pid = str(nova.get("promocao_id") or "")
+            eh_retry = int(fila.get("tentativas") or 0) > 0
+            if eh_retry and orig_pid and nova_pid and nova_pid != orig_pid:
+                msg = (f"a sugestão MUDOU de promoção (aprovado {orig_pid} '{fila.get('promocao_nome') or ''}' "
+                       f"→ agora {nova_pid} '{nova.get('promocao_nome') or ''}'). NÃO troquei sozinho: "
+                       f"oferta nova é decisão sua — reveja no painel.")
+                gravar(fila["id"], {"status": "revisar", "resultado": msg})
+                return "divergencia"
             acao = nacao
             fila = {**fila, "acao": nacao,
                     "promocao_id": nova.get("promocao_id") or fila.get("promocao_id"),
@@ -566,23 +731,44 @@ def main():
             print(f"piso padrão (Padrão) = {rec.MARGEM_PADRAO}%", flush=True)
         except ValueError:
             pass
-    q = sb.table("repricer_promo_fila").select("*").eq("status", "aprovada")
-    if SELLER_FILTRO:
-        q = q.eq("seller_id", SELLER_FILTRO)
-    # escopo por anúncio: lista (ITEM_IDS, o painel manda os selecionados) tem prioridade;
-    # senão 1 item (ITEM_ID); senão a fila inteira da conta.
-    if ITENS_FILTRO:
-        q = q.in_("item_id", ITENS_FILTRO)
-    elif ITEM_FILTRO:
-        q = q.eq("item_id", ITEM_FILTRO)
-    fila = (q.execute().data) or []
-    if MAX_APLICAR:
-        fila = fila[:MAX_APLICAR]
+    if RETRY_ONLY:
+        # cron horário: NÃO aplica a fila 'aprovada' (isso é você clicando no painel);
+        # só reprocessa os que já erraram/aguardam na tabela de retry.
+        fila = []
+        print("MODO RETRY_ONLY — só a fila de reprocessamento (não toca em 'aprovada')", flush=True)
+    else:
+        q = sb.table("repricer_promo_fila").select("*").eq("status", "aprovada")
+        if SELLER_FILTRO:
+            q = q.eq("seller_id", SELLER_FILTRO)
+        # escopo por anúncio: lista (ITEM_IDS, o painel manda os selecionados) tem prioridade;
+        # senão 1 item (ITEM_ID); senão a fila inteira da conta.
+        if ITENS_FILTRO:
+            q = q.in_("item_id", ITENS_FILTRO)
+        elif ITEM_FILTRO:
+            q = q.eq("item_id", ITEM_FILTRO)
+        fila = (q.execute().data) or []
+        if MAX_APLICAR:
+            fila = fila[:MAX_APLICAR]
+    # ---- FILA DE REPROCESSAMENTO: puxa os que erraram/aguardam e já estão na hora ----
+    # Só se as SUGESTÕES não estiverem rodando agora (pra não agir em cima de sugestão meio-escrita).
+    ids_fila = {f["id"] for f in fila}
+    if not DRY:
+        if _sugestoes_rodando():
+            print("sugestões RODANDO agora — pulo a fila de retry nesta rodada (evito agir em sugestão meio-escrita)", flush=True)
+        else:
+            retry = carregar_retry_devidos()
+            # não duplica um item que já veio como 'aprovada' nesta mesma rodada
+            itens_ja = {f["item_id"] for f in fila}
+            retry = [r for r in retry if r["item_id"] not in itens_ja]
+            if retry:
+                print(f"fila de retry: {len(retry)} item(ns) na hora de reprocessar", flush=True)
+                fila += retry
     escopo = (f" | itens {len(ITENS_FILTRO)} selecionados" if ITENS_FILTRO
               else (f" | item {ITEM_FILTRO}" if ITEM_FILTRO else " | FILA INTEIRA da conta"))
     print(f"{'SIMULAÇÃO (DRY_RUN)' if DRY else 'APLICAÇÃO REAL'} — {len(fila)} item(ns)"
           + (f" | conta {SELLER_FILTRO}" if SELLER_FILTRO else "") + escopo, flush=True)
     if not fila:
+        grava_status("concluido", "{}")
         return
     # resolve UM access token por conta — mesma mecânica do repricer_sugestoes.main()
     # obter_access(sb, seller_id, refresh) -> (access, sid_real, refresh)
@@ -594,14 +780,17 @@ def main():
         except Exception as e:
             print(f"  !! não consegui token de {seller_id}: {e}", flush=True)
     resumo = {}
+    codigo_final = {}   # id -> código do desfecho final (1ª ou 2ª passada), pra alimentar a fila de retry
     for f in fila:
         sid = str(f["seller_id"])
         access = acessos.get(sid)
         if not access:
             gravar(f["id"], {"status": "erro", "resultado": f"sem acesso à conta {sid} (token não resolveu)"})
+            codigo_final[f["id"]] = "erro_post"
             resumo["sem_token"] = resumo.get("sem_token", 0) + 1
             continue
         r = processar(f, access)
+        codigo_final[f["id"]] = r
         resumo[r] = resumo.get(r, 0) + 1
         print(f"  = {f['item_id']} [{f.get('acao', '?')}] -> {r}", flush=True)  # 1 linha por item (todos aparecem)
     # ---- 2ª PASSADA (depois de mexer em TODOS os itens -> deu tempo do ML propagar) ----
@@ -611,15 +800,20 @@ def main():
         time.sleep(8)   # respiro extra de propagação
         for f in alvos:
             access = acessos.get(str(f["seller_id"]))
-            # relê status/resultado da 1ª passada
+            eh_retry = isinstance(f.get("id"), str) and str(f["id"]).startswith("retry:")
+            # relê status/resultado da 1ª passada (fila de aprovação = banco; retry = patch em memória)
             st1, res1 = "", ""
-            try:
-                atual = sb.table("repricer_promo_fila").select("status,resultado").eq("id", f["id"]).execute().data
-                if atual:
-                    st1 = (atual[0].get("status") or "")
-                    res1 = (atual[0].get("resultado") or "")
-            except Exception:
-                pass
+            if eh_retry:
+                p = _RETRY_PATCH.get(f["id"], {})
+                st1, res1 = (p.get("status") or ""), (p.get("resultado") or "")
+            else:
+                try:
+                    atual = sb.table("repricer_promo_fila").select("status,resultado").eq("id", f["id"]).execute().data
+                    if atual:
+                        st1 = (atual[0].get("status") or "")
+                        res1 = (atual[0].get("resultado") or "")
+                except Exception:
+                    pass
             f["resultado"] = res1
             if st1 != "aplicada":
                 continue   # 1ª passada falhou (ex.: margem/credibilidade) — não sobrescreve o erro
@@ -627,7 +821,20 @@ def main():
             if "já estava ATIVA" in res1:
                 continue
             rr = revarrer_sair(f, access) if f.get("acao") == "sair" else confirmar_pos_entrada(f, access)
+            codigo_final[f["id"]] = rr
             resumo["2p_" + rr] = resumo.get("2p_" + rr, 0) + 1
+    # ---- BOOKKEEPING DA FILA DE RETRY: cada item entra/atualiza/sai conforme o desfecho ----
+    if not DRY:
+        for f in fila:
+            code = codigo_final.get(f["id"])
+            if not code:
+                continue
+            # texto do resultado pra registrar (retry = patch em memória; fila = já em f['resultado'])
+            if isinstance(f.get("id"), str) and str(f["id"]).startswith("retry:"):
+                txt = (_RETRY_PATCH.get(f["id"], {}) or {}).get("resultado") or f.get("resultado")
+            else:
+                txt = f.get("resultado")
+            registrar_retry(f, code, txt)
     print("resumo:", json.dumps(resumo, ensure_ascii=False), flush=True)
     grava_status("concluido", json.dumps(resumo, ensure_ascii=False))
 if __name__ == "__main__":
