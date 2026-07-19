@@ -4,11 +4,14 @@ Roda no GitHub Actions (lá tem o token OAuth) e despeja TUDO no LOG, usando tod
 Esta versão SONDA cada campanha por várias vias (sem filtro, status=started, status=candidate,
 e PAGINANDO a lista inteira) pra descobrir se a participação 'started' está sendo perdida por
 paginação ou por falta de filtro.
+NOVO: seção 5) SIMULAÇÃO DE ENTRADA — reproduz TODAS as checagens do aplicador pra a promoção
+recomendada e mostra o POST EXATO que ele enviaria, SEM escrever nada (nem no ML, nem no banco).
 Uso (inputs do workflow): ITEM_ID (obrigatório) e SELLER_ID (conta).
 """
 import os
 import json
 import repricer_sugestoes as rec
+from datetime import datetime, timezone, timedelta
 from ml_auth import obter_access
 sb = rec.sb
 ITEM = (os.environ.get("ITEM_ID") or os.environ.get("DIAG_ITEM") or "").strip()
@@ -31,6 +34,53 @@ def _achar(res, iid):
         if str(x.get("id")) == str(iid):
             return x
     return None
+# ---------- funções PURAS copiadas do aplicador (pra a simulação bater 100% com ele) ----------
+def achar_candidato(ofertas, alvo):
+    """Localiza, na resposta ATUAL do ML, a promoção candidata recomendada (mesma lógica do aplicador)."""
+    tipo = (alvo.get("promocao_tipo") or "").upper()
+    pid = alvo.get("promocao_id")
+    nome = alvo.get("promocao_nome")
+    cands = [o for o in ofertas if isinstance(o, dict)
+             and (o.get("status") or "").lower() == "candidate"
+             and (o.get("type") or "").upper() == tipo]
+    for o in cands:
+        if pid and o.get("id") == pid:
+            return o
+    for o in cands:
+        if nome and (o.get("name") or "") == nome:
+            return o
+    return cands[0] if len(cands) == 1 else None
+def _com_datas(corpo, cand):
+    ini = cand.get("start_date")
+    fim = cand.get("finish_date") or cand.get("end_date")
+    if ini:
+        corpo["start_date"] = ini
+    if fim:
+        corpo["finish_date"] = fim
+    return corpo
+def corpo_post(tipo, cand, preco_alvo):
+    """Monta o corpo do POST conforme o tipo (idêntico ao aplicador)."""
+    tipo = (tipo or "").upper()
+    if tipo in ("SMART", "PRICE_MATCHING", "PRICE_MATCHING_MELI_ALL"):
+        oid = cand.get("ref_id") or cand.get("offer_id") or cand.get("candidate_id") or cand.get("id")
+        return _com_datas({"promotion_id": cand.get("id"), "promotion_type": tipo, "offer_id": oid}, cand)
+    if tipo == "LIGHTNING":
+        st = cand.get("stock") or {}
+        estoque = st.get("min") or st.get("remaining_stock") or 1
+        return {"deal_price": round(preco_alvo, 2), "stock": int(estoque), "promotion_type": "LIGHTNING"}
+    if tipo == "DEAL":
+        preco = round(preco_alvo, 2)
+        try:
+            mx = cand.get("max_discounted_price")
+            mn = cand.get("min_discounted_price")
+            if mx is not None:
+                preco = min(preco, float(mx))
+            if mn is not None:
+                preco = max(preco, float(mn))
+        except (TypeError, ValueError):
+            pass
+        return _com_datas({"promotion_id": cand.get("id"), "promotion_type": "DEAL", "deal_price": round(preco, 2)}, cand)
+    return None
 def sonda_campanha(pid, tipo, iid, access):
     """Procura o item na campanha por VÁRIAS vias. Retorna dict {via: (status, offer_id)}
     e, se as vias com item_id não acharem 'started', PAGINA a lista inteira procurando."""
@@ -44,7 +94,6 @@ def sonda_campanha(pid, tipo, iid, access):
         out[nome] = (it.get("status"), it.get("offer_id")) if it else (None, None)
     achou_started = any(v[0] == "started" for v in out.values())
     if not achou_started:
-        # PAGINAÇÃO: varre a lista TODA (sem item_id) procurando o item, até 15 páginas
         sa, npag, achado = None, 0, None
         for _ in range(15):
             npag += 1
@@ -72,6 +121,134 @@ def dump(label, obj, corte=6000):
         print(json.dumps(obj, ensure_ascii=False, indent=2)[:corte], flush=True)
     except Exception:
         print(str(obj)[:corte], flush=True)
+def _sugestao_fresca(item_id, sid):
+    """Lê a recomendação MAIS NOVA e VIVA do robô pra o item (status != 'aplicada')."""
+    try:
+        rows = (sb.table("repricer_sugestoes")
+                .select("acao,promocao_id,promocao_tipo,promocao_nome,promocao_ref_id,status,criado_em")
+                .eq("seller_id", str(sid)).eq("item_id", item_id)
+                .neq("status", "aplicada").order("criado_em", desc=True).limit(1).execute().data) or []
+        return rows[0] if rows else None
+    except Exception as e:
+        print(f"  (não consegui ler a sugestão: {e})", flush=True)
+        return None
+def simular_entrada(item_id, access, sid):
+    """SÓ-LEITURA: reproduz a decisão do aplicador pra ENTRAR na promoção recomendada e mostra o
+    POST exato que ele enviaria — sem tocar no ML nem gravar no banco. Diz GO/NO-GO e o motivo."""
+    print("\n===== 5) SIMULAÇÃO DE ENTRADA (só leitura — NÃO altera NADA) =====", flush=True)
+    sug = _sugestao_fresca(item_id, sid)
+    if not sug:
+        print("  (sem sugestão viva pra este item — nada a simular)", flush=True)
+        return
+    acao = (sug.get("acao") or "").lower()
+    tipo = (sug.get("promocao_tipo") or "").upper()
+    pid = sug.get("promocao_id")
+    nome = sug.get("promocao_nome")
+    print(f"  Recomendação atual do robô: {acao.upper()} -> {nome} [{tipo}/{pid}]", flush=True)
+    if acao == "manter":
+        print("  >>> NO-GO (nem precisa): a sugestão é MANTER — o item já está na melhor promoção.", flush=True)
+        return
+    if acao not in ("entrar", "trocar"):
+        print(f"  >>> ação '{acao}' não é entrada — nada a simular.", flush=True)
+        return
+    ofertas = rec.ofertas_do_item(item_id, access)
+    if not isinstance(ofertas, list):
+        ofertas = []
+    cand = achar_candidato(ofertas, {"promocao_tipo": tipo, "promocao_id": pid, "promocao_nome": nome})
+    if not cand:
+        ja = any((o.get("type") or "").upper() == tipo and rec.eh_ativa(o) for o in ofertas)
+        print("  >>> NO-GO: " + ("o item JÁ ESTÁ ATIVO nessa promoção — não precisa entrar ✓"
+                                 if ja else "o candidato não está mais disponível (rode a sugestão de novo)"), flush=True)
+        return
+    # (a) vigência da CAMPANHA
+    if not rec.cand_vigente(cand, access):
+        print("  >>> NO-GO: a CAMPANHA não está vigente (programada/futura/encerrada) — o aplicador NÃO entraria.", flush=True)
+        return
+    # (b) vigência do ITEM (mostra a data — é aqui que pega a janela futura, ex.: 22/jul)
+    try:
+        stx, dix = rec.get(f"/seller-promotions/promotions/{cand.get('id')}/items"
+                           f"?promotion_type={tipo}&item_id={item_id}&app_version=v2", access)
+        for it in ((dix.get("results") if isinstance(dix, dict) else None) or []):
+            if str(it.get("id")) == str(item_id):
+                ini = it.get("start_date")
+                print(f"  vigência do ITEM na promoção: start_date={ini} | end_date={it.get('end_date')}", flush=True)
+                if ini and not rec._vigente({"start_date": ini}):
+                    print(f"  >>> NO-GO: a vigência do ITEM é FUTURA (começa {str(ini)[:16]}) — "
+                          f"o aplicador BLOQUEIA (não entra em promoção que ainda não começou).", flush=True)
+                    return
+                break
+    except Exception as e:
+        print(f"  (não consegui checar a vigência do item: {e})", flush=True)
+    # (c) margem (re-checagem, igual ao aplicador)
+    st, it = rec.get(f"/items/{item_id}", access)
+    if not isinstance(it, dict):
+        print("  >>> NO-GO: não consegui ler o item pra recalcular a margem.", flush=True)
+        return
+    ltid = it.get("listing_type_id")
+    cat = it.get("category_id")
+    sku = it.get("seller_sku") or it.get("seller_custom_field")
+    custo = rec.custo_efetivo(item_id, sku)
+    if custo is None:
+        print("  >>> NO-GO: sem custo cadastrado — o aplicador não avalia margem sem custo.", flush=True)
+        return
+    frete, _ = rec.frete_de(sku, item_id, access)
+    piso, grupo = rec.margem_minima_do(sku)
+    # LIGHTNING: acha o maior desconto que mantém o piso (preço crível) — idêntico ao aplicador
+    if tipo == "LIGHTNING":
+        try:
+            mn = float(cand.get("min_discounted_price") or 0)
+            mx = float(cand.get("max_discounted_price") or cand.get("price") or 0)
+            base = dict(cand)
+            def _marg(pb):
+                base["price"] = round(pb, 2)
+                e = rec.avaliar(base, cat, ltid, access, frete, custo)
+                return (e["margem"] if e else -999)
+            if mx > 0 and _marg(mx) >= piso:
+                lo, hi = max(mn, 0.5), mx
+                for _ in range(26):
+                    mid = (lo + hi) / 2.0
+                    if _marg(mid) >= piso:
+                        hi = mid
+                    else:
+                        lo = mid
+                cand = dict(cand)
+                cand["price"] = round(hi, 2)
+        except (TypeError, ValueError):
+            pass
+    ev = rec.avaliar(cand, cat, ltid, access, frete, custo)
+    if not ev:
+        print("  >>> NO-GO: não deu pra avaliar a oferta agora.", flush=True)
+        return
+    print(f"  margem recalculada: {ev['margem']:.2f}%  (piso {piso:.0f}% · grupo {grupo})", flush=True)
+    if ev["margem"] < piso:
+        print(f"  >>> NO-GO: margem {ev['margem']:.2f}% ABAIXO do piso {piso:.0f}% — o aplicador NÃO entraria.", flush=True)
+        return
+    # (d) START_DATE: cofinanciadas exigem data no POST; pega do detalhe da promoção (formato local, não no passado)
+    if tipo in ("SMART", "PRICE_MATCHING", "PRICE_MATCHING_MELI_ALL", "DEAL") and not cand.get("start_date"):
+        pd = rec._promo_detalhe(cand.get("id"), tipo, access)
+        if isinstance(pd, dict):
+            hoje = (datetime.now(timezone.utc) - timedelta(hours=3)).strftime("%Y-%m-%d")
+            ini = str(pd.get("start_date") or "")[:10]
+            fim = str(pd.get("finish_date") or "")[:10]
+            if ini and ini < hoje:
+                ini = hoje
+            cand = dict(cand)
+            if ini:
+                cand["start_date"] = ini + "T00:00:00"
+            if fim:
+                cand["finish_date"] = fim + "T23:59:59"
+    corpo = corpo_post(tipo, cand, ev["pb"])
+    if not corpo:
+        print(f"  >>> NO-GO: não montei o corpo do POST pro tipo {tipo}.", flush=True)
+        return
+    print("  >>> GO ✓ — o aplicador ENVIARIA este POST (aqui NÃO enviei nada):", flush=True)
+    print(f"      POST /seller-promotions/items/{item_id}?app_version=v2", flush=True)
+    print("      BODY " + json.dumps(corpo, ensure_ascii=False), flush=True)
+    print(f"      (margem prevista {ev['margem']:.2f}% · preço comprador R${ev['pb']:.2f})", flush=True)
+    if acao == "trocar":
+        antigas = [o for o in ofertas if rec.eh_ativa(o) and o.get("id") != cand.get("id")]
+        nomes = ", ".join((o.get("name") or o.get("type") or "?") for o in antigas) or "nenhuma"
+        print(f"      + DEPOIS (só se o POST voltar 200) sairia das outras ativas: {nomes}", flush=True)
 def main():
     if not ITEM:
         print("!! defina ITEM_ID", flush=True)
@@ -113,25 +290,25 @@ def main():
             continue
         pid, tipo = p.get("id"), (p.get("type") or "")
         vias = sonda_campanha(pid, tipo, ITEM, access)
-        # só imprime se apareceu em ALGUMA via
         apareceu = any(v[0] for v in vias.values())
         if not apareceu:
             continue
         resumo = " | ".join(f"{k}={v[0]}" for k, v in vias.items())
         print(f"\n  >>> {(p.get('name') or '?')} [{tipo}/{pid}]", flush=True)
         print(f"      vias: {resumo}", flush=True)
-        # se alguma via disse 'started', é participação REAL -> mostra como sair
         started_via = next((v for v in vias.values() if v[0] == "started"), None)
         if started_via:
             oid = started_via[1]
             ativas_reais.append((p.get("name"), tipo, pid, oid))
             print(f"      >>> PARTICIPAÇÃO ATIVA (started). COMO SAIR: {como_sair(ITEM, tipo, pid, oid, 'started')}", flush=True)
-    print("\n===== RESUMO: participações ATIVAS (started) encontradas =====", flush=True)
+    print("\n----- RESUMO: participações ATIVAS (started) encontradas -----", flush=True)
     if ativas_reais:
         for nome, tipo, pid, oid in ativas_reais:
             print(f"  ✓ {nome} [{tipo}/{pid}] offer={oid}", flush=True)
     else:
         print("  (nenhuma via encontrou o item como 'started')", flush=True)
+    # 5) SIMULAÇÃO DE ENTRADA (só leitura) — reproduz o aplicador e mostra o POST exato
+    simular_entrada(ITEM, access, SID)
     print("\n################ FIM — nada foi alterado (só leitura) ################", flush=True)
 if __name__ == "__main__":
     main()
