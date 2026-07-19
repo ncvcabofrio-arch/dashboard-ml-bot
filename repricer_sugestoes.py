@@ -391,58 +391,6 @@ def cand_vigente(o, access):
     if status in ("pending", "programmed", "scheduled", "finished"):
         return False
     return _vigente(d)
-def _item_inicio_futuro(o, item_id, access):
-    """True se a participação DESTE anúncio na promoção começa no FUTURO — mesmo com a campanha
-    já 'started'. É a trava de vigência a NÍVEL DE ITEM (a campanha pode estar ativa mas o item
-    entrar só amanhã; foi o bug do 'Aumente suas vendas'). Se o candidato já traz start_date,
-    o _vigente/cand_vigente já cobriu — evita uma chamada extra."""
-    if o.get("start_date"):
-        return False
-    pid = o.get("id")
-    tipo = o.get("type")
-    if not pid or not tipo:
-        return False
-    st, d = get(f"/seller-promotions/promotions/{pid}/items"
-                f"?promotion_type={tipo}&item_id={item_id}&app_version=v2", access)
-    for it in ((d.get("results") if isinstance(d, dict) else None) or []):
-        if str(it.get("id")) == str(item_id):
-            ini = it.get("start_date")
-            if ini and not _vigente({"start_date": ini}):
-                return True
-            break
-    return False
-def preco_relampago_crivel(o, cat, ltid, access, frete, custo, piso):
-    """RELÂMPAGO: o ML recusa desconto pequeno por 'não crível'. Acha o MAIOR desconto (menor preço)
-    que ainda mantém a margem >= piso, dentro de [min_discounted_price, max_discounted_price] — a
-    MESMA lógica do aplicador, pra a margem da sugestão refletir o preço que o ML de fato aceita.
-    Retorna cópia do candidato com 'price' ajustado; devolve o próprio 'o' se não for LIGHTNING,
-    faltar faixa, ou nem no maior desconto der pra manter o piso (aí cai no filtro de piso normal)."""
-    if (o.get("type") or "").upper() != "LIGHTNING":
-        return o
-    try:
-        mn = float(o.get("min_discounted_price") or 0)
-        mx = float(o.get("max_discounted_price") or o.get("price") or 0)
-    except (TypeError, ValueError):
-        return o
-    if mx <= 0:
-        return o
-    base = dict(o)
-    def _marg(pb):
-        base["price"] = round(pb, 2)
-        e = avaliar(base, cat, ltid, access, frete, custo)
-        return e["margem"] if e else -999
-    if _marg(mx) < piso:
-        return o                          # nem no menor desconto mantém o piso
-    lo, hi = max(mn, 0.5), mx             # queremos o MENOR preço (maior desconto) com margem >= piso
-    for _ in range(20):
-        mid = (lo + hi) / 2.0
-        if _marg(mid) >= piso:
-            hi = mid
-        else:
-            lo = mid
-    out = dict(o)
-    out["price"] = round(hi, 2)
-    return out
 def _rotulo(a):
     o = a["o"]
     return f"{o.get('name') or o.get('type') or '?'} R${a['pb']:.2f}->{a['margem']:.1f}%"
@@ -487,18 +435,11 @@ def processar_item(item_id, access, sid, detalhes):
             if ev:
                 ativa = ev
                 break
-        # RELÂMPAGO: ajusta cada candidato pro maior desconto que mantém o piso (preço CRÍVEL) —
-        # igual ao aplicador, pra a margem exibida bater com o que o ML aceita (o preço sugerido cru
-        # da relâmpago costuma ser recusado por credibilidade).
-        cand_raw = [preco_relampago_crivel(o, cat, ltid, access, frete, custo, piso) for o in cand_raw]
         cand = [avaliar(o, cat, ltid, access, frete, custo) for o in cand_raw]
         cand = [c for c in cand if c]
-        # NÃO recomenda promoção não vigente, em DOIS níveis:
-        #  (1) campanha programada/futura/encerrada -> cand_vigente (consulta o detalhe da promoção);
-        #  (2) participação DESTE item começando no futuro, mesmo com a campanha já ativa -> item-level.
-        cand = [c for c in cand
-                if cand_vigente(c["o"], access)
-                and not _item_inicio_futuro(c["o"], item_id, access)]
+        # NÃO recomenda promoção que ainda não está vigente (programada/futura) nem já encerrada.
+        # cand_vigente consulta o detalhe da promoção quando a data não vem no candidato.
+        cand = [c for c in cand if cand_vigente(c["o"], access)]
         seguras = [c for c in cand if c["margem"] >= piso]
         # ---- decide a ação (sua regra) ----
         # NUNCA sai de uma promoção que já está — mesmo abaixo do piso. Só TROCA se houver
@@ -592,24 +533,22 @@ def gravar_em_lote(sugs, tam=200):
             sb.table("repricer_sugestoes").insert(sugs[i:i + tam]).execute()
         except Exception as e:
             print(f"  erro ao gravar lote {i}: {e}", flush=True)
-def grava_status(estado, resumo=None):
-    """Grava o status do robô de SUGESTÕES no Supabase pro painel ler (rodando/concluido).
-    Sem isso o painel não sabe quando a sugestão termina e não recarrega sozinho."""
+def _grava_status_sug(estado, resumo=None):
+    """Marca no repricer_status que as SUGESTÕES estão rodando/concluídas. Serve pro
+    aplicador NÃO reprocessar a fila de retry em cima de sugestão meio-escrita."""
     try:
         agora = datetime.now(timezone.utc).isoformat()
         row = {"workflow": "sugestoes", "seller_id": SELLER_ID_FILTRO or "todas", "estado": estado}
         if estado == "rodando":
-            row["inicio"] = agora
-            row["fim"] = None
-            row["resumo"] = None
+            row["inicio"], row["fim"], row["resumo"] = agora, None, None
         else:
-            row["fim"] = agora
-            row["resumo"] = resumo
+            row["fim"], row["resumo"] = agora, resumo
         sb.table("repricer_status").upsert(row, on_conflict="workflow").execute()
     except Exception as e:
-        print("aviso: não gravei status:", e, flush=True)
+        print("Aviso: não gravei status de sugestões:", e, flush=True)
+
 def main():
-    grava_status("rodando")
+    _grava_status_sug("rodando")
     preload()
     total_sug = 0
     contadores = {"entrar": 0, "trocar": 0, "sair": 0, "manter": 0}
@@ -658,6 +597,10 @@ def main():
             print("Aviso: não consegui gravar sem_custo:", e, flush=True)
     resumo = ", ".join(f"{k}: {v}" for k, v in contadores.items())
     print(f"\n=== {total_sug} registros gravados ({resumo}) | {len(SEM_CUSTO)} sem custo — nada foi aplicado no ML ===", flush=True)
-    grava_status("concluido", f"{total_sug} sugestões ({resumo}) · {len(SEM_CUSTO)} sem custo")
+    _grava_status_sug("concluido", f"{total_sug} sugestões ({resumo})")
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        _grava_status_sug("concluido", "erro na execução")
+        raise
