@@ -26,7 +26,9 @@ ITEM_FILTRO = (os.environ.get("ITEM_ID") or "").strip()        # 1 anúncio só
 ITENS_FILTRO = [x.strip() for x in (os.environ.get("ITEM_IDS") or "").split(",") if x.strip()]  # lista (o painel manda os selecionados)
 MAX_APLICAR = int(os.environ.get("MAX_APLICAR", "0"))          # 0 = sem limite
 MARGEM_MIN = (os.environ.get("MARGEM_MIN") or "").strip()      # piso dos itens "Padrão" (mesmo da simulação)
-TIPOS_OK = {"SMART", "PRICE_MATCHING", "PRICE_MATCHING_MELI_ALL", "LIGHTNING", "DEAL"}
+TIPOS_OK = {"SMART", "PRICE_MATCHING", "PRICE_MATCHING_MELI_ALL", "LIGHTNING", "DEAL",
+            "DOD", "MARKETPLACE_CAMPAIGN", "VOLUME", "SELLER_CAMPAIGN",
+            "PRE_NEGOTIATED", "UNHEALTHY_STOCK", "BANK", "PRICE_DISCOUNT"}
 def post(path, access, body, tent=3):
     r = None
     for i in range(tent):
@@ -68,31 +70,54 @@ def _com_datas(corpo, cand):
     if fim:
         corpo["finish_date"] = fim
     return corpo
+def _clamp_preco(preco, cand):
+    """Mantém o deal_price dentro da faixa crível [min,max] do candidato (evita 400 CREDIBILITY)."""
+    preco = round(float(preco or 0), 2)
+    try:
+        mx = cand.get("max_discounted_price")
+        mn = cand.get("min_discounted_price")
+        if mx is not None:
+            preco = min(preco, float(mx))
+        if mn is not None:
+            preco = max(preco, float(mn))
+    except (TypeError, ValueError):
+        pass
+    return round(preco, 2)
 def corpo_post(tipo, cand, preco_alvo):
-    """Monta o corpo do POST conforme o tipo (docs seller-promotions v2)."""
+    """Monta o corpo do POST de ENTRADA conforme o tipo (docs seller-promotions v2 — auditado
+    contra TODAS as páginas). Cada família tem um formato próprio."""
     tipo = (tipo or "").upper()
+    oid = cand.get("ref_id") or cand.get("offer_id") or cand.get("candidate_id") or cand.get("id")
+    # (1) cofinanciadas automatizadas / preços competitivos: id+type+offer_id
+    #     (mantém as datas p/ SMART/PM como já vinha funcionando)
     if tipo in ("SMART", "PRICE_MATCHING", "PRICE_MATCHING_MELI_ALL"):
-        # cofinanciada automatizada / preços competitivos: precisa do offer_id do candidato
-        oid = cand.get("ref_id") or cand.get("offer_id") or cand.get("candidate_id") or cand.get("id")
         return _com_datas({"promotion_id": cand.get("id"), "promotion_type": tipo, "offer_id": oid}, cand)
+    # (2) Pix (BANK) e pré-acordadas: id+type+offer_id — SEM datas (doc)
+    if tipo in ("BANK", "PRE_NEGOTIATED", "UNHEALTHY_STOCK"):
+        return {"promotion_id": cand.get("id"), "promotion_type": tipo, "offer_id": oid}
+    # (3) cofinanciada tradicional / desconto por quantidade: SÓ id+type
+    #     (o ML define o preço; sem offer_id, sem deal_price)
+    if tipo in ("MARKETPLACE_CAMPAIGN", "VOLUME"):
+        return {"promotion_id": cand.get("id"), "promotion_type": tipo}
+    # (4) relâmpago: deal_price + stock
     if tipo == "LIGHTNING":
         st = cand.get("stock") or {}
         estoque = st.get("min") or st.get("remaining_stock") or 1
-        return {"deal_price": round(preco_alvo, 2), "stock": int(estoque), "promotion_type": "LIGHTNING"}
-    if tipo == "DEAL":
-        # PROVA DE ERRO (credibilidade): o deal_price TEM que ficar dentro da faixa crível
-        # [min_discounted_price, max_discounted_price], senão o ML devolve 400 CREDIBILITY.
-        preco = round(preco_alvo, 2)
-        try:
-            mx = cand.get("max_discounted_price")
-            mn = cand.get("min_discounted_price")
-            if mx is not None:
-                preco = min(preco, float(mx))     # não pode ter desconto MENOR que o mínimo exigido
-            if mn is not None:
-                preco = max(preco, float(mn))     # nem desconto MAIOR que o permitido
-        except (TypeError, ValueError):
-            pass
-        return _com_datas({"promotion_id": cand.get("id"), "promotion_type": "DEAL", "deal_price": round(preco, 2)}, cand)
+        return {"deal_price": _clamp_preco(preco_alvo, cand), "stock": int(estoque), "promotion_type": "LIGHTNING"}
+    # (5) oferta do dia: deal_price (SEM stock, diferente da relâmpago)
+    if tipo == "DOD":
+        return {"deal_price": _clamp_preco(preco_alvo, cand), "promotion_type": "DOD"}
+    # (6) tradicional e do vendedor: deal_price + id (vendedor define o preço, dentro da faixa crível)
+    if tipo in ("DEAL", "SELLER_CAMPAIGN"):
+        return _com_datas({"promotion_id": cand.get("id"), "promotion_type": tipo,
+                           "deal_price": _clamp_preco(preco_alvo, cand)}, cand)
+    # (7) desconto individual do vendedor: deal_price + datas próprias (formato local, máx 14 dias)
+    if tipo == "PRICE_DISCOUNT":
+        agora = datetime.now(timezone.utc) - timedelta(hours=3)   # BRT
+        ini = agora.strftime("%Y-%m-%d")
+        fim = (agora + timedelta(days=14)).strftime("%Y-%m-%d")
+        return {"deal_price": _clamp_preco(preco_alvo, cand), "promotion_type": "PRICE_DISCOUNT",
+                "start_date": ini + "T00:00:00", "finish_date": fim + "T23:59:59"}
     return None
 def confirmar_entrada(iid, pid, tipo, access):
     """PROVA DE ERRO do entrar: confere DIRETO na promoção alvo se o anúncio ficou ATIVO
@@ -152,7 +177,7 @@ def req_delete(path, access, tent=3):
 #  (C) promotion_type + promotion_id (SEM offer_id): DEAL, SELLER_CAMPAIGN, SELLER_COUPON_CAMPAIGN.
 TIPOS_SO_TIPO = {"PRICE_DISCOUNT", "LIGHTNING", "DOD"}
 TIPOS_COM_OFFER = {"SMART", "PRICE_MATCHING", "PRICE_MATCHING_MELI_ALL", "MARKETPLACE_CAMPAIGN",
-                   "PRE_NEGOTIATED", "UNHEALTHY_STOCK", "VOLUME"}
+                   "PRE_NEGOTIATED", "UNHEALTHY_STOCK", "VOLUME", "BANK"}
 # Relâmpago e Oferta do dia, uma vez ATIVAS (started), a doc oficial diz que NÃO saem por API
 # ("Uma vez ativadas, as ofertas não podem ser removidas... pode pausar o item"). Estado terminal:
 # só pausando o anúncio ou esperando acabar estoque/horário. Não adianta reconferir/re-tentar.
