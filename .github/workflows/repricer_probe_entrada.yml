@@ -1,0 +1,59 @@
+name: Repricer - PROBE de entrada (tenta entrar de verdade)
+
+# Tenta ENTRAR numa cofinanciada (SMART/PRICE_MATCHING) testando varios formatos de POST,
+# do documentado (sem datas) pro com datas, parando no 1o que o ML aceitar.
+# ATENCAO: MEXE NO ANUNCIO (entra de verdade). SMART/PM e reversivel (da pra sair).
+on:
+  workflow_dispatch:
+    inputs:
+      item_id:
+        description: "Anuncio (MLB...)"
+        type: string
+        required: true
+      promo_id:
+        description: "ID da promocao (P-MLB...)"
+        type: string
+        required: true
+      promo_tipo:
+        description: "Tipo (SMART, PRICE_MATCHING)"
+        type: string
+        required: false
+        default: "SMART"
+      seller_id:
+        description: "Conta: 177795203=CF, 471489691=Cabo Frio, 3244206480=MG"
+        type: string
+        required: false
+        default: "177795203"
+      sair_depois:
+        description: "1 = desfaz na hora (teste puro) | 0 = fica na promocao"
+        type: string
+        required: false
+        default: "0"
+
+concurrency:
+  group: ml-probe
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Instalar dependencias
+        run: pip install requests supabase
+      - name: Probe de entrada
+        env:
+          ML_CLIENT_ID:     ${{ secrets.ML_CLIENT_ID }}
+          ML_CLIENT_SECRET: ${{ secrets.ML_CLIENT_SECRET }}
+          ML_REFRESH_TOKEN: ${{ secrets.ML_REFRESH_TOKEN }}
+          SUPABASE_URL:     ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY:     ${{ secrets.SUPABASE_KEY }}
+          SELLER_ID:        ${{ github.event.inputs.seller_id }}
+          ITEM_ID:          ${{ github.event.inputs.item_id }}
+          PROMO_ID:         ${{ github.event.inputs.promo_id }}
+          PROMO_TIPO:       ${{ github.event.inputs.promo_tipo }}
+          SAIR_DEPOIS:      ${{ github.event.inputs.sair_depois }}
+        run: python repricer_probe_entrada.py
