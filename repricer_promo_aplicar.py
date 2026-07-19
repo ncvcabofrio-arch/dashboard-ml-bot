@@ -27,10 +27,11 @@ ITENS_FILTRO = [x.strip() for x in (os.environ.get("ITEM_IDS") or "").split(",")
 MAX_APLICAR = int(os.environ.get("MAX_APLICAR", "0"))          # 0 = sem limite
 MARGEM_MIN = (os.environ.get("MARGEM_MIN") or "").strip()      # piso dos itens "Padrão" (mesmo da simulação)
 RETRY_ONLY = (os.environ.get("RETRY_ONLY", "0").strip() == "1")  # 1 = SÓ reprocessa a fila de retry (cron horário)
+WORKERS = int(os.environ.get("WORKERS", "1"))                  # >1 = processa itens em paralelo (pool controlado)
+PROPAG_SLEEP = float(os.environ.get("PROPAG_SLEEP", "4"))      # respiro entre 1ª e 2ª passada (era 8s fixo)
 TIPOS_OK = {"SMART", "PRICE_MATCHING", "PRICE_MATCHING_MELI_ALL", "LIGHTNING", "DEAL",
             "DOD", "MARKETPLACE_CAMPAIGN", "VOLUME", "SELLER_CAMPAIGN",
             "PRE_NEGOTIATED", "UNHEALTHY_STOCK", "BANK", "PRICE_DISCOUNT"}
-
 # ===================== FILA DE REPROCESSAMENTO (tabela separada) =====================
 # Só entram aqui itens que ERRARAM ou DIVERGIRAM na entrada. Fica numa tabela PRÓPRIA
 # (repricer_promo_retry), separada da fila de aprovação, pra o painel mostrar num bloco
@@ -69,10 +70,8 @@ CODIGO_CATEGORIA = {
     "divergencia": "divergencia",
 }
 RETRY_TAB = "repricer_promo_retry"
-
 def _agora():
     return datetime.now(timezone.utc)
-
 def _retry_atual(seller_id, item_id):
     """Lê a linha da fila de retry deste item (ou None)."""
     try:
@@ -83,7 +82,6 @@ def _retry_atual(seller_id, item_id):
     except Exception as e:
         print(f"  aviso: não li retry de {item_id}: {e}", flush=True)
         return None
-
 def registrar_retry(fila, codigo, resultado_txt=None):
     """Depois de processar um item, atualiza a tabela de retry conforme o desfecho.
     NÃO roda em simulação (DRY). Mantém 1 linha por (seller_id,item_id)."""
@@ -128,7 +126,6 @@ def registrar_retry(fila, codigo, resultado_txt=None):
                  "tentativas": int((prev.get("tentativas") if prev else 0) or 0),
                  "max_tentativas": (prev.get("max_tentativas") if prev else None)})
     _upsert_retry(base)
-
 def _upsert_retry(row):
     try:
         if "criado_em" not in row:
@@ -136,7 +133,6 @@ def _upsert_retry(row):
         sb.table(RETRY_TAB).upsert(row, on_conflict="seller_id,item_id").execute()
     except Exception as e:
         print(f"  aviso: não gravei retry de {row.get('item_id')}: {e}", flush=True)
-
 def _sugestoes_rodando():
     """True se o robô de SUGESTÕES está rodando agora (pra não reprocessar em cima de
     sugestão meio-escrita). Best-effort: se não houver o registro, assume que não."""
@@ -146,7 +142,6 @@ def _sugestoes_rodando():
         return bool(r) and (r[0].get("estado") == "rodando")
     except Exception:
         return False
-
 def carregar_retry_devidos():
     """Lê os itens da fila de retry que já estão na hora (proxima_tentativa <= agora),
     ainda ativos e abaixo do teto. Devolve dicts no MESMO formato da fila de aprovação."""
@@ -265,6 +260,21 @@ def corpo_post(tipo, cand, preco_alvo):
         return {"deal_price": _clamp_preco(preco_alvo, cand), "promotion_type": "PRICE_DISCOUNT",
                 "start_date": ini + "T00:00:00", "finish_date": fim + "T23:59:59"}
     return None
+# ===================== PROVA REAL POR PREÇO (sale_price) =====================
+# A promoção NÃO altera item.price; o que revela o que o cliente PAGA de fato é o
+# /items/{id}/sale_price. Por isso ele é a prova de que a promoção está no ar — e o
+# critério que decide se o item SAI da fila (confirmado) ou VOLTA pra tentar (retry).
+def preco_venda_real(iid, access):
+    """(amount, promotion_type) que o cliente paga AGORA, direto do ML. (None,None) se indisponível."""
+    try:
+        st, d = rec.get(f"/items/{iid}/sale_price?context=channel_marketplace", access)
+        if not isinstance(d, dict):
+            return None, None
+        amt = d.get("amount")
+        ptipo = (d.get("metadata") or {}).get("promotion_type")
+        return (float(amt) if amt is not None else None), ptipo
+    except Exception:
+        return None, None
 def confirmar_entrada(iid, pid, tipo, access):
     """PROVA DE ERRO do entrar: confere DIRETO na promoção alvo se o anúncio ficou ATIVO
     (status started). Retorna True (confirmado), False (não confirmou) ou None (sem como
@@ -449,22 +459,40 @@ def revarrer_sair(fila, access):
     print(f"  [{ret}] sair {iid} (2ª passada) | sobrou: {sobrou}", flush=True)
     return ret
 def confirmar_pos_entrada(fila, access):
-    """ENTRAR/TROCAR — 2ª PASSADA (no fim do main, com tempo de propagação):
-      - CONFIRMA que o anúncio ficou ATIVO (started) na promoção alvo (confirmar_entrada);
-      - no TROCAR, re-varre e sai de qualquer OUTRA que ainda esteja ativa.
+    """ENTRAR/TROCAR — 2ª PASSADA (no fim do main, com tempo de propagação).
+    PROVA REAL = sale_price: se o cliente JÁ paga o preço com desconto (ou a promoção ativa no
+    sale_price é a do tipo que entramos), está CONFIRMADO e o item SAI da fila. Se o preço ainda
+    está cheio / sem promoção, NÃO confirmou -> volta pra fila (aguardando_ml) e reconfere de hora
+    em hora. Fallback: o status 'started' na promoção alvo. No TROCAR, ainda sai das outras.
     Só mexe se a 1ª passada marcou 'aplicada' (se o POST falhou, mantém o erro)."""
     iid = fila["item_id"]
     seller_id = str(fila.get("seller_id") or "")
     pid = fila.get("promocao_id")
     tipo = (fila.get("promocao_tipo") or "").upper()
+    alvo = fila.get("preco_alvo")
     base = (fila.get("resultado") or "").split(" || 2ª passada")[0]
-    conf = confirmar_entrada(iid, pid, tipo, access)
-    # APRENDIZADO DA DOC: ativação é ASSÍNCRONA. O POST já foi ACEITO na 1ª passada (senão nem
-    # chegava aqui). Se ainda não virou 'started', é propagação (candidate/sync_requested) — NÃO
-    # é falha. Por isso NÃO rebaixamos pra 'erro' vermelho; mantemos 'aplicada' com aviso ⏳.
-    nota = ("entrada CONFIRMADA ✓" if conf is True
-            else "⏳ aceita pelo ML, ainda ATIVANDO (assíncrono) — não confirmou 'started' ainda; costuma levar um tempo" if conf is False
-            else "entrada não conferível por API (relâmpago)")
+    # 1) PROVA POR PREÇO: o que o cliente paga agora
+    pv, ptipo = preco_venda_real(iid, access)
+    preco_confirma = (pv is not None and alvo not in (None, "") and float(pv) <= float(alvo) * 1.03)
+    tipo_confirma = (ptipo is not None and ptipo == tipo)
+    # 2) FALLBACK: status 'started' na promoção alvo
+    conf_started = confirmar_entrada(iid, pid, tipo, access)
+    if preco_confirma or tipo_confirma or conf_started is True:
+        confirmado, ret = True, "confirmado"
+        prova = (f"cliente paga R${pv:.2f} agora" + (f" via {ptipo}" if ptipo else "")
+                 + (f" (alvo R${float(alvo):.2f})" if alvo not in (None, "") else "")) if (preco_confirma or tipo_confirma) \
+                else "promoção ATIVA (started) ✓"
+        nota = f"✓ CONFIRMADO — {prova}"
+    elif (pv is not None) or (conf_started is False):
+        # sinal NEGATIVO real: preço ainda cheio / promo não 'started' -> volta pra fila
+        confirmado, ret = False, "ativando"
+        cliente = (f"cliente ainda paga R${pv:.2f}" + (f" ({ptipo})" if ptipo else " sem desconto")) if pv is not None \
+                  else "ainda não 'started'"
+        nota = (f"⏳ ainda NÃO confirmou pelo preço ({cliente}) — volta pra fila e reconfiro de hora em hora")
+    else:
+        # não dá pra conferir (ex.: relâmpago sem sale_price e sem 'started'): não fica em loop
+        confirmado, ret = True, "confirmado"
+        nota = "entrada não conferível por API (relâmpago) — considero aplicada"
     extra = ""
     if (fila.get("acao") or "") == "trocar":
         rest = [p for p in rec.participacoes_ativas(iid, seller_id, access) if p.get("promotion_id") != pid]
@@ -475,8 +503,8 @@ def confirmar_pos_entrada(fila, access):
                          else "⚠️ ainda ativas: " + ", ".join((p.get('name') or p.get('type')) for p in rest2))
     gravar(fila["id"], {"status": "aplicada",
                         "resultado": f"{base} || 2ª passada — {nota}{extra}"})
-    print(f"  [OK] {fila.get('acao')} {iid} (2ª passada) | {nota}", flush=True)
-    return "confirmado" if conf is True else ("ativando" if conf is False else "confirmado")
+    print(f"  [{ret}] {fila.get('acao')} {iid} (2ª passada) | {nota}", flush=True)
+    return ret
 def _sugestao_atual(iid, seller_id):
     """Lê a sugestão MAIS NOVA e VIVA do robô pra este item (status != 'aplicada', que é leftover
     congelado). Serve pra o aplicador agir na recomendação ATUAL, não numa ordem antiga da fila.
@@ -491,6 +519,26 @@ def _sugestao_atual(iid, seller_id):
     except Exception as e:
         print(f"  aviso: não li a sugestão atual de {iid}: {e}", flush=True)
         return None
+# ===================== CACHE POR RODADA (evita repetir a MESMA pergunta ao ML) =====================
+# Quando muitos itens são da MESMA campanha, o detalhe/vigência da promoção é IDÊNTICO pra todos.
+# Guardar a 1ª resposta e reusar corta dezenas de chamadas iguais, sem mudar nenhuma decisão.
+_VIG_CACHE = {}     # promotion_id -> bool (vigente?)
+_DET_CACHE = {}     # (promotion_id, tipo) -> dict detalhe
+def _cand_vigente_cached(cand, access):
+    k = cand.get("id")
+    if k in _VIG_CACHE:
+        return _VIG_CACHE[k]
+    v = rec.cand_vigente(cand, access)
+    if k:
+        _VIG_CACHE[k] = v
+    return v
+def _promo_detalhe_cached(pid, tipo, access):
+    k = (pid, tipo)
+    if k in _DET_CACHE:
+        return _DET_CACHE[k]
+    d = rec._promo_detalhe(pid, tipo, access)
+    _DET_CACHE[k] = d
+    return d
 def processar(fila, access):
     iid = fila["item_id"]
     tipo = (fila.get("promocao_tipo") or "").upper()
@@ -558,7 +606,7 @@ def processar(fila, access):
         return "sem_candidato"
     # trava de vigência (consulta o detalhe da promoção): nunca entrar em promo programada/futura.
     # Fica ANTES da remoção das outras, pra nunca deixar o item sem promoção por causa disso.
-    if not rec.cand_vigente(cand, access):
+    if not _cand_vigente_cached(cand, access):
         gravar(fila["id"], {"status": "erro",
                             "resultado": "promoção ainda não está vigente (programada) — não apliquei (item mantido como estava)"})
         return "programada"
@@ -643,7 +691,7 @@ def processar(fila, access):
     # o candidato não traz as datas; pega do DETALHE da promoção. As datas têm que ir em formato
     # LOCAL (sem 'Z') e o start NÃO pode ser no passado (regras da doc).
     if tipo in ("SMART", "PRICE_MATCHING", "PRICE_MATCHING_MELI_ALL", "DEAL") and not cand.get("start_date"):
-        pd = rec._promo_detalhe(cand.get("id"), tipo, access)
+        pd = _promo_detalhe_cached(cand.get("id"), tipo, access)
         if isinstance(pd, dict):
             hoje = (datetime.now(timezone.utc) - timedelta(hours=3)).strftime("%Y-%m-%d")   # hoje em BRT
             ini = str(pd.get("start_date") or "")[:10]
@@ -720,6 +768,14 @@ def grava_status(estado, resumo=None):
         sb.table("repricer_status").upsert(row, on_conflict="workflow").execute()
     except Exception as e:
         print("aviso: não gravei status:", e, flush=True)
+def _mapa(func, itens):
+    """Roda func em cada item — em paralelo se WORKERS>1 (pool controlado, mesma mecânica do
+    piloto/sugestões), senão sequencial (comportamento idêntico ao de antes). Preserva a ORDEM."""
+    if WORKERS > 1 and len(itens) > 1:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=WORKERS) as ex:
+            return list(ex.map(func, itens))
+    return [func(x) for x in itens]
 def main():
     grava_status("rodando")
     rec.preload()
@@ -766,7 +822,8 @@ def main():
     escopo = (f" | itens {len(ITENS_FILTRO)} selecionados" if ITENS_FILTRO
               else (f" | item {ITEM_FILTRO}" if ITEM_FILTRO else " | FILA INTEIRA da conta"))
     print(f"{'SIMULAÇÃO (DRY_RUN)' if DRY else 'APLICAÇÃO REAL'} — {len(fila)} item(ns)"
-          + (f" | conta {SELLER_FILTRO}" if SELLER_FILTRO else "") + escopo, flush=True)
+          + (f" | conta {SELLER_FILTRO}" if SELLER_FILTRO else "") + escopo
+          + (f" | {WORKERS} em paralelo" if WORKERS > 1 else ""), flush=True)
     if not fila:
         grava_status("concluido", "{}")
         return
@@ -781,48 +838,52 @@ def main():
             print(f"  !! não consegui token de {seller_id}: {e}", flush=True)
     resumo = {}
     codigo_final = {}   # id -> código do desfecho final (1ª ou 2ª passada), pra alimentar a fila de retry
-    for f in fila:
+    res1_mem = {}       # id -> (status, resultado) da 1ª passada (evita reler o banco na 2ª passada)
+    # ---- 1ª PASSADA (por item; em paralelo se WORKERS>1) ----
+    def _passo1(f):
         sid = str(f["seller_id"])
         access = acessos.get(sid)
         if not access:
             gravar(f["id"], {"status": "erro", "resultado": f"sem acesso à conta {sid} (token não resolveu)"})
-            codigo_final[f["id"]] = "erro_post"
-            resumo["sem_token"] = resumo.get("sem_token", 0) + 1
-            continue
+            return (f["id"], "erro_post", ("erro", "sem acesso à conta"))
         r = processar(f, access)
-        codigo_final[f["id"]] = r
+        print(f"  = {f['item_id']} [{f.get('acao', '?')}] -> {r}", flush=True)
+        # captura o que ficou gravado (banco pra fila normal; patch em memória pra retry)
+        if isinstance(f.get("id"), str) and str(f["id"]).startswith("retry:"):
+            p = _RETRY_PATCH.get(f["id"], {})
+            st1, rs1 = (p.get("status") or ""), (p.get("resultado") or "")
+        else:
+            st1, rs1 = "", ""
+            try:
+                atual = sb.table("repricer_promo_fila").select("status,resultado").eq("id", f["id"]).execute().data
+                if atual:
+                    st1, rs1 = (atual[0].get("status") or ""), (atual[0].get("resultado") or "")
+            except Exception:
+                pass
+        return (f["id"], r, (st1, rs1))
+    for fid, r, st in _mapa(_passo1, fila):
+        codigo_final[fid] = r
+        res1_mem[fid] = st
         resumo[r] = resumo.get(r, 0) + 1
-        print(f"  = {f['item_id']} [{f.get('acao', '?')}] -> {r}", flush=True)  # 1 linha por item (todos aparecem)
     # ---- 2ª PASSADA (depois de mexer em TODOS os itens -> deu tempo do ML propagar) ----
-    # sair: varre de novo e confere; entrar/trocar: confirma a entrada (e o trocar sai das outras).
+    # sair: varre de novo e confere; entrar/trocar: confirma pelo PREÇO REAL (sale_price).
     alvos = [f for f in fila if f.get("acao") in ("sair", "entrar", "trocar") and acessos.get(str(f["seller_id"]))]
     if alvos:
-        time.sleep(8)   # respiro extra de propagação
-        for f in alvos:
+        time.sleep(PROPAG_SLEEP)   # respiro de propagação (o resto vira retry, não bloqueia)
+        def _passo2(f):
             access = acessos.get(str(f["seller_id"]))
-            eh_retry = isinstance(f.get("id"), str) and str(f["id"]).startswith("retry:")
-            # relê status/resultado da 1ª passada (fila de aprovação = banco; retry = patch em memória)
-            st1, res1 = "", ""
-            if eh_retry:
-                p = _RETRY_PATCH.get(f["id"], {})
-                st1, res1 = (p.get("status") or ""), (p.get("resultado") or "")
-            else:
-                try:
-                    atual = sb.table("repricer_promo_fila").select("status,resultado").eq("id", f["id"]).execute().data
-                    if atual:
-                        st1 = (atual[0].get("status") or "")
-                        res1 = (atual[0].get("resultado") or "")
-                except Exception:
-                    pass
+            st1, res1 = res1_mem.get(f["id"], ("", ""))   # da 1ª passada, sem reler o banco
             f["resultado"] = res1
             if st1 != "aplicada":
-                continue   # 1ª passada falhou (ex.: margem/credibilidade) — não sobrescreve o erro
-            # 'já ativa' (não precisou entrar) não tem 2ª passada de confirmação
+                return (f["id"], None)                     # 1ª passada falhou — não sobrescreve o erro
             if "já estava ATIVA" in res1:
-                continue
+                return (f["id"], None)                     # já-ativa não tem 2ª passada
             rr = revarrer_sair(f, access) if f.get("acao") == "sair" else confirmar_pos_entrada(f, access)
-            codigo_final[f["id"]] = rr
-            resumo["2p_" + rr] = resumo.get("2p_" + rr, 0) + 1
+            return (f["id"], rr)
+        for fid, rr in _mapa(_passo2, alvos):
+            if rr:
+                codigo_final[fid] = rr
+                resumo["2p_" + rr] = resumo.get("2p_" + rr, 0) + 1
     # ---- BOOKKEEPING DA FILA DE RETRY: cada item entra/atualiza/sai conforme o desfecho ----
     if not DRY:
         for f in fila:
@@ -833,7 +894,7 @@ def main():
             if isinstance(f.get("id"), str) and str(f["id"]).startswith("retry:"):
                 txt = (_RETRY_PATCH.get(f["id"], {}) or {}).get("resultado") or f.get("resultado")
             else:
-                txt = f.get("resultado")
+                txt = (res1_mem.get(f["id"], ("", ""))[1]) or f.get("resultado")
             registrar_retry(f, code, txt)
     print("resumo:", json.dumps(resumo, ensure_ascii=False), flush=True)
     grava_status("concluido", json.dumps(resumo, ensure_ascii=False))
