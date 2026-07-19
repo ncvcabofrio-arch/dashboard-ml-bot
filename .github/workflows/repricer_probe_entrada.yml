@@ -1,8 +1,9 @@
-name: Repricer - PROBE de entrada (tenta entrar de verdade)
+name: Repricer - PROBE de entrada (caca start_date + tenta entrar)
 
-# Tenta ENTRAR numa cofinanciada (SMART/PRICE_MATCHING) testando varios formatos de POST,
-# do documentado (sem datas) pro com datas, parando no 1o que o ML aceitar.
-# ATENCAO: MEXE NO ANUNCIO (entra de verdade). SMART/PM e reversivel (da pra sair).
+# 1) CACA a start_date do item em ~10 consultas diferentes (mostra em qual aparece).
+# 2) Tenta ENTRAR usando a data achada, testando varios formatos, parando no 1o OK.
+# ATENCAO: se so_cacar=0, MEXE NO ANUNCIO (entra de verdade). SMART e reversivel.
+# Dica: rode 1o com so_cacar=1 (so consulta, nao entra). Depois sair_depois=1 (entra e desfaz).
 on:
   workflow_dispatch:
     inputs:
@@ -15,7 +16,7 @@ on:
         type: string
         required: true
       promo_tipo:
-        description: "Tipo (SMART, PRICE_MATCHING)"
+        description: "Tipo (SMART, PRICE_MATCHING, BANK...)"
         type: string
         required: false
         default: "SMART"
@@ -24,11 +25,26 @@ on:
         type: string
         required: false
         default: "177795203"
-      sair_depois:
-        description: "1 = desfaz na hora (teste puro) | 0 = fica na promocao"
+      so_cacar:
+        description: "1 = SO caca a start_date (NAO entra) | 0 = tambem tenta entrar"
         type: string
         required: false
-        default: "0"
+        default: "1"
+      sair_depois:
+        description: "1 = entra e desfaz na hora (teste) | 0 = fica na promocao"
+        type: string
+        required: false
+        default: "1"
+      win_start:
+        description: "(opcional) forcar start_date, ex.: 2026-07-22T12:00:00"
+        type: string
+        required: false
+        default: ""
+      win_finish:
+        description: "(opcional) forcar finish_date"
+        type: string
+        required: false
+        default: ""
 
 concurrency:
   group: ml-probe
@@ -55,5 +71,8 @@ jobs:
           ITEM_ID:          ${{ github.event.inputs.item_id }}
           PROMO_ID:         ${{ github.event.inputs.promo_id }}
           PROMO_TIPO:       ${{ github.event.inputs.promo_tipo }}
+          SO_CACAR:         ${{ github.event.inputs.so_cacar }}
           SAIR_DEPOIS:      ${{ github.event.inputs.sair_depois }}
+          WIN_START:        ${{ github.event.inputs.win_start }}
+          WIN_FINISH:       ${{ github.event.inputs.win_finish }}
         run: python repricer_probe_entrada.py
