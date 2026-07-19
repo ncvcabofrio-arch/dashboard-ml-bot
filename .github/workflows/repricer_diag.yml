@@ -1,7 +1,8 @@
 name: Repricer - Diagnostico de promocoes (so leitura)
 
-# Despeja no LOG tudo que a API de promocoes sabe de UM anuncio (todos os GETs).
-# NAO altera nada. Use pra investigar um item especifico.
+# Despeja no LOG tudo que a API de promocoes sabe de UM anuncio (todos os GETs) +
+# uma SIMULACAO DE ENTRADA (mostra o POST exato que o aplicador enviaria).
+# NAO altera nada. Use pra investigar/testar um item especifico.
 on:
   workflow_dispatch:
     inputs:
