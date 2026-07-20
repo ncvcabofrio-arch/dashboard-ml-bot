@@ -6,6 +6,9 @@ e PAGINANDO a lista inteira) pra descobrir se a participação 'started' está s
 paginação ou por falta de filtro.
 NOVO: seção 5) SIMULAÇÃO DE ENTRADA — reproduz TODAS as checagens do aplicador pra a promoção
 recomendada e mostra o POST EXATO que ele enviaria, SEM escrever nada (nem no ML, nem no banco).
+NOVO: seção 0) RAIO-X — traz TUDO que dá pra consultar do anúncio pela API (preço de venda x lista,
+todos os preços, tarifa detalhada, frete, concorrência/price_to_win, catálogo, visitas/demanda) e
+calcula a MARGEM ATUAL. Base pra desenhar estratégia melhor.
 Uso (inputs do workflow): ITEM_ID (obrigatório) e SELLER_ID (conta).
 """
 import os
@@ -19,6 +22,11 @@ SELLER = (os.environ.get("SELLER_ID") or "").strip()
 TIPOS_SO_TIPO = {"PRICE_DISCOUNT", "LIGHTNING", "DOD"}
 TIPOS_COM_OFFER = {"SMART", "PRICE_MATCHING", "PRICE_MATCHING_MELI_ALL", "MARKETPLACE_CAMPAIGN",
                    "PRE_NEGOTIATED", "UNHEALTHY_STOCK", "VOLUME"}
+def brl(v):
+    try:
+        return "R$ " + format(float(v), ",.2f").replace(",", "X").replace(".", ",").replace("X", ".")
+    except (TypeError, ValueError):
+        return str(v)
 def como_sair(iid, ptipo, pid, offer_id, item_status):
     t = (ptipo or "").upper()
     if t in ("LIGHTNING", "DOD") and (item_status or "").lower() == "started":
@@ -121,6 +129,114 @@ def dump(label, obj, corte=6000):
         print(json.dumps(obj, ensure_ascii=False, indent=2)[:corte], flush=True)
     except Exception:
         print(str(obj)[:corte], flush=True)
+def _g(path, access):
+    """GET tolerante — devolve (status, corpo) e nunca explode."""
+    try:
+        return rec.get(path, access)
+    except Exception as e:
+        return None, {"erro": str(e)}
+def raio_x(item_id, it, access):
+    """0) RAIO-X: TUDO que dá pra consultar do anúncio pela API + MARGEM ATUAL.
+    Base pra bolar estratégia: preço venda x lista, todos os preços, tarifa detalhada, frete,
+    concorrência (price_to_win + catálogo), demanda (visitas/vendidos) e a margem de HOJE."""
+    print("\n################ 0) RAIO-X COMPLETO DO ANÚNCIO ################", flush=True)
+    if not isinstance(it, dict):
+        it = {}
+    lista = it.get("price")
+    cat = it.get("category_id")
+    ltid = it.get("listing_type_id")
+    sku = it.get("seller_sku") or it.get("seller_custom_field")
+    catalog_pid = it.get("catalog_product_id")
+    ship = it.get("shipping") or {}
+    logistic = ship.get("logistic_type")
+    smode = ship.get("mode")
+    print(f"  lista(price)={brl(lista)} | base_price={brl(it.get('base_price'))} | estoque={it.get('available_quantity')} "
+          f"| vendidos={it.get('sold_quantity')} | health={it.get('health')} | catálogo={catalog_pid} "
+          f"| logística={logistic}/{smode} | frete_grátis={ship.get('free_shipping')}", flush=True)
+
+    # [A] preço de VENDA atual x lista + promoção associada
+    st, sp = _g(f"/items/{item_id}/sale_price?context=channel_marketplace", access)
+    amount = regular = ptipo = pid = None
+    if isinstance(sp, dict):
+        amount = sp.get("amount")
+        regular = sp.get("regular_amount")
+        m = sp.get("metadata") or {}
+        ptipo = m.get("promotion_type")
+        pid = m.get("promotion_id")
+    tem_promo = (amount is not None and regular is not None and float(amount) < float(regular) - 0.01)
+    if tem_promo:
+        pct = (1 - float(amount) / float(regular)) * 100 if regular else 0
+        print(f"\n  [A] SALE_PRICE: venda ATUAL={brl(amount)} | lista(regular)={brl(regular)} "
+              f"-> EM PROMOÇÃO ✅ ({pct:.1f}% OFF) tipo={ptipo} promo_id={pid}", flush=True)
+    else:
+        print(f"\n  [A] SALE_PRICE: venda ATUAL={brl(amount)} | lista(regular)={brl(regular)} -> SEM promoção", flush=True)
+
+    # [B] TODOS os preços (standard + promotion, com datas e canais)
+    st, pr = _g(f"/items/{item_id}/prices", access)
+    dump("  [B] /items/{id}/prices — todos os preços (standard e promotion, com vigência/canal)", pr, 3500)
+
+    # [C] tarifa DETALHADA no preço de venda de hoje (sale_fee_details)
+    preco_fee = amount or lista
+    q = f"/sites/MLB/listing_prices?price={preco_fee}"
+    if cat:
+        q += f"&category_id={cat}"
+    if ltid:
+        q += f"&listing_type_id={ltid}"
+    if logistic and smode:
+        q += f"&logistic_type={logistic}&shipping_mode={smode}"
+    st, lp = _g(q, access)
+    dump(f"  [C] LISTING_PRICES — tarifa no preço de venda {brl(preco_fee)} (gross = tarifa CHEIA, sem abater promoção)", lp, 2500)
+
+    # [D] frete estimado
+    frete, forg = rec.frete_de(sku, item_id, access)
+    print(f"\n  [D] FRETE estimado: {brl(frete)} ({forg})", flush=True)
+
+    # [E] concorrência / buy box
+    st, ptw = _g(f"/items/{item_id}/price_to_win?version=v2", access)
+    dump("  [E] PRICE_TO_WIN — concorrência / preço pra ganhar a caixa", ptw, 2500)
+
+    # [F] concorrentes no catálogo (outros vendedores no mesmo produto)
+    if catalog_pid:
+        st, comp = _g(f"/products/{catalog_pid}/items?limit=10", access)
+        dump("  [F] CATÁLOGO — ofertas dos concorrentes (/products/{id}/items)", comp, 3000)
+    else:
+        print("\n  [F] CATÁLOGO: anúncio NÃO é de catálogo (sem catalog_product_id) — sem concorrência de catálogo", flush=True)
+
+    # [G] demanda: visitas nos últimos 30 dias
+    st, vis = _g(f"/items/{item_id}/visits/time_window?last=30&unit=day", access)
+    dump("  [G] VISITAS — demanda (últimos 30 dias)", vis, 1500)
+
+    # [H] MARGEM ATUAL (a conta que interessa)
+    custo = rec.custo_efetivo(item_id, sku)
+    try:
+        piso, grupo = rec.margem_minima_do(sku)
+    except Exception:
+        piso, grupo = None, None
+    print("\n  [H] MARGEM ATUAL (no preço de venda de hoje):", flush=True)
+    if amount is None or custo is None:
+        print(f"      não dá pra fechar (venda={brl(amount)} | custo={brl(custo)} | piso={piso}% {grupo})", flush=True)
+    else:
+        # meli_percentage: se a promoção ativa é cofinanciada, abate a tarifa; senão 0 (desconto próprio)
+        mp = 0.0
+        for o in (rec.ofertas_do_item(item_id, access) or []):
+            if isinstance(o, dict) and rec.eh_ativa(o) and o.get("meli_percentage"):
+                try:
+                    mp = float(o.get("meli_percentage"))
+                    break
+                except (TypeError, ValueError):
+                    pass
+        com = rec.comissao(round(float(amount), 2), cat, ltid, access) or 0
+        reducao = mp / 100.0 * float(regular or amount)
+        tarifa = max(com - reducao, 0)
+        recebe = float(amount) - tarifa - (frete or 0)
+        margem = (recebe - custo) / float(amount) * 100
+        ttxt = "CHEIA (desconto próprio)" if mp == 0 else f"com abate de {mp}% do ML"
+        print(f"      venda {brl(amount)} − tarifa {brl(tarifa)} [{ttxt}] − frete {brl(frete)} − custo {brl(custo)} = recebe {brl(recebe)}", flush=True)
+        print(f"      -> MARGEM ATUAL = {margem:.1f}%  (piso {piso}% · grupo {grupo})  "
+              f"{'✅ acima do piso' if (piso is None or margem >= piso) else '⚠️ ABAIXO do piso'}", flush=True)
+        if tem_promo and mp == 0 and ptipo not in ("PRICE_DISCOUNT", "custom", "CUSTOM", None):
+            print(f"      OBS: promo '{ptipo}' pode ser cofinanciada, mas não achei meli% na oferta ativa — margem acima está com tarifa CHEIA (conservadora; a real pode ser melhor).", flush=True)
+    print("\n################ FIM DO RAIO-X ################", flush=True)
 def _sugestao_fresca(item_id, sid):
     """Lê a recomendação MAIS NOVA e VIVA do robô pra o item (status != 'aplicada')."""
     try:
@@ -268,10 +384,19 @@ def main():
         print("!! não consegui token", flush=True)
         return
     print(f"################ DIAGNÓSTICO {ITEM} — conta {SID} ################", flush=True)
-    # 1) o anúncio
-    st, it = rec.get(f"/items/{ITEM}?attributes=id,title,price,base_price,status,"
-                     f"listing_type_id,category_id,seller_sku,seller_custom_field,available_quantity", access)
-    dump("1) ANÚNCIO (/items/{id})", it, 2000)
+    # carrega custos/grupos ANTES (pro raio-x e a simulação calcularem margem)
+    mm = (os.environ.get("MARGEM_MIN") or "").strip()
+    if mm:
+        try:
+            rec.MARGEM_PADRAO = float(mm.replace(",", "."))
+        except ValueError:
+            pass
+    rec.preload()
+    # 1) o anúncio — COMPLETO (o raio-x usa vários campos: catálogo, shipping, vendidos, health...)
+    st, it = rec.get(f"/items/{ITEM}", access)
+    dump("1) ANÚNCIO (/items/{id})", it, 2500)
+    # 0) RAIO-X — tudo que dá pra consultar do anúncio + MARGEM ATUAL
+    raio_x(ITEM, it, access)
     # 2) mapa do item — CONTANDO quantos vêm (pra ver se está truncado/paginado)
     st, of = rec.get(f"/seller-promotions/items/{ITEM}?app_version=v2", access)
     n = len(of) if isinstance(of, list) else "?"
@@ -308,14 +433,6 @@ def main():
     else:
         print("  (nenhuma via encontrou o item como 'started')", flush=True)
     # 5) SIMULAÇÃO DE ENTRADA (só leitura) — reproduz o aplicador e mostra o POST exato
-    # PRECISA carregar os custos/grupos ANTES (senão custo_efetivo vem vazio e dá 'sem custo').
-    mm = (os.environ.get("MARGEM_MIN") or "").strip()
-    if mm:
-        try:
-            rec.MARGEM_PADRAO = float(mm.replace(",", "."))
-        except ValueError:
-            pass
-    rec.preload()
     simular_entrada(ITEM, access, SID)
     print("\n################ FIM — nada foi alterado (só leitura) ################", flush=True)
 if __name__ == "__main__":
