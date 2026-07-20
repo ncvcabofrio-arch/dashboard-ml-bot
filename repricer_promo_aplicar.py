@@ -42,7 +42,8 @@ TIPOS_OK = {"SMART", "PRICE_MATCHING", "PRICE_MATCHING_MELI_ALL", "LIGHTNING", "
 #   transitorio          erro recuperável (candidato sumiu, POST falhou) -> retenta de hora em hora
 #   aguardando_ml        ML aceitou, ativação assíncrona -> reconfere de hora em hora
 #   aguardando_vigencia  promoção/participação ainda não começou -> espera a data (retenta espaçado)
-#   terminal             precisa de humano (sem custo, tipo não suportado, relâmpago já ativa) -> NÃO retenta
+#   terminal             precisa de humano (sem custo, tipo não suportado, relâmpago já ativa,
+#                        FAÇA NA MÃO por CREDIBILITY/START_DATE) -> NÃO retenta
 #   divergencia          a sugestão MUDOU de promoção -> NÃO troca sozinho, te avisa
 #
 # RETRY_PLAN[categoria] = (intervalo_horas, teto_de_tentativas)
@@ -66,6 +67,9 @@ CODIGO_CATEGORIA = {
     "acao_invalida": "terminal", "tipo_nao_suportado": "terminal", "sem_item": "terminal",
     "sem_custo": "terminal", "sem_avaliar": "terminal", "abaixo_piso": "terminal",
     "sem_corpo": "terminal", "bloqueada_luz_dod": "terminal",
+    # FAÇA NA MÃO: o ML recusou por credibilidade do desconto / data da campanha.
+    # Esperar NÃO resolve (precisa de você) -> terminal, NÃO retenta.
+    "faca_na_mao": "terminal",
     # a sugestão mudou de promoção
     "divergencia": "divergencia",
 }
@@ -738,13 +742,21 @@ def processar(fila, access):
         else:
             # entrada recusada -> NÃO removemos nada: rede de segurança intacta
             aviso = " | ⚠️ entrada recusada — NÃO mexi nas promoções atuais (anúncio segue como estava)"
+    # DESFECHO do POST. Por padrão um erro é 'erro_post' (transitório: 429/rede/candidato sumiu ->
+    # retenta). MAS dois erros são "FAÇA NA MÃO" e NÃO adianta reter — precisam de você:
+    #   • CREDIBILITY: o ML só aceita a relâmpago com desconto maior que seu piso permite.
+    #   • START_DATE : a campanha exige uma data que o ML não aceitou pela API.
+    # Esses viram 'faca_na_mao' (terminal): saem da fila, ficam pra revisão, PARAM de retentar.
     motivo = ""
+    cod_erro = "erro_post"
     if not ok:
         _t = json.dumps(resp, ensure_ascii=False).upper()
         if "CREDIBILITY" in _t:
             motivo = "FAÇA NA MÃO — o ML só aceita a relâmpago com um desconto maior do que o seu piso de margem permite. "
+            cod_erro = "faca_na_mao"
         elif "START_DATE" in _t:
             motivo = "FAÇA NA MÃO — essa campanha exige data que o ML não aceitou pela API. "
+            cod_erro = "faca_na_mao"
     gravar(fila["id"], {
         "status": "aplicada" if ok else "erro",
         "resultado": (f"OK {sc}{aviso}: {json.dumps(resp, ensure_ascii=False)[:220]}{light_diag}" if ok
@@ -752,7 +764,7 @@ def processar(fila, access):
         "preco_aplicado": ev["pb"] if ok else None,
         "margem_aplicada": ev["margem"] if ok else None,
     })
-    return "aplicado" if ok else "erro_post"
+    return "aplicado" if ok else cod_erro
 def grava_status(estado, resumo=None):
     """Grava o status do aplicador pro painel ler (não depende da API do GitHub)."""
     try:
