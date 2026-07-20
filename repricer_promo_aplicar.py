@@ -501,14 +501,26 @@ def confirmar_pos_entrada(fila, access):
     extra = ""
     if (fila.get("acao") or "") == "trocar":
         if confirmado:
-            # nova PROVADA pelo preço -> AGORA sim sai das antigas. O item nunca ficou descoberto:
+            # nova PROVADA pelo preço -> AGORA sai das antigas. O item nunca ficou descoberto:
             # a antiga segurou o desconto até esta confirmação. Mantém a nova por promotion_id.
+            # APRENDIZADO DO TESTE REAL: o DELETE de SMART volta 200 com corpo VAZIO e o ML tira a
+            # participação de forma ASSÍNCRONA (leva segundos). Relistar AGORA ainda mostra as que
+            # JÁ estão saindo -> dava falso "ainda ativas". Então NÃO relisto pra conferir na hora:
+            # confio no status do DELETE (200 = pedido aceito). Só marco problema se o ML RECUSAR.
             rest = [p for p in rec.participacoes_ativas(iid, seller_id, access) if p.get("promotion_id") != pid]
+            oks, ruins = 0, []
             for p in rest:
-                remover_participacao(iid, p, access)
-            rest2 = [p for p in rec.participacoes_ativas(iid, seller_id, access) if p.get("promotion_id") != pid]
-            extra = " | " + ("saiu das antigas ✓" if not rest2
-                             else "⚠️ ainda ativas: " + ", ".join((p.get('name') or p.get('type')) for p in rest2))
+                scd, _b = remover_participacao(iid, p, access)
+                if scd in (200, 201):
+                    oks += 1
+                else:
+                    ruins.append(f"{p.get('name') or p.get('type')}:{scd}")
+            if not rest:
+                extra = " | nenhuma antiga a remover ✓"
+            elif not ruins:
+                extra = f" | pedi saída de {oks} antiga(s) ✓ (o ML remove em segundos — assíncrono)"
+            else:
+                extra = " | ⚠️ DELETE recusado em: " + ", ".join(ruins)
         else:
             # nova ainda NÃO confirmou pelo preço -> MANTÉM as antigas (rede intacta). A saída fica
             # pra reconferência da fila (aguardando_ml): quando a nova pegar, aí sim sai das antigas.
@@ -616,10 +628,14 @@ def processar(fila, access):
             # Sem promotion_id (ex.: relâmpago) não dá pra isolar a nova com segurança -> não removo nada.
             extra_troca = ""
             if acao == "trocar" and fila.get("promocao_id"):
-                saiu, falhou, rest = sair_das_outras(iid, str(fila.get("seller_id") or ""), access,
-                                                     manter_pid=fila.get("promocao_id"))
-                extra_troca = (" | saiu das antigas ✓" if not rest
-                               else " | ⚠️ ainda ativas: " + ", ".join((p.get('name') or p.get('type')) for p in rest))
+                saiu, falhou, _rest = sair_das_outras(iid, str(fila.get("seller_id") or ""), access,
+                                                      manter_pid=fila.get("promocao_id"))
+                # NÃO uso a relista (_rest): é assíncrona e dá falso "ainda ativas". Reporto pelo
+                # status do DELETE (saiu = 200; falhou = recusado de verdade).
+                if falhou:
+                    extra_troca = " | ⚠️ DELETE recusado em: " + ", ".join(falhou)
+                elif saiu:
+                    extra_troca = f" | pedi saída de {len(saiu)} antiga(s) ✓ (assíncrono)"
             gravar(fila["id"], {"status": "aplicada",
                 "resultado": f"já estava ATIVA no item ✓ (não precisou entrar){extra_troca}"})
             return "ja_ativa"
