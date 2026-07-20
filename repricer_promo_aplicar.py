@@ -500,12 +500,19 @@ def confirmar_pos_entrada(fila, access):
         nota = "entrada não conferível por API (relâmpago) — considero aplicada"
     extra = ""
     if (fila.get("acao") or "") == "trocar":
-        rest = [p for p in rec.participacoes_ativas(iid, seller_id, access) if p.get("promotion_id") != pid]
-        for p in rest:
-            remover_participacao(iid, p, access)
-        rest2 = [p for p in rec.participacoes_ativas(iid, seller_id, access) if p.get("promotion_id") != pid]
-        extra = " | " + ("saiu das outras ✓" if not rest2
-                         else "⚠️ ainda ativas: " + ", ".join((p.get('name') or p.get('type')) for p in rest2))
+        if confirmado:
+            # nova PROVADA pelo preço -> AGORA sim sai das antigas. O item nunca ficou descoberto:
+            # a antiga segurou o desconto até esta confirmação. Mantém a nova por promotion_id.
+            rest = [p for p in rec.participacoes_ativas(iid, seller_id, access) if p.get("promotion_id") != pid]
+            for p in rest:
+                remover_participacao(iid, p, access)
+            rest2 = [p for p in rec.participacoes_ativas(iid, seller_id, access) if p.get("promotion_id") != pid]
+            extra = " | " + ("saiu das antigas ✓" if not rest2
+                             else "⚠️ ainda ativas: " + ", ".join((p.get('name') or p.get('type')) for p in rest2))
+        else:
+            # nova ainda NÃO confirmou pelo preço -> MANTÉM as antigas (rede intacta). A saída fica
+            # pra reconferência da fila (aguardando_ml): quando a nova pegar, aí sim sai das antigas.
+            extra = " | mantive as antigas (nova ainda não confirmou pelo preço — saio quando ela pegar)"
     gravar(fila["id"], {"status": "aplicada",
                         "resultado": f"{base} || 2ª passada — {nota}{extra}"})
     print(f"  [{ret}] {fila.get('acao')} {iid} (2ª passada) | {nota}", flush=True)
@@ -603,8 +610,18 @@ def processar(fila, access):
         # é um resultado BOM (o anúncio já está na promoção) — marca 'já ativa ✓', não vermelho.
         ja = any((o.get("type") or "").upper() == tipo and rec.eh_ativa(o) for o in ofertas)
         if ja:
+            # TROCA adiada que finalmente pegou: a nova está ATIVA agora. É AQUI que a troca se
+            # COMPLETA — saímos das antigas mantendo a nova (por promotion_id). Sem essa etapa, o
+            # item ficaria pra sempre nas DUAS promoções (podendo vender pela antiga, de margem pior).
+            # Sem promotion_id (ex.: relâmpago) não dá pra isolar a nova com segurança -> não removo nada.
+            extra_troca = ""
+            if acao == "trocar" and fila.get("promocao_id"):
+                saiu, falhou, rest = sair_das_outras(iid, str(fila.get("seller_id") or ""), access,
+                                                     manter_pid=fila.get("promocao_id"))
+                extra_troca = (" | saiu das antigas ✓" if not rest
+                               else " | ⚠️ ainda ativas: " + ", ".join((p.get('name') or p.get('type')) for p in rest))
             gravar(fila["id"], {"status": "aplicada",
-                "resultado": "já estava ATIVA no item ✓ (não precisou entrar)"})
+                "resultado": f"já estava ATIVA no item ✓ (não precisou entrar){extra_troca}"})
             return "ja_ativa"
         gravar(fila["id"], {"status": "erro",
             "resultado": "candidato aprovado não está mais disponível — rode a sugestão de novo"})
@@ -722,24 +739,22 @@ def processar(fila, access):
         print(f"  [DRY] {acao} {iid} {tipo} -> {json.dumps(corpo)} (margem {ev['margem']:.1f}%)", flush=True)
         return "simulado"
     # ---- APLICAÇÃO REAL ----
-    # ORDEM (julgamento técnico, à prova de falha): ENTRAR PRIMEIRO na sugerida e só SAIR das
-    # outras se a entrada for ACEITA (200/201). Falha SEGURA: se o ML recusar a entrada, não
-    # mexemos em nada e o anúncio segue com as promoções que já tinha (nunca fica descoberto).
-    # O ML aceita o item em VÁRIAS promoções ao mesmo tempo (doc), então entrar antes de sair não
-    # gera conflito; a sobra sai uma a uma por tipo e é reconferida na 2ª passada.
+    # ORDEM (à prova de falha, em DUAS travas):
+    #   1) ENTRA na nova. Se o ML RECUSAR, não mexemos em nada (anúncio segue como estava).
+    #   2) SÓ SAI das antigas depois que o sale_price CONFIRMAR que a nova está no ar (2ª passada).
+    # Aprendizado das últimas passadas: o ML às vezes ACEITA a entrada (201) mas demora segundos/
+    # minutos pra refletir o desconto no preço (comum nas cofinanciadas -> estado 'ativando').
+    # Se saíssemos das antigas já no 201, existiria uma janela em que a nova foi aceita mas ainda
+    # não pegou E a antiga já saiu -> anúncio SEM desconto. Por isso a saída fica gated pelo PREÇO.
     aviso = ""
     sc, resp = post(f"/seller-promotions/items/{iid}?app_version=v2", access, corpo)
     ok = sc in (200, 201)
     if acao == "trocar":
         if ok:
-            seller_id = str(fila.get("seller_id") or "")
-            # mantém a NOVA (por promotion_id) e sai de TODAS as outras, uma a uma, por tipo
-            saiu, falhou, _ = sair_das_outras(iid, seller_id, access, manter_pid=cand.get("id"))
-            aviso = " | entrou na sugerida ✓"
-            if saiu:
-                aviso += " | saiu das outras: " + ", ".join(saiu)
-            if falhou:
-                aviso += " | NÃO saiu (confere 2ª passada): " + ", ".join(falhou)
+            # NÃO saímos das antigas AINDA. A rede antiga fica de pé até o sale_price CONFIRMAR
+            # (2ª passada / reconferência da fila) que a nova está no ar. Assim o anúncio NUNCA
+            # fica sem desconto na janela entre "aceita (201)" e "preço realmente aplicado".
+            aviso = " | entrou na sugerida ✓ (saio das antigas só após confirmar o preço)"
         else:
             # entrada recusada -> NÃO removemos nada: rede de segurança intacta
             aviso = " | ⚠️ entrada recusada — NÃO mexi nas promoções atuais (anúncio segue como estava)"
