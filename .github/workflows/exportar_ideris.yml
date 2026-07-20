@@ -1,0 +1,28 @@
+name: Exportar cadastro Ideris (CSV + XLSX)
+# Roda na mao (botao "Run workflow"). Gera a planilha completa de produtos do
+# Ideris e disponibiliza os arquivos pra download em "Artifacts" da rodada.
+on:
+  workflow_dispatch:
+
+jobs:
+  exportar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Instalar dependencias
+        run: pip install requests openpyxl
+      - name: Exportar Ideris
+        env:
+          IDERIS_TOKEN: ${{ secrets.IDERIS_TOKEN }}
+        run: python exportar_ideris.py
+      - name: Disponibilizar os arquivos (CSV + XLSX)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ideris_produtos
+          path: |
+            ideris_produtos.csv
+            ideris_produtos.xlsx
+          if-no-files-found: error
