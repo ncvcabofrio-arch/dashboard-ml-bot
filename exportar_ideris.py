@@ -63,11 +63,7 @@ def coletar_tudo(token, endpoint):
     H = {"Authorization": "Bearer " + token}
     out, mult = {}, {}
     offset, total, limit = 0, None, 100
-    vazias_seguidas = 0
-    while True:
-        if total is not None and offset >= total:
-            break
-
+    while total is None or offset < total:
         resp = _buscar(H, offset, limit, endpoint)
 
         if resp.status_code == 404:
@@ -102,23 +98,14 @@ def coletar_tudo(token, endpoint):
             continue
 
         data = resp.json()
-        if total is None:
-            total = data.get("total", 0)
+        total = data.get("total", 0)
         batch = data.get("obj", []) or []
+        if not batch:
+            break
         for it in batch:
             _guardar(it, out, mult)
-
-        if batch:
-            vazias_seguidas = 0
-        else:
-            # janela vazia no MEIO da lista: nao para; avanca e segue ate o total.
-            vazias_seguidas += 1
-            if vazias_seguidas >= 5:   # trava de seguranca contra loop infinito
-                print(f"  {endpoint}: 5 janelas vazias seguidas, encerrando em offset={offset}.")
-                break
-
-        offset += limit               # avanca pela JANELA
-        time.sleep(1.3)               # respeita o limite (~46 chamadas/min < 50)
+        offset += len(batch)          # avanca pelo que REALMENTE veio (Ideris manda ~50/pag)
+        time.sleep(1.3)               # respeita o limite (50 chamadas/min)
 
     print(f"{endpoint}: {len(out)} SKUs coletados (de {total}).")
     return out, mult
@@ -131,10 +118,97 @@ def _celula(v):
     return v
 
 
+import re
+
+# endpoints prováveis da tabela de NCM no Ideris (tenta na ordem; usa o 1º que responder)
+NCM_ENDPOINTS = ["/ncm/search", "/ncm", "/tax/ncm/search", "/fiscal/ncm/search", "/product/ncm/search"]
+
+
+def _achar_codigo_ncm(it):
+    """Descobre, dentro do registro de NCM, qual campo tem o CÓDIGO (6-10 dígitos)."""
+    for k in ("ncm", "code", "codigo", "number", "value", "name", "description"):
+        v = it.get(k)
+        if v is not None:
+            so_digitos = re.sub(r"\D", "", str(v))
+            if 6 <= len(so_digitos) <= 10:
+                return str(v)
+    for v in it.values():                 # fallback: qualquer campo com 8 dígitos
+        if v is not None and len(re.sub(r"\D", "", str(v))) == 8:
+            return str(v)
+    return None
+
+
+def resolver_ncm(token):
+    """Monta {id_do_ncm: codigo}. Tenta os endpoints prováveis e loga qual funcionou."""
+    H = {"Authorization": "Bearer " + token}
+    for ep in NCM_ENDPOINTS:
+        try:
+            r = requests.get(BASE + ep + "?limit=100&offset=0", headers=H, timeout=60)
+        except Exception:
+            continue
+        if r.status_code != 200:
+            continue
+        try:
+            d = r.json()
+        except Exception:
+            continue
+        primeiro = (d.get("obj") if isinstance(d, dict) else d) or []
+        if not primeiro:
+            continue
+        print(f"[NCM] endpoint OK: {ep} | campos do registro: {sorted(primeiro[0].keys())}")
+        mp = {}
+        offset, total, limit = 0, None, 100
+        while total is None or offset < total:
+            rr = requests.get(BASE + ep + f"?limit={limit}&offset={offset}", headers=H, timeout=60)
+            if rr.status_code != 200:
+                break
+            dd = rr.json()
+            total = dd.get("total", 0) if isinstance(dd, dict) else len(primeiro)
+            batch = (dd.get("obj") if isinstance(dd, dict) else dd) or []
+            if not batch:
+                break
+            for it in batch:
+                i = it.get("id")
+                # doc oficial: NCM tem 'code' (codigo) e 'name' (nome). fallback = detector.
+                code = it.get("code") or _achar_codigo_ncm(it)
+                if i is not None and code:
+                    mp[str(i)] = {"code": str(code), "name": it.get("name") or ""}
+            offset += len(batch)
+            time.sleep(1.3)
+        print(f"[NCM] {len(mp)} códigos mapeados via {ep}")
+        return mp
+    print("[NCM] nenhum endpoint de NCM respondeu — a coluna 'produto_ncm' fica com o id "
+          "(me manda o log que eu acerto o endpoint certo).")
+    return {}
+
+
 def main():
     token = login()
     produtos, _mp = coletar_tudo(token, "/sku/search")
     anuncios, mult = coletar_tudo(token, "/listingModel/search")
+
+    # DIAGNOSTICO (1x): como o Ideris estrutura VARIACAO?
+    #  - se cada variacao ja vem como SKU proprio (linha propria) -> nada a fazer.
+    #  - se vier ANINHADA num pai (uma lista dentro de um campo 'vari...') -> a
+    #    gente expande depois. Isso mostra a estrutura real pra decidir.
+    achou = False
+    for fonte, dic in (("anuncio", anuncios), ("produto", produtos)):
+        for sku, it in dic.items():
+            campos_var = {k: v for k, v in it.items()
+                          if "vari" in k.lower() and v not in (None, "", [], {})}
+            if campos_var:
+                print(f"\n[DIAGNOSTICO variacao] fonte={fonte} sku={sku}:")
+                print("  " + json.dumps(campos_var, ensure_ascii=False)[:900])
+                achou = True
+                break
+        if achou:
+            break
+    if not achou:
+        print("\n[DIAGNOSTICO variacao] nenhum campo 'vari*' preenchido — "
+              "provavelmente cada variacao ja e um SKU proprio (uma linha por variacao).")
+
+    # tabela de NCM: id -> codigo real (ex.: 24 -> "9207.10.10")
+    ncm_map = resolver_ncm(token)
 
     skus = sorted(set(produtos) | set(anuncios))
     linhas = []
@@ -144,6 +218,11 @@ def main():
             if k == "sku":
                 continue
             row["produto_" + k] = _celula(v)
+        # NCM legivel a partir do id (code + nome)
+        idncm = str(row.get("produto_ncmId", "") or "").strip()
+        _ncm = ncm_map.get(idncm) or {}
+        row["produto_ncm"] = _ncm.get("code", "")
+        row["produto_ncm_nome"] = _ncm.get("name", "")
         for k, v in (anuncios.get(sku) or {}).items():
             if k == "sku":
                 continue
