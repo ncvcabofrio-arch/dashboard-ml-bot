@@ -1,0 +1,50 @@
+name: Repricer - Teste SAIR (diagnostico)
+
+# Diagnostico da SAIDA de promocoes: descobre por que o item continua ativo em promocoes
+# depois do 'trocar'. Usa a MESMA funcao de saida da producao (ap.remover_participacao).
+#   aplicar=NAO (padrao, SEGURO): so LISTA as ativas e MOSTRA o DELETE que enviaria. Nao envia nada.
+#   aplicar=SIM: ENVIA o DELETE de verdade e mostra o HTTP/corpo que o ML responde, depois relista.
+on:
+  workflow_dispatch:
+    inputs:
+      item_id:
+        description: "Anuncio a diagnosticar (padrao = o que tinha 4 promocoes sobrando)"
+        type: string
+        required: false
+        default: "MLB5281709396"
+      seller_id:
+        description: "Conta: 177795203=CF, 471489691=Cabo Frio, 3244206480=MG"
+        type: string
+        required: false
+        default: "177795203"
+      aplicar:
+        description: "NAO = so mostra (seguro) | SIM = envia o DELETE de verdade e captura a resposta do ML"
+        type: choice
+        options: ["NAO", "SIM"]
+        default: "NAO"
+
+concurrency:
+  group: ml-aplicar          # mesma pista do aplicador — nao roda junto com ele
+  cancel-in-progress: false
+
+jobs:
+  sair_teste:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Instalar dependencias
+        run: pip install requests supabase
+      - name: Diagnostico da saida
+        env:
+          ML_CLIENT_ID:     ${{ secrets.ML_CLIENT_ID }}
+          ML_CLIENT_SECRET: ${{ secrets.ML_CLIENT_SECRET }}
+          ML_REFRESH_TOKEN: ${{ secrets.ML_REFRESH_TOKEN }}
+          SUPABASE_URL:     ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY:     ${{ secrets.SUPABASE_KEY }}
+          ITEM_ID:   ${{ github.event.inputs.item_id }}
+          SELLER_ID: ${{ github.event.inputs.seller_id }}
+          APLICAR:   ${{ github.event.inputs.aplicar == 'SIM' && '1' || '0' }}
+        run: python repricer_sair_teste.py
