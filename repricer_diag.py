@@ -236,6 +236,59 @@ def raio_x(item_id, it, access):
               f"{'✅ acima do piso' if (piso is None or margem >= piso) else '⚠️ ABAIXO do piso'}", flush=True)
         if tem_promo and mp == 0 and ptipo not in ("PRICE_DISCOUNT", "custom", "CUSTOM", None):
             print(f"      OBS: promo '{ptipo}' pode ser cofinanciada, mas não achei meli% na oferta ativa — margem acima está com tarifa CHEIA (conservadora; a real pode ser melhor).", flush=True)
+
+    # [I] REFERÊNCIA DE PREÇO DO ML (o motor de recomendação do próprio Mercado Livre)
+    st, ref = _g(f"/suggestions/items/{item_id}/details", access)
+    if isinstance(ref, dict) and isinstance(ref.get("status"), str):
+        sug = (ref.get("suggested_price") or {}).get("amount")
+        low = (ref.get("lowest_price") or {}).get("amount")
+        cur = (ref.get("current_price") or {}).get("amount")
+        costs = ref.get("costs") or {}
+        print(f"\n  [I] REFERÊNCIA DE PREÇO (ML): status={ref.get('status')} | atual={brl(cur)} | "
+              f"SUGERIDO={brl(sug)} | mínimo mercado={brl(low)} | dif={ref.get('percent_difference')}% | aplicável={ref.get('applicable_suggestion')}", flush=True)
+        print(f"      custos que o ML calcula: tarifa={brl(costs.get('selling_fees'))} | frete={brl(costs.get('shipping_fees'))}", flush=True)
+        pd = ref.get("promotion_detail")
+        if pd:
+            print(f"      >>> OPORTUNIDADE (item parado): campanha {pd.get('campaign_name')} {pd.get('discount_percent')}% "
+                  f"[{pd.get('promotion_id')}] {pd.get('campaign_start_date')}..{pd.get('campaign_end_date')} (motivo {pd.get('unhealthy_reason')})", flush=True)
+        graf = (ref.get("metadata") or {}).get("graph") or []
+        if graf:
+            print("      similares no mercado (preço | vendidos):", flush=True)
+            for g in graf[:6]:
+                p = (g.get("price") or {}).get("amount")
+                info = g.get("info") or {}
+                print(f"        - {brl(p)} | vendidos {info.get('sold_quantity')} | {(info.get('title') or '')[:34]}", flush=True)
+    else:
+        print(f"\n  [I] REFERÊNCIA DE PREÇO (ML): sem referência pra este item (status HTTP {st})", flush=True)
+
+    # [J] AUTOMAÇÃO DE PREÇO (item automatizado BLOQUEIA PUT de preço a partir de 18/03/2026)
+    tags = it.get("tags") or []
+    automatizado_tag = "dynamic_standard_price" in tags
+    st, aut = _g(f"/pricing-automation/items/{item_id}/automation", access)
+    st2, rules = _g(f"/pricing-automation/items/{item_id}/rules", access)
+    print(f"\n  [J] AUTOMAÇÃO DE PREÇO: tag dynamic_standard_price={automatizado_tag}", flush=True)
+    if isinstance(aut, dict) and aut.get("status") in ("ACTIVE", "PAUSED"):
+        sd = aut.get("status_detail") or {}
+        print(f"      ⚠️ AUTOMATIZADO ({aut.get('status')}) regra={(aut.get('item_rule') or {}).get('rule_id')} "
+              f"min={brl(aut.get('min_price'))} max={brl(aut.get('max_price'))}"
+              + (f" | pausada por {sd.get('cause')}" if sd.get('cause') else ""), flush=True)
+        print("      >>> NÃO mexer no preço via PUT nesse item — será rejeitado/ignorado.", flush=True)
+    else:
+        rl = (rules.get("rules") if isinstance(rules, dict) else None) or []
+        print(f"      sem automação atribuída. Regras que o item aceitaria: {[r.get('rule_id') for r in rl] or 'nenhuma'}", flush=True)
+
+    # [K] USER PRODUCT (MLBU) + condições de venda irmãs (mesmo produto, preços/ tipos diferentes)
+    upid = it.get("user_product_id")
+    if upid:
+        st, up = _g(f"/user-products/{upid}", access)
+        nome_up = up.get("name") if isinstance(up, dict) else None
+        st, irmas = _g(f"/users/{it.get('seller_id')}/items/search?user_product_id={upid}", access)
+        ids = (irmas.get("results") if isinstance(irmas, dict) else None) or []
+        print(f"\n  [K] USER PRODUCT: {upid} '{nome_up}' | family_id={it.get('family_id')} | condições de venda (irmãs): {len(ids)}", flush=True)
+        for x in ids[:12]:
+            print(f"        - {x}{'  <- ESTE' if str(x) == str(item_id) else ''}", flush=True)
+    else:
+        print("\n  [K] USER PRODUCT: item ainda no modelo antigo (sem user_product_id)", flush=True)
     print("\n################ FIM DO RAIO-X ################", flush=True)
 def _sugestao_fresca(item_id, sid):
     """Lê a recomendação MAIS NOVA e VIVA do robô pra o item (status != 'aplicada')."""
