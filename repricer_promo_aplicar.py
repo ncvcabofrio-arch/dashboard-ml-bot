@@ -125,10 +125,11 @@ def registrar_retry(fila, codigo, resultado_txt=None):
                          "proxima_tentativa": (agora + timedelta(hours=horas)).isoformat()})
         _upsert_retry(base)
         return
-    # terminal / divergencia: fica visível pra revisão manual, sem auto-retry
+    # terminal / divergencia: fica visível pra revisão manual, sem auto-retry.
+    # max_tentativas é NOT NULL na tabela; terminal não retenta, então 0 (não None).
     base.update({"status": "revisar", "proxima_tentativa": None,
                  "tentativas": int((prev.get("tentativas") if prev else 0) or 0),
-                 "max_tentativas": (prev.get("max_tentativas") if prev else None)})
+                 "max_tentativas": int((prev.get("max_tentativas") if prev else 0) or 0)})
     _upsert_retry(base)
 def _upsert_retry(row):
     try:
