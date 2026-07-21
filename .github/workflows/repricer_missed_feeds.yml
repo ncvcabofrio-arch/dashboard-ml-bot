@@ -1,0 +1,33 @@
+name: Repricer - Check missed_feeds (notificacoes perdidas)
+
+# Consulta o historico do ML de notificacoes que ele NAO conseguiu entregar (missed_feeds).
+# Vazio = webhook pegando tudo. Com itens = o que escapou (por topico e codigo HTTP).
+# So LE, nao altera nada.
+on:
+  workflow_dispatch:
+    inputs:
+      topic:
+        description: "Filtrar um topico so (vazio = todos). Ex.: items_prices"
+        type: string
+        required: false
+        default: ""
+
+jobs:
+  missed_feeds:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Instalar dependencias
+        run: pip install requests supabase
+      - name: Consultar missed_feeds
+        env:
+          ML_CLIENT_ID:     ${{ secrets.ML_CLIENT_ID }}
+          ML_CLIENT_SECRET: ${{ secrets.ML_CLIENT_SECRET }}
+          ML_REFRESH_TOKEN: ${{ secrets.ML_REFRESH_TOKEN }}
+          SUPABASE_URL:     ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY:     ${{ secrets.SUPABASE_KEY }}
+          TOPIC:            ${{ github.event.inputs.topic }}
+        run: python repricer_missed_feeds.py
