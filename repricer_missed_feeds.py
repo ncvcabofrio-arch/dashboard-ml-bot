@@ -1,16 +1,17 @@
 """
-CHECK DE NOTIFICAÇÕES PERDIDAS (missed_feeds) — confirma se o webhook está pegando TUDO.
+CHECK DE NOTIFICAÇÕES PERDIDAS (missed_feeds) + CONFERÊNCIA DOS PEDIDOS.
 
 O ML guarda por ~2 dias as notificações que ele TENTOU entregar e não conseguiu (não recebeu
-HTTP 200 após 8 tentativas / 1h). Este script consulta esse histórico:
-  - VAZIO  -> prova de que nada está escapando (o webhook responde 200 em tudo).
-  - COM ITENS -> são exatamente as que se perderam; mostra por tópico e por código HTTP,
-    pra sabermos o que corrigir (e se algum tópico foi desativado por falha).
+HTTP 200 após 8 tentativas / 1h). Este script:
+  1) Consulta esse histórico (vazio = nada escapou; com itens = o que escapou).
+  2) Pros PEDIDOS perdidos, confere se eles estão na sua fila_pedidos — porque a função grava
+     na fila ANTES da chamada lenta ao GitHub, então "perdido pra ótica do ML" quase sempre
+     significa que o pedido FOI gravado, só que o ML não recebeu o 200 a tempo e ficou re-tentando.
 
 NÃO altera nada — só lê. Usa o mesmo token/segredos do resto do robô.
 
 Env:
-  APP_ID  (padrão = ML_CLIENT_ID; é o id da sua aplicação no ML)
+  APP_ID  (padrão = ML_CLIENT_ID; id da sua aplicação no ML)
   TOPIC   (opcional: filtra um tópico só, ex.: items_prices)
 """
 import os
@@ -64,7 +65,6 @@ def main():
         print("\n✓ NADA se perdeu. O webhook está respondendo 200 em tudo — pegando 100%.", flush=True)
         return
 
-    # o que se perdeu, por tópico e pelo código que o SEU servidor devolveu
     porTopico, porCodigo, porConta = {}, {}, {}
     for m in msgs:
         t = m.get("topic") or "?"
@@ -85,9 +85,44 @@ def main():
         print(f"  {str(m.get('sent',''))[:19]} | {m.get('topic')} | {str(m.get('resource',''))[:44]} "
               f"| http {resp.get('http_code')} | tentativas {m.get('attempts')}", flush=True)
 
-    print("\nLeitura: essas são as que ESCAPARAM. Se aparecerem tópicos que te interessam, vale "
-          "investigar por que o servidor não respondeu 200 nelas (e reinscrever o tópico se ele "
-          "tiver sido desativado por falha).", flush=True)
+    # ---- CONFERÊNCIA: os pedidos "perdidos" pra ótica do ML estão na sua fila_pedidos? ----
+    oids = []
+    for m in msgs:
+        if str(m.get("topic", "")).startswith("orders"):
+            oid = str(m.get("resource", "")).rstrip("/").split("/")[-1]
+            if oid and oid not in oids:
+                oids.append(oid)
+    if oids:
+        print(f"\n--- Conferência: {len(oids)} pedido(s) perdido(s) pelo ML x sua fila_pedidos ---", flush=True)
+        achados = set()
+        erro_leitura = None
+        try:
+            r = sb.table("fila_pedidos").select("order_id").in_("order_id", oids).execute()
+            achados = {str(x.get("order_id")) for x in (r.data or [])}
+        except Exception as e:
+            erro_leitura = str(e)
+        if achados:
+            falta = [o for o in oids if o not in achados]
+            print(f"  NA FILA: {len(achados)}/{len(oids)}  |  FALTANDO: {len(falta)}", flush=True)
+            if falta:
+                print("  ⚠️ pedidos que NÃO estão na fila (esses SIM se perderam):", ", ".join(falta), flush=True)
+            else:
+                print("  ✓ TODOS os pedidos que o ML deu como perdidos ESTÃO na sua fila — não perdeu nenhum.", flush=True)
+        else:
+            # a chave do script provavelmente não vê a fila_pedidos (RLS). Entrega o SQL pro Editor.
+            if erro_leitura:
+                print(f"  (não li a fila_pedidos direto: {erro_leitura})", flush=True)
+            print("  Não confirmei pela chave do script (a fila_pedidos tem RLS ligada).", flush=True)
+            print("  COLE este SQL no SQL Editor do Supabase (ele ignora RLS) pra conferir na hora:\n", flush=True)
+            vals = ",".join(f"('{o}')" for o in oids)
+            print("  select v.oid as pedido,\n"
+                  "         (select count(*) from public.fila_pedidos f where f.order_id = v.oid) as na_fila\n"
+                  f"  from (values {vals}) as v(oid)\n"
+                  "  order by na_fila;", flush=True)
+            print("\n  (na_fila = 0 => aquele pedido NÃO está na fila; esse teria se perdido de verdade.)", flush=True)
+
+    print("\nLeitura: 'perdida' aqui é da ótica do ML (ele não recebeu o 200 a tempo). A conferência "
+          "acima diz se o pedido chegou na sua fila mesmo assim.", flush=True)
 
 
 if __name__ == "__main__":
