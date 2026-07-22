@@ -13,5 +13,4 @@ jobs:
       - run: python shopee_auth.py
         env:
           MODE: url
-          SHOPEE_PARTNER_ID: ${{ secrets.SHOPEE_PARTNER_ID }}
           SHOPEE_PARTNER_KEY: ${{ secrets.SHOPEE_PARTNER_KEY }}
