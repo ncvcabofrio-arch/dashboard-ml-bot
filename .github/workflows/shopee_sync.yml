@@ -1,0 +1,24 @@
+name: Shopee - pedidos
+on:
+  workflow_dispatch:
+    inputs:
+      dias:
+        description: "Quantos dias pra trás puxar (padrão 15; use 180 pra backfill)"
+        required: false
+        default: "15"
+  schedule:
+    - cron: "30 9 * * *"   # todo dia ~06h30 de Brasília
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python shopee_pedidos.py
+        env:
+          SHOPEE_PARTNER_KEY: ${{ secrets.SHOPEE_PARTNER_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          DIAS: ${{ inputs.dias || '15' }}
