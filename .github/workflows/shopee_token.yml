@@ -1,0 +1,27 @@
+name: Shopee - trocar code por token
+on:
+  workflow_dispatch:
+    inputs:
+      code:
+        description: "code que apareceu no endereço depois de autorizar"
+        required: true
+      shop_id:
+        description: "shop_id que apareceu no endereço"
+        required: true
+jobs:
+  token:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python shopee_auth.py
+        env:
+          MODE: token
+          SHOPEE_PARTNER_ID: ${{ secrets.SHOPEE_PARTNER_ID }}
+          SHOPEE_PARTNER_KEY: ${{ secrets.SHOPEE_PARTNER_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          CODE: ${{ inputs.code }}
+          SHOP_ID: ${{ inputs.shop_id }}
