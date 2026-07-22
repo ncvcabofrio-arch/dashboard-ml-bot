@@ -1,0 +1,17 @@
+name: Shopee - gerar link de autorizacao
+# Roda uma vez: imprime o link pra você autorizar a loja.
+on:
+  workflow_dispatch:
+jobs:
+  url:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python shopee_auth.py
+        env:
+          MODE: url
+          SHOPEE_PARTNER_ID: ${{ secrets.SHOPEE_PARTNER_ID }}
+          SHOPEE_PARTNER_KEY: ${{ secrets.SHOPEE_PARTNER_KEY }}
