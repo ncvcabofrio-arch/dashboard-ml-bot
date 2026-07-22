@@ -17,7 +17,9 @@ import urllib.parse
 from datetime import datetime, timezone, timedelta
 
 HOST = "https://partner.shopeemobile.com"
-PID = int(os.environ["SHOPEE_PARTNER_ID"])
+# Live Partner ID — NÃO é secreto (aparece na URL de autorização). Fica fixo aqui de propósito:
+# se ficar nos Secrets do GitHub, o log "mascara" o número (vira ***) e o link sai quebrado.
+PID = int(os.environ.get("SHOPEE_PARTNER_ID") or "2039646")
 PKEY = os.environ["SHOPEE_PARTNER_KEY"].encode()
 REDIRECT = os.environ.get("SHOPEE_REDIRECT",
                           "https://painelbi.ncvcabofrio.workers.dev/shopee-callback")
