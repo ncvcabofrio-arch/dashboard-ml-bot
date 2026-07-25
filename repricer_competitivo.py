@@ -297,6 +297,12 @@ def sale_price(item_id, access):
         return None, ptipo
 
 
+def _tipo_anuncio(lt):
+    """gold_pro/gold_premium = Premium, gold_special/gold = Clássico."""
+    return {"gold_pro": "Premium", "gold_special": "Clássico",
+            "gold_premium": "Premium", "gold": "Clássico"}.get(lt, lt)
+
+
 def analisar(item_id, access, sid):
     st, it = rec.get(f"/items/{item_id}?include_attributes=all", access)
     if not isinstance(it, dict):
@@ -348,7 +354,8 @@ def analisar(item_id, access, sid):
             "grupo": grupo, "piso": piso, "piso_orig": piso_orig, "preco_cheio": round(p0, 2),
             "preco_venda": round(pv, 2), "promo": promo_ativa,
             "margem_cheio": round(m_cheio, 1), "preco_piso": pmin, "pma": pma, "catalog": catalog_listing,
-            "custo": custo, "frete": round(frete, 2), "cat": cat, "ltid": ltid}  # p/ avaliar campanhas
+            "custo": custo, "frete": round(frete, 2), "cat": cat, "ltid": ltid,
+            "tipo_anuncio": _tipo_anuncio(ltid), "catalog_pid": pid}  # p/ avaliar campanhas
 
     if not catalog_listing:
         m = MATCH.get(sku) or MATCH.get(item_id)   # sem SKU -> busca pelo item_id
@@ -414,7 +421,8 @@ def analisar(item_id, access, sid):
     winner = (ptw.get("winner") or {})
     reason = ptw.get("reason") or []
     base.update({"status": status, "price_to_win": alvo,
-                 "winner_price": winner.get("price"), "reason": ", ".join(reason)})
+                 "winner_price": winner.get("price"), "vinculado_mlb": winner.get("item_id"),
+                 "reason": ", ".join(reason)})
 
     if status == "winning":
         precos = concorrentes(pid, sid, access)
