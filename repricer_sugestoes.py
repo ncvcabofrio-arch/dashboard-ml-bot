@@ -394,6 +394,16 @@ def cand_vigente(o, access):
 def _rotulo(a):
     o = a["o"]
     return f"{o.get('name') or o.get('type') or '?'} R${a['pb']:.2f}->{a['margem']:.1f}%"
+def _oferta_dict(a, ativa_flag, recomendada_flag, acao=None):
+    """Uma linha da lista de campanhas mostrada na tela expandida do painel."""
+    o = a["o"]
+    return {"nome": o.get("name"), "tipo": o.get("type"),
+            "rebate": a.get("mp"), "desconto_vendedor": a.get("sp"),
+            "preco": a.get("pb"), "inicio": _data_promo(o, "start_date"),
+            "fim": _data_promo(o, "finish_date", "end_date"),
+            "margem": a.get("margem"), "ativa": ativa_flag,
+            "recomendada": recomendada_flag,
+            "acao": (acao if recomendada_flag else None)}
 def processar_item(item_id, access, sid, detalhes):
     """Processa UM anúncio (só leitura) e devolve o dict da sugestão, ou None.
     Sem gravar no banco — é chamado em paralelo por várias threads."""
@@ -465,6 +475,11 @@ def processar_item(item_id, access, sid, detalhes):
             _rotulo(a) + (" (ok)" if a["margem"] >= piso else f" (<{piso:.0f}%)")
             for a in sorted(cand, key=lambda x: x["pb"]) if a is not alvo
         )
+        ofertas_lst = []
+        if ativa:
+            ofertas_lst.append(_oferta_dict(ativa, True, acao == "manter", acao))
+        for _c in sorted(cand, key=lambda x: (x["margem"] if x.get("margem") is not None else -999), reverse=True):
+            ofertas_lst.append(_oferta_dict(_c, False, _c is alvo, acao))
         sug = {
             "seller_id": str(sid),
             "item_id": item_id,
@@ -484,6 +499,7 @@ def processar_item(item_id, access, sid, detalhes):
             "grupo": grupo,
             "margem_minima": piso,
             "alternativas": max(len(seguras) - (1 if alvo in seguras else 0), 0),
+            "ofertas": ofertas_lst,
             "rejeitadas": rejeitadas,
             "status": "ok" if acao == "manter" else "pendente",
         }
@@ -533,22 +549,7 @@ def gravar_em_lote(sugs, tam=200):
             sb.table("repricer_sugestoes").insert(sugs[i:i + tam]).execute()
         except Exception as e:
             print(f"  erro ao gravar lote {i}: {e}", flush=True)
-def _grava_status_sug(estado, resumo=None):
-    """Marca no repricer_status que as SUGESTÕES estão rodando/concluídas. Serve pro
-    aplicador NÃO reprocessar a fila de retry em cima de sugestão meio-escrita."""
-    try:
-        agora = datetime.now(timezone.utc).isoformat()
-        row = {"workflow": "sugestoes", "seller_id": SELLER_ID_FILTRO or "todas", "estado": estado}
-        if estado == "rodando":
-            row["inicio"], row["fim"], row["resumo"] = agora, None, None
-        else:
-            row["fim"], row["resumo"] = agora, resumo
-        sb.table("repricer_status").upsert(row, on_conflict="workflow").execute()
-    except Exception as e:
-        print("Aviso: não gravei status de sugestões:", e, flush=True)
-
 def main():
-    _grava_status_sug("rodando")
     preload()
     total_sug = 0
     contadores = {"entrar": 0, "trocar": 0, "sair": 0, "manter": 0}
@@ -597,10 +598,5 @@ def main():
             print("Aviso: não consegui gravar sem_custo:", e, flush=True)
     resumo = ", ".join(f"{k}: {v}" for k, v in contadores.items())
     print(f"\n=== {total_sug} registros gravados ({resumo}) | {len(SEM_CUSTO)} sem custo — nada foi aplicado no ML ===", flush=True)
-    _grava_status_sug("concluido", f"{total_sug} sugestões ({resumo})")
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception:
-        _grava_status_sug("concluido", "erro na execução")
-        raise
+    main()
