@@ -33,6 +33,9 @@ DEBUG = (os.environ.get("DEBUG") or "") == "1"
 DEBUG_ITEM = (os.environ.get("DEBUG_ITEM") or "").strip()   # analisa só 1 item, verboso
 NORM_CUSTO = {}   # sku normalizado -> sku original na tabela produtos (só p/ DIAGNÓSTICO)
 MEUS_SELLERS = set()   # TODOS os seus seller_ids (as 3 contas) — nunca competir consigo mesmo
+# Contas que NASCEM com a precificação automática desligada em todos os anúncios (ex.: CF).
+# No resto funcionam igual às outras; a análise continua aparecendo. Env sobrepõe (vírgula).
+DEFAULT_OFF_SELLERS = set(filter(None, (os.environ.get("DEFAULT_OFF_SELLERS") or "177795203").split(",")))
 MATCH = {}             # item_id -> {product_ids, confianca, tipo} (mapa confirmado com IA)
 CONTROLE = {}          # item_id -> {ativo, piso_override, undercut_override, pma, preco_manual} (painel)
 CONFIG = {}            # chave -> valor (regras globais editáveis no painel: undercut, piso etc.)
@@ -323,9 +326,12 @@ def analisar(item_id, access, sid):
     pid = it.get("catalog_product_id")
     catalog_listing = bool(it.get("catalog_listing"))   # SÓ True = compete de fato no catálogo
     ctl = CONTROLE.get(item_id) or {}
-    if ctl.get("ativo") is False:                        # liga/desliga por anúncio (painel)
-        return {"item_id": item_id, "titulo": it.get("title"), "sku": sku, "aq": raw_aq,
-                "acao": "desligado", "detalhe": "robô desligado neste anúncio (controle)"}
+    # DESLIGADO não para mais a análise (igual ao Pricebot): continua LENDO e mostrando tudo
+    # (preço, status, price_to_win, promoções); só NÃO aplica.
+    if str(sid) in DEFAULT_OFF_SELLERS:
+        desligado = (ctl.get("ativo") is not True)   # nasce desligado; liga só se você ligar no painel
+    else:
+        desligado = (ctl.get("ativo") is False)
     uc = (float(ctl["undercut_override"]) if ctl.get("undercut_override") is not None
           else float(CONFIG.get("undercut") or UNDERCUT))
     pma = float(ctl["pma"]) if ctl.get("pma") is not None else None
@@ -354,6 +360,7 @@ def analisar(item_id, access, sid):
     base = {"item_id": item_id, "titulo": it.get("title"), "sku": sku, "aq": raw_aq,
             "grupo": grupo, "piso": piso, "piso_orig": piso_orig, "preco_cheio": round(p0, 2),
             "preco_venda": round(pv, 2), "margem_venda": round(m_venda, 1), "promo": promo_ativa,
+            "desligado": desligado,
             "margem_cheio": round(m_cheio, 1), "preco_piso": pmin, "pma": pma, "catalog": catalog_listing,
             "custo": custo, "frete": round(frete, 2), "cat": cat, "ltid": ltid,
             "tipo_anuncio": _tipo_anuncio(ltid), "catalog_pid": pid}  # p/ avaliar campanhas
