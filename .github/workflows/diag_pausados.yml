@@ -1,0 +1,40 @@
+name: Diag - Pausados (de onde vêm)
+
+# Só leitura. Abre os anúncios com status=paused no ML e mostra o motivo real
+# (sub_status), quantos têm SKU e quantos o robô já viu. Nada é escrito.
+# Rode em Actions -> "Diag - Pausados (de onde vêm)" -> Run workflow, e leia o log.
+on:
+  workflow_dispatch:
+    inputs:
+      seller_id:
+        description: "Conta: 471489691=Cabo Frio, 3244206480=MG, 177795203=CF"
+        type: string
+        required: false
+        default: "177795203"
+
+concurrency:
+  group: ml-diag-pausados
+  cancel-in-progress: false
+
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Instalar dependencias
+        run: pip install requests supabase
+
+      - name: Rodar diagnostico
+        env:
+          ML_CLIENT_ID:     ${{ secrets.ML_CLIENT_ID }}
+          ML_CLIENT_SECRET: ${{ secrets.ML_CLIENT_SECRET }}
+          ML_REFRESH_TOKEN: ${{ secrets.ML_REFRESH_TOKEN }}
+          SUPABASE_URL:     ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY:     ${{ secrets.SUPABASE_KEY }}
+          SELLER_ID:        ${{ github.event.inputs.seller_id || '177795203' }}
+        run: python diag_pausados.py
