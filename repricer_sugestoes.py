@@ -412,6 +412,82 @@ def _oferta_dict(a, ativa_flag, recomendada_flag, acao=None, access=None):
             "margem": a.get("margem"), "ativa": ativa_flag,
             "recomendada": recomendada_flag,
             "acao": (acao if recomendada_flag else None)}
+# ---- campanhas de MARKETPLACE do item (SMART/PRICE_MATCHING/SELLER_CAMPAIGN) ----
+# O endpoint por item (/seller-promotions/items/{id}) NÃO traz as campanhas de
+# marketplace tipo SMART ("TOP SELLERS"...). Elas só aparecem varrendo as campanhas
+# do vendedor e perguntando os itens de cada uma. Isto é SÓ pra EXIBIÇÃO no painel
+# (igual ao Pricebot) — não altera a decisão do robô. Só leitura.
+_CAMP_MKT = {"SMART", "PRICE_MATCHING", "PRICE_MATCHING_MELI_ALL", "SELLER_CAMPAIGN"}
+_promos_vend_cache = {}
+_promos_vend_lock = threading.Lock()
+def _promos_vendedor_cached(seller_id, access):
+    """Lista de campanhas do vendedor com cache por conta (a MESMA lista vale pra
+    todos os itens da conta — evita repetir a paginação a cada anúncio)."""
+    with _promos_vend_lock:
+        if seller_id in _promos_vend_cache:
+            return _promos_vend_cache[seller_id]
+    lst = promocoes_do_vendedor(seller_id, access)
+    with _promos_vend_lock:
+        _promos_vend_cache[seller_id] = lst
+    return lst
+def campanhas_do_item(item_id, seller_id, access):
+    """Ofertas do item em TODAS as campanhas de marketplace do vendedor. Devolve
+    objetos 'oferta' no mesmo formato das demais (name/type/status/price/
+    original_price/datas), com a data ESPECÍFICA do item (não a janela ampla)."""
+    out = []
+    if not seller_id:
+        return out
+    for pr in _promos_vendedor_cached(seller_id, access):
+        stp = (pr.get("status") or "").lower()
+        if stp not in ("started", "pending"):
+            continue
+        ptipo = (pr.get("type") or "").upper()
+        pid = pr.get("id")
+        if not pid or ptipo not in _CAMP_MKT:   # DEAL/DOD/LIGHTNING já vêm pelo endpoint do item
+            continue
+        st, d = get(f"/seller-promotions/promotions/{pid}/items"
+                    f"?promotion_type={ptipo}&item_id={item_id}&app_version=v2", access)
+        res = (d.get("results") if isinstance(d, dict) else None) or []
+        for it in res:
+            if str(it.get("id")) != str(item_id):
+                continue
+            sti = (it.get("status") or "").lower()
+            if sti == "finished":                # item saiu da campanha — não mostra
+                continue
+            preco = (it.get("total_price_for_boosted_offer") if it.get("boosted_offer") else None) \
+                    or it.get("price")
+            out.append({
+                "id": pid, "type": ptipo, "name": pr.get("name"), "status": sti,
+                "ref_id": it.get("offer_id") or it.get("ref_id"),
+                "price": preco, "original_price": it.get("original_price"),
+                "meli_percentage": it.get("meli_percentage"),
+                "seller_percentage": it.get("seller_percentage"),
+                "start_date": it.get("start_date"),
+                "end_date": it.get("end_date") or it.get("finish_date"),
+            })
+    return out
+def _display_row(o, ativa_flag, access):
+    """Linha de exibição quando a margem NÃO é calculável (sem preço/preço original).
+    Mantém o mesmo shape que _oferta_dict devolve pro painel."""
+    ini = _data_promo(o, "start_date")
+    fim = _data_promo(o, "finish_date", "end_date")
+    if (ini is None or fim is None) and access is not None:
+        det = _promo_detalhe(o.get("id"), o.get("type"), access)
+        if isinstance(det, dict):
+            ini = ini or _data_promo(det, "start_date")
+            fim = fim or _data_promo(det, "finish_date", "end_date")
+    def _f(v):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+    return {"nome": o.get("name"), "tipo": o.get("type"),
+            "rebate": _f(o.get("meli_percentage")), "desconto_vendedor": _f(o.get("seller_percentage")),
+            "preco": preco_oferta(o), "inicio": ini, "fim": fim,
+            "margem": None, "ativa": ativa_flag, "recomendada": False, "acao": None}
+def _chave_oferta(o):
+    """Identidade de uma oferta pra deduplicar (mesma promoção = tipo + id)."""
+    return (str(o.get("type") or "").upper(), str(o.get("id") or o.get("promotion_id") or ""))
 def processar_item(item_id, access, sid, detalhes):
     """Processa UM anúncio (só leitura) e devolve o dict da sugestão, ou None.
     Sem gravar no banco — é chamado em paralelo por várias threads."""
@@ -483,11 +559,37 @@ def processar_item(item_id, access, sid, detalhes):
             _rotulo(a) + (" (ok)" if a["margem"] >= piso else f" (<{piso:.0f}%)")
             for a in sorted(cand, key=lambda x: x["pb"]) if a is not alvo
         )
-        ofertas_lst = []
+        # ---- LISTA DO PAINEL: mostra TODAS as campanhas (igual ao Pricebot) ----
+        # A DECISÃO do robô (acima) não muda — ela continua só sobre 'ativa'/'cand'.
+        # Aqui só somamos, pra EXIBIR, as campanhas de marketplace que o endpoint
+        # por item não traz (SMART/TOP SELLERS etc.), com a data específica do item.
+        disp = {}
         if ativa:
-            ofertas_lst.append(_oferta_dict(ativa, True, acao == "manter", acao, access))
-        for _c in sorted(cand, key=lambda x: (x["margem"] if x.get("margem") is not None else -999), reverse=True):
-            ofertas_lst.append(_oferta_dict(_c, False, _c is alvo, acao, access))
+            disp[_chave_oferta(ativa["o"])] = _oferta_dict(ativa, True, acao == "manter", acao, access)
+        for _c in cand:
+            k = _chave_oferta(_c["o"])
+            if k not in disp:
+                disp[k] = _oferta_dict(_c, False, _c is alvo, acao, access)
+        try:
+            for o in campanhas_do_item(item_id, sid, access):
+                k = _chave_oferta(o)
+                ativa_o = eh_ativa(o)
+                ev = avaliar(o, cat, ltid, access, frete, custo)   # margem se der (sem imposto, como hoje)
+                row = _oferta_dict(ev, ativa_o, False, None, access) if ev else _display_row(o, ativa_o, access)
+                if k in disp:                                       # já listada: completa a data específica do item
+                    if disp[k].get("inicio") is None:
+                        disp[k]["inicio"] = row.get("inicio")
+                    if disp[k].get("fim") is None:
+                        disp[k]["fim"] = row.get("fim")
+                else:
+                    disp[k] = row
+        except Exception as e:
+            print(f"   (campanhas mkt {item_id} falhou: {e})", flush=True)
+        # ativas primeiro; depois maior margem (as sem margem vão pro fim)
+        ofertas_lst = sorted(
+            disp.values(),
+            key=lambda r: (0 if r.get("ativa") else 1,
+                           -(r["margem"] if r.get("margem") is not None else -999)))
         sug = {
             "seller_id": str(sid),
             "item_id": item_id,
