@@ -158,6 +158,26 @@ def todos_ativos(sid, access):
     if MAX_ITENS:
         out = out[:MAX_ITENS]
     return out, total
+def pausados_ids(sid, access):
+    """item_ids com status PAUSED no Mercado Livre — alimenta a fila 'Pausados' do painel.
+    Só coleta ids (não precifica, não altera nada no ML)."""
+    ids, offset = [], 0
+    while True:
+        st, d = get(f"/users/{sid}/items/search?status=paused&limit=50&offset={offset}", access)
+        if not isinstance(d, dict):
+            break
+        res = d.get("results") or []
+        ids.extend(res)
+        total = (d.get("paging") or {}).get("total")
+        offset += 50
+        if not res or offset >= 2000 or (total is not None and offset >= total):
+            break
+    seen, out = set(), []
+    for i in ids:
+        if i not in seen:
+            seen.add(i)
+            out.append(i)
+    return out
 def custo_de(sku):
     return CUSTOS.get(sku) if sku else None
 def custo_efetivo(item_id, sku):
