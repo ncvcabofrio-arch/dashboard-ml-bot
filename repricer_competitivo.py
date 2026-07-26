@@ -349,10 +349,11 @@ def analisar(item_id, access, sid):
     if pma is not None:                          # PMA (MAP): nunca anuncia abaixo disso
         pmin = pma if pmin is None else max(pmin, pma)
     m_cheio, _, _ = margem_no_preco(p0, cat, ltid, frete, custo, access)
+    m_venda, _, _ = margem_no_preco(pv, cat, ltid, frete, custo, access)   # margem no preço REAL atual
 
     base = {"item_id": item_id, "titulo": it.get("title"), "sku": sku, "aq": raw_aq,
             "grupo": grupo, "piso": piso, "piso_orig": piso_orig, "preco_cheio": round(p0, 2),
-            "preco_venda": round(pv, 2), "promo": promo_ativa,
+            "preco_venda": round(pv, 2), "margem_venda": round(m_venda, 1), "promo": promo_ativa,
             "margem_cheio": round(m_cheio, 1), "preco_piso": pmin, "pma": pma, "catalog": catalog_listing,
             "custo": custo, "frete": round(frete, 2), "cat": cat, "ltid": ltid,
             "tipo_anuncio": _tipo_anuncio(ltid), "catalog_pid": pid}  # p/ avaliar campanhas
