@@ -5,7 +5,6 @@ Lê a sonda + as vendas recentes + o controle por anúncio, e ACERTA o estado de
   perdendo + VENDENDO    -> não desconta; se já tiver desconto nosso, REMOVE (protege margem)
   ganhando / barato demais -> sem desconto; remove o nosso se houver
 Nunca mexe no preço do anúncio. Padrão = SIMULAÇÃO. Só escreve com CONFIRMA=SIM e ATIVO=SIM.
-
 Trilhos: conta travada · teto de CRIAÇÕES/rodada · anti-salto · piso do grupo (+PMA) · gate de
 vendas (2 dias) · auto-exclusão das suas contas · botão de pânico · log de auditoria · Telegram.
 As REMOÇÕES (que protegem margem) não contam no teto.
@@ -18,23 +17,16 @@ import requests
 import repricer_sugestoes as rec
 import repricer_competitivo as sonda
 from ml_auth import obter_access
-
-
 def _rs(v):
     """R$ no formato BR (1234.5 -> '1.234,50'). Sem o 'R$' na frente."""
     try:
         return format(float(v), ",.2f").replace(",", "X").replace(".", ",").replace("X", ".")
     except (TypeError, ValueError):
         return str(v)
-
-
 def _agora_iso():
     return datetime.now(timezone.utc).isoformat()
-
 # --- API da Central de Promoções (autossuficiente: NÃO depende do repricer_aplicar) ---
 STATUS_ATIVA = {"started", "active", "in_progress", "ongoing", "pending"}
-
-
 def req(method, path, access, body=None, tent=2):
     h = {"Authorization": "Bearer " + access, "Content-Type": "application/json"}
     r = None
@@ -47,18 +39,13 @@ def req(method, path, access, body=None, tent=2):
         return r.status_code, r.json()
     except Exception:
         return r.status_code, (r.text if r is not None else None)
-
-
 def eh_ativa(o):
     if (o.get("status") or "").lower() in STATUS_ATIVA:
         return True
     return str(o.get("ref_id") or "").upper().startswith("OFFER-")
-
-
 def promos_do_item(item_id, access):
     st, d = req("GET", f"/seller-promotions/items/{item_id}?app_version=v2", access)
     return d if isinstance(d, list) else []
-
 SELLER_ID = (os.environ.get("SELLER_ID") or "471489691").strip()   # Cabo Frio por padrão
 MAX_ITENS = int(os.environ.get("MAX_ITENS", "0"))                    # 0 = todos
 WORKERS = int(os.environ.get("WORKERS", "8"))                        # análise em paralelo
@@ -82,28 +69,22 @@ SEMC_PCT = 3.0         # quanto sobe (e desce no passo atrás), em %
 SEMC_PAROU_DIAS = 2    # dias sem vender (desde a última subida) que contam como "parou" -> passo atrás
 SEMC_CAIU_PCT = 50.0   # "caiu o ritmo": pedidos/dia depois da subida < esse % do que era antes -> passo atrás
 SEMC_COOLDOWN_DIAS = 7  # anti-loop: depois de um passo atrás, espera isso antes de poder subir de novo
-
-
 def _num(v, tipo, padrao):
     try:
         return tipo(v)
     except (TypeError, ValueError):
         return padrao
-
-
 def resolver_config():
     """Regras globais: input do workflow (env, por rodada) > painel (repricer_config) > default."""
     global MAX_ALTERACOES, MAX_DROP_PCT, DIAS, VENDAS_DIAS, VENDAS_MIN
     global SUBIR_ATIVO, SUBIR_PASSO_PCT, SUBIR_MIN_RS, SUBIR_EXIGE_VENDA
     global SEMC_ATIVO, SEMC_PEDIDOS, SEMC_PCT, SEMC_PAROU_DIAS, SEMC_CAIU_PCT, SEMC_COOLDOWN_DIAS
     C = sonda.CONFIG
-
     def r(env_name, chave, padrao, tipo):
         v = os.environ.get(env_name)
         if v is None or v == "":
             v = C.get(chave)
         return _num(v, tipo, padrao) if v not in (None, "") else padrao
-
     # com limites sãos: um valor torto (ex.: conta no campo errado) é ignorado, não quebra
     MAX_ALTERACOES = max(0, r("MAX_ALTERACOES", "teto_alteracoes", 0, int))
     MAX_DROP_PCT = max(0.0, min(r("MAX_DROP_PCT", "anti_salto_pct", 35.0, float), 100.0))
@@ -123,13 +104,10 @@ def resolver_config():
     SEMC_PAROU_DIAS = max(1, r("SEMC_PAROU_DIAS", "semc_parou_dias", 2, int))
     SEMC_CAIU_PCT = max(0.0, min(r("SEMC_CAIU_PCT", "semc_caiu_pct", 50.0, float), 100.0))
     SEMC_COOLDOWN_DIAS = max(0, r("SEMC_COOLDOWN_DIAS", "semc_cooldown_dias", 7, int))
-
 ACOES_DESCONTO = {"descontar", "descontar_ean", "descontar_piso"}
 REMOVER_OK = {"subir_margem", "ja_competitivo", "manter_ganhando"}   # confiante que não precisa desconto
 _CANCEL = ("cancel",)   # só cancelada NÃO conta como venda (paid e partially_refunded contam)
 NOSSAS_PROMO = {"PRICE_DISCOUNT", "custom", "CUSTOM"}   # ofertas individuais (nossas); resto = campanha do ML
-
-
 def promo_estado(a):
     """(tem_pd, tem_outra) a partir do sale_price JÁ lido pela sonda — sem chamada extra.
     tem_pd = desconto nosso ativo; tem_outra = DEAL/campanha cofinanciada do ML."""
@@ -137,8 +115,6 @@ def promo_estado(a):
     if not p:
         return False, False
     return (p in NOSSAS_PROMO), (p not in NOSSAS_PROMO)
-
-
 def melhor_cofin(a, access):
     """Melhor promoção COFINANCIADA (candidata) por MARGEM %, respeitando o piso.
     Reusa o avaliar() do repricer_sugestoes (que já trata o meli_percentage — a parte
@@ -160,8 +136,6 @@ def melhor_cofin(a, access):
         if ev and ev["margem"] >= piso:
             seguras.append(ev)
     return max(seguras, key=lambda x: x["margem"]) if seguras else None   # BALIZADOR = margem %
-
-
 def telegram(msg):
     tok = os.environ.get("TELEGRAM_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN")
     chat = os.environ.get("TELEGRAM_CHAT_ID")
@@ -172,22 +146,16 @@ def telegram(msg):
                       json={"chat_id": chat, "text": msg}, timeout=15)
     except Exception:
         pass
-
-
 def logar(row):
     try:
         rec.sb.table("repricer_log").insert(row).execute()
     except Exception as e:
         print(f"   (log falhou: {e})", flush=True)
-
-
 def _estoque_int(v):
     try:
         return int(v)
     except (TypeError, ValueError):
         return None
-
-
 def base_log(sid, a):
     return {"seller_id": str(sid), "item_id": a.get("item_id"), "sku": a.get("sku"),
             "titulo": a.get("titulo"), "preco_cheio": a.get("preco_cheio"),
@@ -199,14 +167,10 @@ def base_log(sid, a):
             "vinculado_mlb": a.get("vinculado_mlb"),
             "preco_venda": a.get("preco_venda"), "margem_venda": a.get("margem_venda"),
             "status_ml": a.get("status"), "winner_price": a.get("winner_price")}
-
-
 def _datas():
     hoje = date.today()
     fim = hoje + timedelta(days=DIAS - 1)
     return f"{hoje.isoformat()}T00:00:00", f"{fim.isoformat()}T00:00:00"
-
-
 def carregar_vendas(sid, dias):
     """Unidades vendidas (NÃO canceladas) nos últimos `dias`, por item_id e por sku."""
     corte = (date.today() - timedelta(days=dias)).isoformat()
@@ -235,19 +199,13 @@ def carregar_vendas(sid, dias):
             break
         ini += 1000
     return por_item, por_sku
-
-
 def unidades(a, por_item, por_sku):
     u = por_item.get(a.get("item_id"), 0)
     if a.get("sku"):
         u = max(u, por_sku.get(a["sku"], 0))
     return u
-
-
 def _dia(s):
     return str(s)[:10] if s else ""   # 'YYYY-MM-DD' (compara por dia, sem dor de cabeça de fuso)
-
-
 def ultima_venda_dia(sid, dias=90):
     """Dia da venda mais recente (não cancelada) por item_id, nos últimos `dias`. Pra saber
     se houve venda DEPOIS da última subida de preço (só aí vale subir mais um degrau)."""
@@ -270,8 +228,6 @@ def ultima_venda_dia(sid, dias=90):
             break
         ini += 1000
     return it
-
-
 def ultimo_dia_acoes(sid, acoes, dias=90):
     """Dia da última vez (por item_id) que o robô APLICOU uma das `acoes` (repricer_log)."""
     corte = (date.today() - timedelta(days=dias)).isoformat()
@@ -291,12 +247,8 @@ def ultimo_dia_acoes(sid, acoes, dias=90):
             break
         ini += 1000
     return it
-
-
 def ultima_subida_dia(sid, dias=90):
     return ultimo_dia_acoes(sid, ("subir_preco",), dias)
-
-
 def vendas_pedidos_por_item(sid, dias=120):
     """Por item_id: lista de dias (ISO) dos PEDIDOS distintos (order_id, não cancelados) nos
     últimos `dias`. Usada na regra dos itens sem concorrente (a cada N pedidos, sobe)."""
@@ -319,8 +271,6 @@ def vendas_pedidos_por_item(sid, dias=120):
             break
         ini += 1000
     return {iid: sorted(od.values()) for iid, od in tmp.items()}
-
-
 def estado_promo(item_id, access):
     """(tem_pd, tem_outra): tem PRICE_DISCOUNT NOSSO ativo? tem OUTRA promoção ativa
     (DEAL ou campanha cofinanciada do ML)? Só mexemos no nosso PRICE_DISCOUNT."""
@@ -332,20 +282,14 @@ def estado_promo(item_id, access):
             else:
                 tem_outra = True
     return tem_pd, tem_outra
-
-
 def criar_desconto(item_id, deal_price, access):
     start, finish = _datas()
     body = {"deal_price": round(float(deal_price), 2), "start_date": start,
             "finish_date": finish, "promotion_type": "PRICE_DISCOUNT"}
     return req("POST", f"/seller-promotions/items/{item_id}?app_version=v2", access, body=body)
-
-
 def remover_desconto(item_id, access):
     return req("DELETE",
                f"/seller-promotions/items/{item_id}?promotion_type=PRICE_DISCOUNT&app_version=v2", access)
-
-
 def entrar_campanha(item_id, o, access):
     """Entra numa campanha cofinanciada do ML (candidata). Corpo: tipo + promotion_id + offer_id."""
     body = {"promotion_type": o.get("type"), "promotion_id": o.get("id")}
@@ -358,14 +302,10 @@ def entrar_campanha(item_id, o, access):
                 body[k] = o[k]
         st, resp = req("POST", f"/seller-promotions/items/{item_id}?app_version=v2", access, body=body)
     return st, resp
-
-
 def mudar_preco_lista(item_id, preco, access):
     """Muda o PREÇO DE TABELA (cheio) do anúncio. Só usado nos itens SEM concorrente, e só
     depois de você APROVAR pelo botão do Telegram. Nunca é chamado automático sem aprovação."""
     return req("PUT", f"/items/{item_id}", access, body={"price": round(float(preco), 2)})
-
-
 # ============ APROVAÇÃO POR BOTÃO NO TELEGRAM (subida de preço de lista) ============
 def telegram_botao(msg, aprov_id):
     """Manda a mensagem com os botões ✅/❌ e devolve o message_id (pra Edge Function editar)."""
@@ -385,8 +325,6 @@ def telegram_botao(msg, aprov_id):
         return (d.get("result") or {}).get("message_id")
     except Exception:
         return None
-
-
 def aprovacao_pendente(sid, item_id):
     """Já existe um pedido de aprovação em aberto (pendente/aprovada não aplicada) pra esse item?"""
     try:
@@ -396,8 +334,6 @@ def aprovacao_pendente(sid, item_id):
         return bool(d)
     except Exception:
         return True   # na dúvida, não duplica
-
-
 def criar_aprovacao(sid, a, pv, novo):
     """Cria a linha 'pendente' e manda o botão no Telegram. Não mexe em preço nenhum."""
     iid = a.get("item_id")
@@ -422,8 +358,6 @@ def criar_aprovacao(sid, a, pv, novo):
             rec.sb.table("repricer_aprovacoes").update({"message_id": str(mid), "chat_id": str(chat)}).eq("id", aprov_id).execute()
         except Exception:
             pass
-
-
 def aplicar_aprovacoes(sid, access):
     """No começo da rodada: aplica as subidas de lista que você APROVOU (status='aprovada')."""
     try:
@@ -453,8 +387,6 @@ def aplicar_aprovacoes(sid, access):
                    "motivo": f"lista aprovada: R${float(row.get('preco_atual') or 0):.2f}->R${float(novo):.2f}"})
         time.sleep(0.4)
     return n
-
-
 def _ritmo_caiu(datas, us, hoje):
     """True se o ritmo de pedidos DEPOIS da subida caiu abaixo de SEMC_CAIU_PCT% do de ANTES.
     Só julga com >=3 dias desde a subida (senão é cedo demais e vira falso positivo)."""
@@ -475,8 +407,6 @@ def _ritmo_caiu(datas, us, hoje):
     if rate_antes <= 0:
         return False
     return rate_dep < rate_antes * (SEMC_CAIU_PCT / 100.0)
-
-
 def passo_semc(a, sid, access, pedidos_map, sub_dia, passo_dia, cont):
     """Itens SEM concorrente (tipo confirmado no mapa): a cada SEMC_PEDIDOS pedidos desde a
     última subida, +SEMC_PCT%. Sobe por desconto se couber abaixo do cheio; se passaria do
@@ -499,7 +429,6 @@ def passo_semc(a, sid, access, pedidos_map, sub_dia, passo_dia, cont):
     pedidos_desde = sum(1 for d in datas if (not ref_mov) or d > ref_mov)
     # cooldown pós passo-atrás: se o último movimento foi um passo atrás e faz pouco tempo, não sobe
     em_cooldown = bool(up and up >= (us or "") and (hoje - date.fromisoformat(up)).days < SEMC_COOLDOWN_DIAS)
-
     # ---- SUBIR: a cada SEMC_PEDIDOS pedidos desde o último movimento (fora do cooldown) ----
     if pedidos_desde >= SEMC_PEDIDOS and not em_cooldown:
         novo = round(pv * (1 + SEMC_PCT / 100.0), 2)
@@ -534,7 +463,6 @@ def passo_semc(a, sid, access, pedidos_map, sub_dia, passo_dia, cont):
             criar_aprovacao(sid, a, pv, novo)
             cont["pede"] = cont.get("pede", 0) + 1
         return
-
     # ---- PASSO ATRÁS: parou OU caiu (só se subiu depois do último passo atrás) ----
     if us and (not up or us > up):
         try:
@@ -565,27 +493,22 @@ def passo_semc(a, sid, access, pedidos_map, sub_dia, passo_dia, cont):
             if ok:
                 cont["passo"] = cont.get("passo", 0) + 1
             return
-
-
 def main():
     if not ATIVO:
         print("⛔ ATIVO=NAO (botão de pânico) — nada será escrito. Saindo.", flush=True)
         telegram("⛔ Piloto: botão de pânico ligado. Nada foi feito.")
         return
-
     faltando = [fn for fn in ("carregar_match", "carregar_controle", "carregar_config",
                               "analisar", "sale_price", "UNDERCUT") if not hasattr(sonda, fn)]
     if faltando:
         print(f"⛔ repricer_competitivo.py DESATUALIZADO no repo (falta: {', '.join(faltando)}).", flush=True)
         print("   Suba a versão mais nova do repricer_competitivo.py JUNTO com este piloto.", flush=True)
         return
-
     rec.preload()
     sonda.carregar_match()
     sonda.carregar_controle()
     sonda.carregar_config()
     resolver_config()          # aplica as regras do painel (repricer_config)
-
     access = sid = None
     for seller_id, refresh in rec.contas():
         a, s, refresh = obter_access(rec.sb, seller_id, refresh)
@@ -595,22 +518,18 @@ def main():
     if not access:
         print(f"não autentiquei a conta {SELLER_ID}.", flush=True)
         return
-
     modo = "AO VIVO" if CONFIRMA else "SIMULAÇÃO"
     teto_txt = "sem teto" if MAX_ALTERACOES <= 0 else f"teto {MAX_ALTERACOES}/rodada"
     uc_txt = sonda.CONFIG.get("undercut") or sonda.UNDERCUT
     print(f"===== PILOTO | conta {sid} | {modo} | {teto_txt} | anti-salto {MAX_DROP_PCT:.0f}% | "
           f"gate vendas {VENDAS_MIN}u/{VENDAS_DIAS}d | UNDERCUT R${float(uc_txt):.0f} =====", flush=True)
-
     if CONFIRMA and SEMC_ATIVO:                 # aplica as subidas de lista que você aprovou no botão
         n_apr = aplicar_aprovacoes(sid, access)
         if n_apr:
             print(f"   ({n_apr} subida(s) de lista aprovada(s) aplicada(s))", flush=True)
-
     todos, _ = rec.todos_ativos(sid, access)
     if MAX_ITENS:
         todos = todos[:MAX_ITENS]
-
     por_item, por_sku = carregar_vendas(sid, VENDAS_DIAS)
     venda_dia = ultima_venda_dia(sid) if SUBIR_ATIVO and SUBIR_EXIGE_VENDA else {}
     subida_dia = ultima_subida_dia(sid) if SUBIR_ATIVO and SUBIR_EXIGE_VENDA else {}
@@ -618,7 +537,6 @@ def main():
     pedidos_map  = vendas_pedidos_por_item(sid) if SEMC_ATIVO else {}                       # sem-concorrente
     sub_dia_semc = ultimo_dia_acoes(sid, ("subir_semc", "subir_lista")) if SEMC_ATIVO else {}
     passo_dia    = ultimo_dia_acoes(sid, ("passo_atras",)) if SEMC_ATIVO else {}
-
     def _an(iid):
         try:
             a = sonda.analisar(iid, access, sid)
@@ -630,7 +548,6 @@ def main():
             return None
     with ThreadPoolExecutor(max_workers=WORKERS) as ex:   # análise em paralelo (grande ganho)
         analises = [a for a in ex.map(_an, todos) if a]
-
     cont = {"criado": 0, "removido": 0, "vende": 0, "barato": 0, "fila": 0, "campanha": 0,
             "subiu": 0, "semc": 0, "passo": 0, "pede": 0}
     criados = 0
@@ -644,24 +561,26 @@ def main():
         if a.get("desligado"):        # desligado (por anúncio ou conta): MOSTRA tudo, NÃO aplica
             logar({**base_log(sid, a), "acao": acao or "desligado", "aplicado": False, "modo": "insight"})
             continue
-        if acao == "sem_match":                 # itens sem concorrente -> regra própria (sobe por demanda)
-            if SEMC_ATIVO:
+        # MOSTRA TODOS OS ATIVOS no painel: os anúncios sem ação de preço (sem concorrência,
+        # sem catálogo, sem custo, sem estoque) entram como "insight" — o robô NÃO os precifica,
+        # mas passam a aparecer no Catálogo (com "—" onde não houver dado). Os sem_match ainda
+        # rodam a regra de demanda (passo_semc) para os confirmados "sem concorrente".
+        if acao in ("sem_match", "sem_custo", "sem_dado", "sem_estoque", "sem_concorrencia"):
+            logar({**base_log(sid, a), "acao": acao, "aplicado": False, "modo": "insight"})
+            if acao == "sem_match" and SEMC_ATIVO:
                 passo_semc(a, sid, access, pedidos_map, sub_dia_semc, passo_dia, cont)
             continue
         iid = a.get("item_id")
         tit = str(a.get("titulo"))[:26]
         u = unidades(a, por_item, por_sku)
-
         quer_desconto = acao in ACOES_DESCONTO
         remover_motivo = None
-
         # "perde no cheio": no preço CHEIO a gente perderia o buy box — concorrente (próprio)
         # ou price_to_win (catálogo) <= preço cheio. Aqui a venda vem DO desconto, então o gate
         # de vendas NÃO deve tirar o desconto (senão sobe o preço, perde a caixa e mata a venda).
         _p0 = a.get("preco_cheio")
         _conc = a.get("conc_min") or a.get("segundo") or a.get("price_to_win")
         perde_no_cheio = bool(_p0 and _conc and _conc <= _p0 + 0.01)
-
         if quer_desconto and u >= VENDAS_MIN and not perde_no_cheio:   # gate de vendas: gira -> não desconta (só se competitivo no cheio)
             quer_desconto = False
             remover_motivo = f"vende {u}u/{VENDAS_DIAS}d"
@@ -736,7 +655,6 @@ def main():
                                 criados += 1; cont["subiu"] += 1
                             time.sleep(0.4)
                             remover_motivo = None; continue
-
         if quer_desconto:
             alvo, p0 = a.get("alvo"), a.get("preco_cheio")
             if not alvo or not p0 or alvo <= 0:
@@ -754,11 +672,9 @@ def main():
                         else ("paga mais margem MAS fica acima do alvo -> usa desconto"
                               if cofin["margem"] > ma + 0.01 else "desconto próprio vence"))
                 camp_txt = f"  |  🎁 \"{_nome}\" R${cofin['pb']:.2f} margem {cofin['margem']:.1f}% -> {_tag}"
-
             tem_pd, tem_outra = promo_estado(a)           # do sale_price já lido (sem chamada extra)
             if tem_outra:                                 # já em campanha/DEAL do ML -> deixa quieto
                 logar({**row, "acao": "pulado_campanha", "aplicado": False, "modo": modo.lower()}); continue
-
             if usar_campanha:                             # ===== caminho CAMPANHA =====
                 o = cofin["o"]; _nome = o.get("name") or o.get("type")
                 rowc = {**base_log(sid, a), "acao": "entrar_campanha", "deal_price": cofin["pb"],
@@ -787,7 +703,6 @@ def main():
                     criados += 1; cont["criado"] += 1
                 time.sleep(0.4)
                 continue
-
             # ===== caminho DESCONTO PRÓPRIO =====
             if tem_pd:
                 continue                                  # já descontado por nós; ajuste fino fica pra depois
@@ -821,7 +736,6 @@ def main():
             if ok:
                 criados += 1; cont["criado"] += 1
             time.sleep(0.4)
-
         elif remover_motivo:
             tem_pd, _ = promo_estado(a)               # do sale_price já lido
             if not tem_pd:
@@ -853,7 +767,6 @@ def main():
             if ok:
                 cont["removido"] += 1
             time.sleep(0.3)
-
     resumo = (f"Piloto {modo} · conta {sid}: {cont['criado']} desconto(s) "
               f"{'criados' if CONFIRMA else 'a criar'}"
               + (f" (+{cont['fila']} na fila além do teto)" if cont['fila'] else "")
@@ -869,7 +782,5 @@ def main():
     telegram("🤖 " + resumo)
     if not CONFIRMA:
         print("SIMULAÇÃO: nada escrito. CONFIRMA=SIM (e ATIVO=SIM) pra valer.", flush=True)
-
-
 if __name__ == "__main__":
     main()
