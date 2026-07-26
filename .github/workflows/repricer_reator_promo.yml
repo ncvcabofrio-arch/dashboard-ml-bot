@@ -1,0 +1,35 @@
+name: Repricer - Reator de promocoes (tempo real)
+
+# Le as notificacoes de promocao que o webhook ja gravou em repricer_notificacoes
+# e atualiza SO os anuncios que mudaram no repricer_sugestoes. Somente leitura no ML.
+# Roda de 15 em 15 min. O "Sugestoes" completo (2-3x/dia) e a rede de seguranca.
+on:
+  schedule:
+    - cron: '*/15 * * * *'   # a cada 15 minutos
+  workflow_dispatch:          # botao manual, se quiser rodar na hora
+  repository_dispatch:
+    types: [processar_promo]  # (opcional) se um dia quiser que o webhook "acorde" este workflow
+
+concurrency:
+  group: ml-reator-promo
+  cancel-in-progress: false
+
+jobs:
+  reator:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Instalar dependencias
+        run: pip install requests supabase
+      - name: Rodar reator
+        env:
+          ML_CLIENT_ID:     ${{ secrets.ML_CLIENT_ID }}
+          ML_CLIENT_SECRET: ${{ secrets.ML_CLIENT_SECRET }}
+          ML_REFRESH_TOKEN: ${{ secrets.ML_REFRESH_TOKEN }}
+          SUPABASE_URL:     ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY:     ${{ secrets.SUPABASE_KEY }}
+          MAX_ITENS_REATOR: '600'
+        run: python repricer_reator_promo.py
