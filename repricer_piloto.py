@@ -640,7 +640,9 @@ def main():
         uc = 5.0
     for a in analises:
         acao = a.get("acao")
-        if acao == "desligado":
+        # desligado (por anúncio) ou conta somente-leitura: MOSTRA tudo no painel, mas NÃO aplica
+        if a.get("desligado"):        # desligado (por anúncio ou conta): MOSTRA tudo, NÃO aplica
+            logar({**base_log(sid, a), "acao": acao or "desligado", "aplicado": False, "modo": "insight"})
             continue
         if acao == "sem_match":                 # itens sem concorrente -> regra própria (sobe por demanda)
             if SEMC_ATIVO:
