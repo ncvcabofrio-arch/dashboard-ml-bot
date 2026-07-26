@@ -493,6 +493,25 @@ def passo_semc(a, sid, access, pedidos_map, sub_dia, passo_dia, cont):
             if ok:
                 cont["passo"] = cont.get("passo", 0) + 1
             return
+def snapshot_pausados(sid, access):
+    """Atualiza repricer_status_ml com os anúncios PAUSADOS no ML (fila 'Pausados' do painel).
+    Snapshot por conta: apaga os antigos desta conta e regrava os atuais. Só leitura no ML."""
+    try:
+        ids = rec.pausados_ids(sid, access)
+    except Exception as e:
+        print(f"   (pausados: falha ao listar no ML: {e})", flush=True)
+        return 0
+    try:
+        rec.sb.table("repricer_status_ml").delete().eq("seller_id", str(sid)).execute()
+        for i in range(0, len(ids), 300):
+            lote = [{"seller_id": str(sid), "item_id": iid} for iid in ids[i:i + 300]]
+            if lote:
+                rec.sb.table("repricer_status_ml").insert(lote).execute()
+        print(f"   ({len(ids)} anúncio(s) pausado(s) no ML → fila Pausados)", flush=True)
+        return len(ids)
+    except Exception as e:
+        print(f"   (pausados: tabela repricer_status_ml ausente/erro — rode o SQL: {e})", flush=True)
+        return 0
 def main():
     if not ATIVO:
         print("⛔ ATIVO=NAO (botão de pânico) — nada será escrito. Saindo.", flush=True)
@@ -530,6 +549,7 @@ def main():
     todos, _ = rec.todos_ativos(sid, access)
     if MAX_ITENS:
         todos = todos[:MAX_ITENS]
+    snapshot_pausados(sid, access)   # fila 'Pausados' do painel (status PAUSED no ML)
     por_item, por_sku = carregar_vendas(sid, VENDAS_DIAS)
     venda_dia = ultima_venda_dia(sid) if SUBIR_ATIVO and SUBIR_EXIGE_VENDA else {}
     subida_dia = ultima_subida_dia(sid) if SUBIR_ATIVO and SUBIR_EXIGE_VENDA else {}
