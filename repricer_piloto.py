@@ -197,7 +197,8 @@ def base_log(sid, a):
             "estoque": _estoque_int(a.get("aq")), "tipo_anuncio": a.get("tipo_anuncio"),
             "catalog": a.get("catalog"), "catalog_pid": a.get("catalog_pid"),
             "vinculado_mlb": a.get("vinculado_mlb"),
-            "preco_venda": a.get("preco_venda"), "margem_venda": a.get("margem_venda")}
+            "preco_venda": a.get("preco_venda"), "margem_venda": a.get("margem_venda"),
+            "status_ml": a.get("status"), "winner_price": a.get("winner_price")}
 
 
 def _datas():
