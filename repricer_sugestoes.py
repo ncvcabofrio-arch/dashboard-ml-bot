@@ -394,13 +394,21 @@ def cand_vigente(o, access):
 def _rotulo(a):
     o = a["o"]
     return f"{o.get('name') or o.get('type') or '?'} R${a['pb']:.2f}->{a['margem']:.1f}%"
-def _oferta_dict(a, ativa_flag, recomendada_flag, acao=None):
-    """Uma linha da lista de campanhas mostrada na tela expandida do painel."""
+def _oferta_dict(a, ativa_flag, recomendada_flag, acao=None, access=None):
+    """Uma linha da lista de campanhas mostrada na tela expandida do painel.
+    As datas das cofinanciadas costumam vir no DETALHE da promoção (não no
+    objeto da oferta), então buscamos lá quando não vêm direto (com cache)."""
     o = a["o"]
+    ini = _data_promo(o, "start_date")
+    fim = _data_promo(o, "finish_date", "end_date")
+    if (ini is None or fim is None) and access is not None:
+        det = _promo_detalhe(o.get("id"), o.get("type"), access)
+        if isinstance(det, dict):
+            ini = ini or _data_promo(det, "start_date")
+            fim = fim or _data_promo(det, "finish_date", "end_date")
     return {"nome": o.get("name"), "tipo": o.get("type"),
             "rebate": a.get("mp"), "desconto_vendedor": a.get("sp"),
-            "preco": a.get("pb"), "inicio": _data_promo(o, "start_date"),
-            "fim": _data_promo(o, "finish_date", "end_date"),
+            "preco": a.get("pb"), "inicio": ini, "fim": fim,
             "margem": a.get("margem"), "ativa": ativa_flag,
             "recomendada": recomendada_flag,
             "acao": (acao if recomendada_flag else None)}
@@ -477,9 +485,9 @@ def processar_item(item_id, access, sid, detalhes):
         )
         ofertas_lst = []
         if ativa:
-            ofertas_lst.append(_oferta_dict(ativa, True, acao == "manter", acao))
+            ofertas_lst.append(_oferta_dict(ativa, True, acao == "manter", acao, access))
         for _c in sorted(cand, key=lambda x: (x["margem"] if x.get("margem") is not None else -999), reverse=True):
-            ofertas_lst.append(_oferta_dict(_c, False, _c is alvo, acao))
+            ofertas_lst.append(_oferta_dict(_c, False, _c is alvo, acao, access))
         sug = {
             "seller_id": str(sid),
             "item_id": item_id,
