@@ -196,7 +196,8 @@ def base_log(sid, a):
             "piso": a.get("piso"), "grupo": a.get("grupo"), "motivo": a.get("detalhe"),
             "estoque": _estoque_int(a.get("aq")), "tipo_anuncio": a.get("tipo_anuncio"),
             "catalog": a.get("catalog"), "catalog_pid": a.get("catalog_pid"),
-            "vinculado_mlb": a.get("vinculado_mlb")}
+            "vinculado_mlb": a.get("vinculado_mlb"),
+            "preco_venda": a.get("preco_venda"), "margem_venda": a.get("margem_venda")}
 
 
 def _datas():
