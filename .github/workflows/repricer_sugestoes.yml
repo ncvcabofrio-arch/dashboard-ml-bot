@@ -5,6 +5,9 @@ name: Repricer - Sugestoes de promocoes (Fase 1)
 # Motor ampliado: olha TODOS os tipos de promoção (cofinanciada, DEAL, relâmpago, Pix...),
 # escolhe a melhor que respeita a margem mínima do grupo, e NUNCA sai de uma promoção —
 # só troca se houver uma melhor. As abaixo do piso ficam marcadas (alerta) pra você avaliar.
+#
+# AGENDADO 3x/dia (rede de segurança do reator): pega o que a notificação perder.
+# Quando roda agendado, vai SEM seller_id -> processa TODAS as contas.
 on:
   workflow_dispatch:
     inputs:
@@ -18,6 +21,8 @@ on:
         type: string
         required: false
         default: "17"
+  schedule:
+    - cron: '0 6,14,22 * * *'   # 3x/dia (UTC) — rede de segurança; agendado = todas as contas
 
 concurrency:
   group: ml-sugestoes        # pista PRÓPRIA — botão "Rodar sugestão" não fica preso atrás dos outros
@@ -28,14 +33,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
       - name: Instalar dependencias
         run: pip install requests supabase
-
       - name: Rodar recomendacoes
         env:
           ML_CLIENT_ID:     ${{ secrets.ML_CLIENT_ID }}
