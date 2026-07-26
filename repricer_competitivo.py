@@ -21,7 +21,7 @@ from concurrent.futures import ThreadPoolExecutor
 import repricer_sugestoes as rec
 from ml_auth import obter_access
 API = rec.API
-WORKERS = int(os.environ.get("WORKERS", "8"))   # itens processados em paralelo
+WORKERS = int(os.environ.get("WORKERS", "16"))   # itens processados em paralelo
 # TRAVA DE SEGURANÇA (gatilho): piso absoluto que nenhuma etiqueta pode furar.
 # Vazio = desligada (respeita as etiquetas como estão, mesmo negativas).
 _pmin_abs = (os.environ.get("PISO_MIN_ABS") or "").strip()
