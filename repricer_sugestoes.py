@@ -412,96 +412,10 @@ def _oferta_dict(a, ativa_flag, recomendada_flag, acao=None, access=None):
             "margem": a.get("margem"), "ativa": ativa_flag,
             "recomendada": recomendada_flag,
             "acao": (acao if recomendada_flag else None)}
-# ---- campanhas de MARKETPLACE do item (SMART/PRICE_MATCHING/SELLER_CAMPAIGN) ----
-# O endpoint por item (/seller-promotions/items/{id}) NÃO traz as campanhas de
-# marketplace tipo SMART ("TOP SELLERS"...). Elas só aparecem varrendo as campanhas
-# do vendedor e perguntando os itens de cada uma. Isto é SÓ pra EXIBIÇÃO no painel
-# (igual ao Pricebot) — não altera a decisão do robô. Só leitura.
-_CAMP_MKT = {"SMART", "PRICE_MATCHING", "PRICE_MATCHING_MELI_ALL", "SELLER_CAMPAIGN"}
-_CAMP_MAX_PAGINAS = 400          # teto de segurança por campanha (400*50 = 20 mil itens)
-_camp_itens_cache = {}           # seller_id -> {item_id: [oferta, ...]}
-_camp_itens_lock = threading.Lock()
-def _indexar_campanhas(seller_id, access):
-    """INDEXA, UMA VEZ por conta, os itens de cada campanha de marketplace do vendedor.
-    Em vez de perguntar 'este item está na campanha?' por anúncio (itens × campanhas =
-    milhares de chamadas, o que estourava a rodada), busca a lista de itens de CADA
-    campanha uma vez e monta um mapa item_id -> [ofertas]. Resultado em cache.
-    Só leitura. Se algo falhar, devolve o que conseguiu (nunca derruba a rodada).
-    O build inteiro roda sob lock (single-flight): se 2 threads pedirem ao mesmo
-    tempo, só UMA indexa e a outra espera e reusa — não multiplica a carga."""
-    with _camp_itens_lock:
-        if seller_id in _camp_itens_cache:
-            return _camp_itens_cache[seller_id]
-        mapa = _construir_indice_campanhas(seller_id, access)
-        _camp_itens_cache[seller_id] = mapa
-        return mapa
-def _construir_indice_campanhas(seller_id, access):
-    mapa = {}
-    try:
-        campanhas = [pr for pr in promocoes_do_vendedor(seller_id, access)
-                     if (pr.get("status") or "").lower() in ("started", "pending")
-                     and (pr.get("type") or "").upper() in _CAMP_MKT and pr.get("id")]
-        print(f"   [campanhas] conta {seller_id}: indexando {len(campanhas)} campanha(s) de marketplace", flush=True)
-        for pr in campanhas:
-            pid = pr.get("id")
-            ptipo = (pr.get("type") or "").upper()
-            nome = pr.get("name")
-            offset = 0
-            for _ in range(_CAMP_MAX_PAGINAS):
-                st, d = get(f"/seller-promotions/promotions/{pid}/items"
-                            f"?promotion_type={ptipo}&app_version=v2&limit=50&offset={offset}", access)
-                res = (d.get("results") if isinstance(d, dict) else None) or []
-                for it in res:
-                    iid = str(it.get("id") or "")
-                    sti = (it.get("status") or "").lower()
-                    if not iid or sti == "finished":
-                        continue
-                    preco = (it.get("total_price_for_boosted_offer") if it.get("boosted_offer") else None) \
-                            or it.get("price")
-                    mapa.setdefault(iid, []).append({
-                        "id": pid, "type": ptipo, "name": nome, "status": sti,
-                        "ref_id": it.get("offer_id") or it.get("ref_id"),
-                        "price": preco, "original_price": it.get("original_price"),
-                        "meli_percentage": it.get("meli_percentage"),
-                        "seller_percentage": it.get("seller_percentage"),
-                        "start_date": it.get("start_date"),
-                        "end_date": it.get("end_date") or it.get("finish_date"),
-                    })
-                total = (d.get("paging") or {}).get("total") if isinstance(d, dict) else None
-                offset += 50
-                if not res or (total is not None and offset >= total):
-                    break
-    except Exception as e:
-        print(f"   [campanhas] falha ao indexar conta {seller_id}: {e}", flush=True)
-    return mapa
-def campanhas_do_item(item_id, seller_id, access):
-    """Ofertas do item nas campanhas de marketplace (via índice em cache da conta).
-    Custo O(1) por anúncio — a busca pesada acontece uma vez só por conta."""
-    if not seller_id:
-        return []
-    return _indexar_campanhas(seller_id, access).get(str(item_id), [])
-def _display_row(o, ativa_flag, access):
-    """Linha de exibição quando a margem NÃO é calculável (sem preço/preço original).
-    Mantém o mesmo shape que _oferta_dict devolve pro painel."""
-    ini = _data_promo(o, "start_date")
-    fim = _data_promo(o, "finish_date", "end_date")
-    if (ini is None or fim is None) and access is not None:
-        det = _promo_detalhe(o.get("id"), o.get("type"), access)
-        if isinstance(det, dict):
-            ini = ini or _data_promo(det, "start_date")
-            fim = fim or _data_promo(det, "finish_date", "end_date")
-    def _f(v):
-        try:
-            return float(v)
-        except (TypeError, ValueError):
-            return None
-    return {"nome": o.get("name"), "tipo": o.get("type"),
-            "rebate": _f(o.get("meli_percentage")), "desconto_vendedor": _f(o.get("seller_percentage")),
-            "preco": preco_oferta(o), "inicio": ini, "fim": fim,
-            "margem": None, "ativa": ativa_flag, "recomendada": False, "acao": None}
-def _chave_oferta(o):
-    """Identidade de uma oferta pra deduplicar (mesma promoção = tipo + id)."""
-    return (str(o.get("type") or "").upper(), str(o.get("id") or o.get("promotion_id") or ""))
+# NOTA: as campanhas de marketplace (SMART/PRICE_MATCHING etc.) já vêm no endpoint
+# por item (/seller-promotions/items/{id}) como candidatas — não precisa varrer as
+# campanhas do vendedor. Pro PAINEL mostramos TODAS as candidatas (inclusive as
+# 'pending'/programadas); a trava de vigência vale só pra DECISÃO do robô (abaixo).
 def processar_item(item_id, access, sid, detalhes):
     """Processa UM anúncio (só leitura) e devolve o dict da sugestão, ou None.
     Sem gravar no banco — é chamado em paralelo por várias threads."""
@@ -543,11 +457,12 @@ def processar_item(item_id, access, sid, detalhes):
             if ev:
                 ativa = ev
                 break
-        cand = [avaliar(o, cat, ltid, access, frete, custo) for o in cand_raw]
-        cand = [c for c in cand if c]
+        cand_todas = [avaliar(o, cat, ltid, access, frete, custo) for o in cand_raw]
+        cand_todas = [c for c in cand_todas if c]     # TODAS as candidatas (p/ EXIBIR no painel)
         # NÃO recomenda promoção que ainda não está vigente (programada/futura) nem já encerrada.
         # cand_vigente consulta o detalhe da promoção quando a data não vem no candidato.
-        cand = [c for c in cand if cand_vigente(c["o"], access)]
+        # Esta trava vale só pra DECISÃO do robô — no painel mostramos todas (inclusive pending).
+        cand = [c for c in cand_todas if cand_vigente(c["o"], access)]
         seguras = [c for c in cand if c["margem"] >= piso]
         # ---- decide a ação (sua regra) ----
         # NUNCA sai de uma promoção que já está — mesmo abaixo do piso. Só TROCA se houver
@@ -573,37 +488,15 @@ def processar_item(item_id, access, sid, detalhes):
             _rotulo(a) + (" (ok)" if a["margem"] >= piso else f" (<{piso:.0f}%)")
             for a in sorted(cand, key=lambda x: x["pb"]) if a is not alvo
         )
-        # ---- LISTA DO PAINEL: mostra TODAS as campanhas (igual ao Pricebot) ----
-        # A DECISÃO do robô (acima) não muda — ela continua só sobre 'ativa'/'cand'.
-        # Aqui só somamos, pra EXIBIR, as campanhas de marketplace que o endpoint
-        # por item não traz (SMART/TOP SELLERS etc.), com a data específica do item.
-        disp = {}
+        # ---- LISTA DO PAINEL: mostra TODAS as campanhas do item (igual ao Pricebot) ----
+        # A DECISÃO do robô (acima) usa só 'cand' (vigentes). Aqui, pra EXIBIR, usamos
+        # 'cand_todas' — inclui as candidatas 'pending'/programadas (ex.: SMART "TOP SELLERS"
+        # que ainda não começou), que a trava de vigência tira da decisão mas o Pricebot mostra.
+        ofertas_lst = []
         if ativa:
-            disp[_chave_oferta(ativa["o"])] = _oferta_dict(ativa, True, acao == "manter", acao, access)
-        for _c in cand:
-            k = _chave_oferta(_c["o"])
-            if k not in disp:
-                disp[k] = _oferta_dict(_c, False, _c is alvo, acao, access)
-        try:
-            for o in campanhas_do_item(item_id, sid, access):
-                k = _chave_oferta(o)
-                ativa_o = eh_ativa(o)
-                ev = avaliar(o, cat, ltid, access, frete, custo)   # margem se der (sem imposto, como hoje)
-                row = _oferta_dict(ev, ativa_o, False, None, access) if ev else _display_row(o, ativa_o, access)
-                if k in disp:                                       # já listada: completa a data específica do item
-                    if disp[k].get("inicio") is None:
-                        disp[k]["inicio"] = row.get("inicio")
-                    if disp[k].get("fim") is None:
-                        disp[k]["fim"] = row.get("fim")
-                else:
-                    disp[k] = row
-        except Exception as e:
-            print(f"   (campanhas mkt {item_id} falhou: {e})", flush=True)
-        # ativas primeiro; depois maior margem (as sem margem vão pro fim)
-        ofertas_lst = sorted(
-            disp.values(),
-            key=lambda r: (0 if r.get("ativa") else 1,
-                           -(r["margem"] if r.get("margem") is not None else -999)))
+            ofertas_lst.append(_oferta_dict(ativa, True, acao == "manter", acao, access))
+        for _c in sorted(cand_todas, key=lambda x: (x["margem"] if x.get("margem") is not None else -999), reverse=True):
+            ofertas_lst.append(_oferta_dict(_c, False, _c is alvo, acao, access))
         sug = {
             "seller_id": str(sid),
             "item_id": item_id,
@@ -701,9 +594,6 @@ def main():
         cap = f" (varrendo {len(ids)}, limite de teste MAX_ITENS={MAX_ITENS})" if MAX_ITENS else ""
         print(f"itens ativos: {len(ids)} de {total if total is not None else '?'}{cap}", flush=True)
         detalhes = detalhes_itens(ids, access)
-        # indexa as campanhas de marketplace UMA vez (antes de paralelizar) — pra
-        # o painel mostrar todas as campanhas (SMART/TOP SELLERS) sem custo por item.
-        _indexar_campanhas(sid, access)
         # processa os itens em paralelo (só leitura); grava em lote no fim
         sugs = []
         with ThreadPoolExecutor(max_workers=WORKERS) as ex:
