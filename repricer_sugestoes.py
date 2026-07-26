@@ -28,6 +28,34 @@ PISOS = {}           # sku -> (margem_minima, nome_grupo)
 _pct_lock = threading.Lock()
 SEM_CUSTO = []       # anúncios com promoção disponível MAS sem custo cadastrado (pra cadastrar)
 _sc_lock = threading.Lock()
+def _estrategia_promo():
+    """Estratégia p/ ESCOLHER a promoção nos anúncios TRADICIONAIS (fora do catálogo):
+      - 'equilibrado' -> mira a MARGEM PADRÃO cadastrada (o piso do grupo) — recomendado
+      - 'agressivo'   -> maior desconto (menor margem, ainda >= piso)
+      - 'conservador' -> menor desconto (maior margem)
+    Vem do painel (repricer_config chave 'estrategia_promo') > env ESTRATEGIA_PROMO > default."""
+    v = os.environ.get("ESTRATEGIA_PROMO")
+    if not v:
+        try:
+            d = (sb.table("repricer_config").select("valor")
+                 .eq("chave", "estrategia_promo").limit(1).execute().data) or []
+            v = d[0]["valor"] if d else None
+        except Exception:
+            v = None
+    v = str(v or "equilibrado").strip().lower()
+    return v if v in ("equilibrado", "agressivo", "conservador") else "equilibrado"
+ESTRATEGIA = _estrategia_promo()
+def escolher_alvo(cands, piso, estrategia):
+    """Escolhe a promoção recomendada entre as candidatas seguras (>= piso), conforme a
+    estratégia. Só é usada nos anúncios TRADICIONAIS (sem concorrência de catálogo)."""
+    if not cands:
+        return None
+    if estrategia == "agressivo":
+        return min(cands, key=lambda a: a["margem"])       # maior desconto
+    if estrategia == "conservador":
+        return max(cands, key=lambda a: a["margem"])       # menor desconto
+    # equilibrado (padrão): margem mais próxima da margem padrão cadastrada (o piso)
+    return min(cands, key=lambda a: abs(a["margem"] - piso))
 def _todas_linhas(tabela, cols, passo=1000):
     """Lê a tabela INTEIRA paginando (PostgREST devolve no máx 1000 linhas por vez)."""
     linhas, ini = [], 0
@@ -61,7 +89,7 @@ def preload():
             PISOS[et["sku"]] = grupos[et["grupo_id"]]
     except Exception as e:
         print("Aviso: não consegui pré-carregar grupos:", e, flush=True)
-    print(f"pré-carregado: {len(CUSTOS)} custos, {len(PISOS)} etiquetas de grupo", flush=True)
+    print(f"pré-carregado: {len(CUSTOS)} custos, {len(PISOS)} etiquetas de grupo | estratégia: {ESTRATEGIA}", flush=True)
 def get(path, access, tent=3):
     r = None
     for i in range(tent):
@@ -221,7 +249,7 @@ def comissao(preco, cat, ltid, access):
 def detalhes_itens(ids, access):
     """Busca detalhes de VÁRIOS itens de uma vez (multiget, 20 por chamada)."""
     out = {}
-    attrs = "id,price,listing_type_id,category_id,seller_sku,seller_custom_field,title,status,available_quantity"
+    attrs = "id,price,listing_type_id,category_id,seller_sku,seller_custom_field,title,status,available_quantity,catalog_listing"
     for i in range(0, len(ids), 20):
         lote = ids[i:i + 20]
         st, d = get(f"/items?ids={','.join(lote)}&attributes={attrs}", access)
@@ -441,6 +469,7 @@ def processar_item(item_id, access, sid, detalhes):
         cat = it.get("category_id")
         sku = it.get("seller_sku") or it.get("seller_custom_field")
         titulo = it.get("title")
+        tradicional = not bool(it.get("catalog_listing"))   # tradicional = fora do catálogo
         custo = custo_efetivo(item_id, sku)
         if custo is None:
             # tem promoção disponível, mas sem custo não dá pra avaliar margem —
@@ -467,6 +496,10 @@ def processar_item(item_id, access, sid, detalhes):
         # ---- decide a ação (sua regra) ----
         # NUNCA sai de uma promoção que já está — mesmo abaixo do piso. Só TROCA se houver
         # uma que respeite o piso E pague MAIS (recebe maior). Senão, MANTÉM (com alerta se abaixo).
+        # ESCOLHA da promoção:
+        #  - TRADICIONAL (fora do catálogo): usa a ESTRATÉGIA configurada (equilibrado = mira a
+        #    margem padrão; agressivo = maior desconto; conservador = menor desconto).
+        #  - CATÁLOGO: mantém a lógica competitiva (menor preço / quem paga mais).
         alerta = None
         alvo = None
         if ativa:
@@ -475,13 +508,15 @@ def processar_item(item_id, access, sid, detalhes):
             melhores = [a for a in seguras if a["recebe"] > ativa["recebe"] + 0.01]
             if melhores:
                 acao = "trocar"
-                alvo = max(melhores, key=lambda a: a["recebe"])
+                alvo = (escolher_alvo(melhores, piso, ESTRATEGIA) if tradicional
+                        else max(melhores, key=lambda a: a["recebe"]))
             else:
                 acao = "manter"
         else:
             if seguras:
                 acao = "entrar"
-                alvo = min(seguras, key=lambda a: a["pb"])
+                alvo = (escolher_alvo(seguras, piso, ESTRATEGIA) if tradicional
+                        else min(seguras, key=lambda a: a["pb"]))
             else:
                 return None
         rejeitadas = " | ".join(
