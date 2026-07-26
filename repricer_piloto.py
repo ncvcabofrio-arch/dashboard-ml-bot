@@ -27,11 +27,12 @@ def _agora_iso():
     return datetime.now(timezone.utc).isoformat()
 # --- API da Central de Promoções (autossuficiente: NÃO depende do repricer_aplicar) ---
 STATUS_ATIVA = {"started", "active", "in_progress", "ongoing", "pending"}
+_HTTP = getattr(rec, "_SESSION", None) or requests.Session()   # keep-alive: reaproveita conexão do sonda
 def req(method, path, access, body=None, tent=2):
     h = {"Authorization": "Bearer " + access, "Content-Type": "application/json"}
     r = None
     for i in range(tent):
-        r = requests.request(method, rec.API + path, headers=h, json=body, timeout=25)
+        r = _HTTP.request(method, rec.API + path, headers=h, json=body, timeout=25)
         if r.status_code == 429 or r.status_code >= 500:
             time.sleep(0.6 * (i + 1)); continue
         break
@@ -48,7 +49,7 @@ def promos_do_item(item_id, access):
     return d if isinstance(d, list) else []
 SELLER_ID = (os.environ.get("SELLER_ID") or "471489691").strip()   # Cabo Frio por padrão
 MAX_ITENS = int(os.environ.get("MAX_ITENS", "0"))                    # 0 = todos
-WORKERS = int(os.environ.get("WORKERS", "8"))                        # análise em paralelo
+WORKERS = int(os.environ.get("WORKERS", "16"))                       # análise em paralelo
 CONFIRMA = (os.environ.get("CONFIRMA") or "").strip().upper() == "SIM"
 ATIVO = (os.environ.get("ATIVO") or "SIM").strip().upper() == "SIM"  # botão de pânico
 # regras globais — resolvidas em resolver_config() (input do workflow > painel/repricer_config > default)
@@ -493,22 +494,48 @@ def passo_semc(a, sid, access, pedidos_map, sub_dia, passo_dia, cont):
             if ok:
                 cont["passo"] = cont.get("passo", 0) + 1
             return
+def _detalhe_itens(ids, access, attrs="id,sub_status,seller_sku,seller_custom_field,title"):
+    """Detalhe de vários itens (lotes de 20 — limite do multiget do ML)."""
+    out = {}
+    for i in range(0, len(ids), 20):
+        chunk = ids[i:i + 20]
+        st, d = rec.get(f"/items?ids={','.join(chunk)}&attributes={attrs}", access)
+        if isinstance(d, list):
+            for r in d:
+                b = r.get("body") if isinstance(r, dict) else None
+                if isinstance(b, dict) and b.get("id"):
+                    out[b["id"]] = b
+    return out
 def snapshot_pausados(sid, access):
-    """Atualiza repricer_status_ml com os anúncios PAUSADOS no ML (fila 'Pausados' do painel).
+    """Atualiza repricer_status_ml com os anúncios PAUSADOS DE VERDADE no ML (fila 'Pausados').
+    Igual ao Pricebot: EXCLUI os 'out_of_stock' (sem estoque), que são a maioria e não são pausa real.
     Snapshot por conta: apaga os antigos desta conta e regrava os atuais. Só leitura no ML."""
     try:
         ids = rec.pausados_ids(sid, access)
     except Exception as e:
         print(f"   (pausados: falha ao listar no ML: {e})", flush=True)
         return 0
+    det = {}
+    try:
+        det = _detalhe_itens(ids, access)   # pra saber o sub_status (out_of_stock) e o SKU
+    except Exception as e:
+        print(f"   (pausados: detalhe falhou — gravando sem filtrar sem-estoque: {e})", flush=True)
+    reais = []
+    for iid in ids:
+        b = det.get(iid, {})
+        if det and "out_of_stock" in (b.get("sub_status") or []):
+            continue                        # sem estoque NÃO entra na fila Pausados
+        reais.append((iid, b))
     try:
         rec.sb.table("repricer_status_ml").delete().eq("seller_id", str(sid)).execute()
-        for i in range(0, len(ids), 300):
-            lote = [{"seller_id": str(sid), "item_id": iid} for iid in ids[i:i + 300]]
+        for i in range(0, len(reais), 300):
+            lote = [{"seller_id": str(sid), "item_id": iid,
+                     "sku": (b.get("seller_sku") or b.get("seller_custom_field")),
+                     "titulo": b.get("title")} for iid, b in reais[i:i + 300]]
             if lote:
                 rec.sb.table("repricer_status_ml").insert(lote).execute()
-        print(f"   ({len(ids)} anúncio(s) pausado(s) no ML → fila Pausados)", flush=True)
-        return len(ids)
+        print(f"   ({len(reais)} pausado(s) de verdade / {len(ids)} paused no ML → fila Pausados)", flush=True)
+        return len(reais)
     except Exception as e:
         print(f"   (pausados: tabela repricer_status_ml ausente/erro — rode o SQL: {e})", flush=True)
         return 0
