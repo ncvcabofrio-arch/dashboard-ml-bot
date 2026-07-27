@@ -234,8 +234,11 @@ def processar_loja(c):
             data = iso(o.get("create_time"))
             end = o.get("recipient_address") or {}
             for it in o.get("item_list", []):
-                # foto do produto (a Shopee manda em image_info.image_url)
+                # foto do produto (a Shopee manda em image_info.image_url).
+                # Forca https: o Android bloqueia imagem em http (cleartext).
                 img = ((it.get("image_info") or {}).get("image_url")) or None
+                if img and img.startswith("http://"):
+                    img = "https://" + img[len("http://"):]
                 vendas.append({
                     "order_sn": osn, "item_id": it.get("item_id"),
                     "model_id": it.get("model_id") or 0, "shop_id": shop_id,
