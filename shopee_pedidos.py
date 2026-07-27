@@ -223,7 +223,7 @@ def processar_loja(c):
         lote = lista[i:i + 50]
         d, err = shop_get("/api/v2/order/get_order_detail", ctx_token(ctx), shop_id, {
             "order_sn_list": ",".join(lote),
-            "response_optional_fields": "item_list,total_amount,order_status,create_time,buyer_username,payment_method",
+            "response_optional_fields": "item_list,total_amount,order_status,create_time,buyer_username,payment_method,recipient_address",
         })
         if err:
             falhas_det += 1
@@ -232,7 +232,10 @@ def processar_loja(c):
         for o in (d.get("response") or {}).get("order_list", []):
             osn = o.get("order_sn")
             data = iso(o.get("create_time"))
+            end = o.get("recipient_address") or {}
             for it in o.get("item_list", []):
+                # foto do produto (a Shopee manda em image_info.image_url)
+                img = ((it.get("image_info") or {}).get("image_url")) or None
                 vendas.append({
                     "order_sn": osn, "item_id": it.get("item_id"),
                     "model_id": it.get("model_id") or 0, "shop_id": shop_id,
@@ -244,6 +247,15 @@ def processar_loja(c):
                     "forma_pagamento": o.get("payment_method"),
                     "comprador": o.get("buyer_username"),
                     "total_pedido": o.get("total_amount"),
+                    # --- novos: foto e endereco, pro detalhe do pedido no app ---
+                    "thumbnail": img,
+                    "variacao": it.get("model_name") or None,
+                    "receptor_nome": end.get("name"),
+                    "receptor_telefone": end.get("phone"),
+                    "bairro": end.get("district"),
+                    "cep": end.get("zipcode"),
+                    "cidade": end.get("city"),
+                    "estado": end.get("state"),
                 })
     if vendas:
         sb_upsert("shopee_vendas", vendas, "order_sn,item_id,model_id")
