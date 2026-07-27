@@ -476,9 +476,17 @@ def _local_de_envio(ship_id, access, seller_id):
 
 
 def enriquecer_local(access, seller_id, limite=LIMITE_ENRICH):
-    """Preenche UF/estado/cidade do comprador (/shipments/{id}) — paralelo."""
-    pend = _select_all("vendas", "shipping_id",
-                       {"seller_id": seller_id, "status": "paid"}, is_null="uf")
+    """Preenche endereco do comprador (/shipments/{id}) — paralelo.
+
+    Busca dois grupos:
+      1) quem nao tem UF (pedido novo);
+      2) quem ja tem UF mas nao tem 'receptor_nome' — sao os pedidos que
+         entraram ANTES de passarmos a salvar bairro/CEP/recebedor/telefone.
+    Sem o item 2, esses pedidos antigos nunca ganhariam os campos novos.
+    """
+    base = {"seller_id": seller_id, "status": "paid"}
+    pend = _select_all("vendas", "shipping_id", base, is_null="uf")
+    pend += _select_all("vendas", "shipping_id", base, is_null="receptor_nome")
     envios = _distintos_envios(pend)[:limite]
     if not envios:
         return 0
