@@ -81,6 +81,15 @@ def sb_upsert(tabela, rows, conflito):
             raise RuntimeError(f"Supabase {tabela} HTTP {st}: {raw[:300]}")
 
 
+def sb_rpc(fn):
+    """Chama uma funcao do banco (ex.: a que joga shopee_vendas -> vendas)."""
+    st, raw = http("POST", f"{SB_URL}/rest/v1/rpc/{fn}", {
+        "apikey": SB_KEY, "Authorization": "Bearer " + SB_KEY,
+        "Content-Type": "application/json",
+    }, b"{}")
+    return st, raw
+
+
 def sb_patch(shop_id, fields):
     http("PATCH", f"{SB_URL}/rest/v1/shopee_contas?shop_id=eq.{shop_id}",
          {"apikey": SB_KEY, "Authorization": "Bearer " + SB_KEY,
@@ -287,6 +296,16 @@ def main():
         except Exception as e:
             print(f"ERRO na loja {c.get('shop_id')}: {e}")
     print(f"\nTOTAL: {tv} itens de venda, {tr} repasses.")
+
+    # ESSENCIAL: joga o que caiu em shopee_vendas/shopee_repasses para a tabela
+    # que o painel le. Sem isto os pedidos ficam parados e nao aparecem no BI.
+    # (o webhook ja faz isso a cada venda; aqui e pro lote/backfill)
+    st, raw = sb_rpc("shopee_atualizar_vendas")
+    if st < 300:
+        print("Painel atualizado (shopee_atualizar_vendas OK).")
+    else:
+        print(f"ATENCAO: shopee_atualizar_vendas falhou (HTTP {st}): {raw[:300]}")
+        print("  -> por isso os pedidos podem nao aparecer no painel.")
 
 
 if __name__ == "__main__":
