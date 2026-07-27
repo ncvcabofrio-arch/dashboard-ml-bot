@@ -1,17 +1,20 @@
-name: Repricer - Reator de promocoes (tempo real)
+name: Repricer - Reator (tempo real)
 
-# Le as notificacoes de promocao que o webhook ja gravou em repricer_notificacoes
-# e atualiza SO os anuncios que mudaram no repricer_sugestoes. Somente leitura no ML.
-# Roda de 15 em 15 min. O "Sugestoes" completo (2-3x/dia) e a rede de seguranca.
+# Reage às notificações do ML (promoções + status/estoque) e atualiza o painel.
+# NÃO aplica nada no ML. Roda sozinho no agendamento, no botão, ou via webhook
+# (repository_dispatch), que é o gatilho mais confiável.
+#
+# IMPORTANTE: pro AGENDAMENTO (schedule) funcionar, este arquivo PRECISA estar na
+# BRANCH PADRÃO do repo (main/master). Em outra branch, o cron nunca liga.
 on:
   schedule:
-    - cron: '*/15 * * * *'   # a cada 15 minutos
-  workflow_dispatch:          # botao manual, se quiser rodar na hora
+    - cron: '*/10 * * * *'          # a cada 10 min (rede de segurança; o Actions pode atrasar)
+  workflow_dispatch:                 # botão manual
   repository_dispatch:
-    types: [processar_promo]  # (opcional) se um dia quiser que o webhook "acorde" este workflow
+    types: [processar_promo]         # gatilho do webhook (tempo real de verdade)
 
 concurrency:
-  group: ml-reator-promo
+  group: ml-reator                   # não empilha rodadas
   cancel-in-progress: false
 
 jobs:
@@ -19,17 +22,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+
       - name: Instalar dependencias
         run: pip install requests supabase
+
       - name: Rodar reator
         env:
-          ML_CLIENT_ID:     ${{ secrets.ML_CLIENT_ID }}
-          ML_CLIENT_SECRET: ${{ secrets.ML_CLIENT_SECRET }}
-          ML_REFRESH_TOKEN: ${{ secrets.ML_REFRESH_TOKEN }}
-          SUPABASE_URL:     ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY:     ${{ secrets.SUPABASE_KEY }}
-          MAX_ITENS_REATOR: '600'
+          ML_CLIENT_ID:      ${{ secrets.ML_CLIENT_ID }}
+          ML_CLIENT_SECRET:  ${{ secrets.ML_CLIENT_SECRET }}
+          ML_REFRESH_TOKEN:  ${{ secrets.ML_REFRESH_TOKEN }}
+          SUPABASE_URL:      ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY:      ${{ secrets.SUPABASE_KEY }}
+          MAX_ITENS_REATOR:  '600'
         run: python repricer_reator_promo.py
