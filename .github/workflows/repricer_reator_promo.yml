@@ -20,6 +20,7 @@ concurrency:
 jobs:
   reator:
     runs-on: ubuntu-latest
+    timeout-minutes: 12              # trava de segurança: mata rodada travada e libera a fila
     steps:
       - uses: actions/checkout@v4
 
@@ -38,4 +39,5 @@ jobs:
           SUPABASE_URL:      ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY:      ${{ secrets.SUPABASE_KEY }}
           MAX_ITENS_REATOR:  '600'
+          WORKERS_REATOR:    '12'
         run: python repricer_reator_promo.py
