@@ -257,7 +257,12 @@ def preencher_thumbnails(linhas, access):
         for w in (resp or []):
             b = (w or {}).get("body") or {}
             if b.get("id"):
-                fotos[b["id"]] = b.get("secure_thumbnail") or b.get("thumbnail")
+                url = b.get("secure_thumbnail") or b.get("thumbnail") or ""
+                # o Android bloqueia imagem em http:// — o CDN do ML serve a
+                # mesma imagem em https, entao normalizamos sempre.
+                if url.startswith("http://"):
+                    url = "https://" + url[len("http://"):]
+                fotos[b["id"]] = url or None
     for l in linhas:
         if l.get("item_id") in fotos and fotos[l["item_id"]]:
             l["thumbnail"] = fotos[l["item_id"]]
