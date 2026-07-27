@@ -1,10 +1,15 @@
 """
-Robô de pedidos da Shopee -> Supabase.
-- Renova o token, baixa os pedidos (get_order_list) em janelas de 15 dias,
-  pega o detalhe (get_order_detail) e o financeiro (get_escrow_detail),
-  e grava em shopee_vendas (por item) e shopee_repasses (por pedido).
-- DIAS (env) = quantos dias pra trás puxar (padrão 15). Pra backfill, use DIAS=180 etc.
-Python puro, com freio de requisições.
+Robo de pedidos da Shopee -> Supabase  (versao com DIAGNOSTICO).
+
+Diferencas pra versao anterior (que retornava "0 pedidos" sem explicar):
+  1) MOSTRA o erro da Shopee (error/message) em vez de engolir.
+  2) Janela de 13 dias (a Shopee recusa quando chega em 15).
+  3) Renova o token durante backfills longos (o access dura ~4h).
+  4) Percorre TODAS as lojas de shopee_contas, nao so a primeira.
+  5) No fim, imprime um resumo do que aconteceu em cada etapa.
+
+ENV: SHOPEE_PARTNER_ID, SHOPEE_PARTNER_KEY, SUPABASE_URL, SUPABASE_KEY
+     DIAS (padrao 15)  |  DEBUG=1 (imprime a resposta crua da 1a janela)
 """
 import os
 import json
@@ -22,8 +27,14 @@ PKEY = os.environ["SHOPEE_PARTNER_KEY"].encode()
 SB_URL = os.environ["SUPABASE_URL"].rstrip("/")
 SB_KEY = os.environ["SUPABASE_KEY"]
 DIAS = int(os.environ.get("DIAS", "15"))
+DEBUG = os.environ.get("DEBUG", "0") == "1"
+
+JANELA_DIAS = 13          # < 15, senao a Shopee devolve error_param
+REFRESH_A_CADA = 45 * 60  # renova o token a cada 45 min de execucao
 
 _ultima = [0.0]
+
+
 def _freio():
     esp = 0.4 - (time.time() - _ultima[0])
     if esp > 0:
@@ -38,12 +49,16 @@ def http(method, url, headers=None, data=None):
             return r.status, r.read().decode()
     except urllib.error.HTTPError as e:
         return e.code, e.read().decode()
+    except Exception as e:
+        return 0, json.dumps({"error": "rede", "message": str(e)})
 
 
 def sb_get(path):
     st, raw = http("GET", f"{SB_URL}/rest/v1/{path}",
                    {"apikey": SB_KEY, "Authorization": "Bearer " + SB_KEY})
-    return json.loads(raw) if st < 300 and raw else []
+    if st >= 300:
+        raise RuntimeError(f"Supabase GET {path} -> HTTP {st}: {raw[:200]}")
+    return json.loads(raw) if raw else []
 
 
 def sb_upsert(tabela, rows, conflito):
@@ -54,7 +69,7 @@ def sb_upsert(tabela, rows, conflito):
             "Prefer": "resolution=merge-duplicates,return=minimal",
         }, json.dumps(rows[i:i + 200]).encode())
         if st >= 300:
-            raise RuntimeError(f"Supabase {tabela} HTTP {st}: {raw[:200]}")
+            raise RuntimeError(f"Supabase {tabela} HTTP {st}: {raw[:300]}")
 
 
 def sb_patch(shop_id, fields):
@@ -77,10 +92,11 @@ def refresh(shop_id, refresh_token):
     path = "/api/v2/auth/access_token/get"
     url = f"{HOST}{path}?partner_id={PID}&timestamp={ts}&sign={sign_public(path, ts)}"
     st, raw = http("POST", url, {"Content-Type": "application/json"},
-                   json.dumps({"refresh_token": refresh_token, "shop_id": shop_id, "partner_id": PID}).encode())
-    d = json.loads(raw)
+                   json.dumps({"refresh_token": refresh_token, "shop_id": shop_id,
+                               "partner_id": PID}).encode())
+    d = json.loads(raw) if raw else {}
     if not d.get("access_token"):
-        raise RuntimeError(f"Falha no refresh: HTTP {st} {d}")
+        raise RuntimeError(f"Falha no refresh (HTTP {st}): {d}")
     expira = (datetime.now(timezone.utc) + timedelta(seconds=int(d.get("expire_in", 14400)))).isoformat()
     fields = {"access_token": d["access_token"], "access_expira_em": expira}
     if d.get("refresh_token"):
@@ -90,6 +106,7 @@ def refresh(shop_id, refresh_token):
 
 
 def shop_get(path, token, shop_id, extra):
+    """Chamada autenticada. Devolve (dados, erro_legivel)."""
     _freio()
     ts = int(time.time())
     params = {"partner_id": PID, "timestamp": ts, "access_token": token,
@@ -97,29 +114,48 @@ def shop_get(path, token, shop_id, extra):
     params.update(extra)
     st, raw = http("GET", f"{HOST}{path}?" + urllib.parse.urlencode(params),
                    {"Content-Type": "application/json"})
-    return st, json.loads(raw) if raw else {}
+    try:
+        d = json.loads(raw) if raw else {}
+    except Exception:
+        return {}, f"HTTP {st}: resposta nao-JSON: {raw[:200]}"
+    err = d.get("error")
+    if err:
+        return d, f"{err} — {d.get('message', '')}"
+    if st >= 300:
+        return d, f"HTTP {st}: {raw[:200]}"
+    return d, None
 
 
 def iso(ts):
     return datetime.fromtimestamp(int(ts), tz=timezone.utc).isoformat() if ts else None
 
 
-def listar_order_sn(token, shop_id):
-    """Todos os order_sn no período (janelas de 15 dias, com cursor)."""
+def listar_order_sn(ctx):
+    """{order_sn: status} do periodo. AGORA mostra o erro se a Shopee recusar."""
     agora = int(time.time())
     inicio = agora - DIAS * 24 * 3600
-    achados = {}
+    achados, erros, primeira = {}, [], True
     janela = inicio
     while janela < agora:
-        fim = min(janela + 15 * 24 * 3600, agora)
+        fim = min(janela + JANELA_DIAS * 24 * 3600, agora)
         cursor = ""
         while True:
-            st, d = shop_get("/api/v2/order/get_order_list", token, shop_id, {
+            token = ctx_token(ctx)
+            d, err = shop_get("/api/v2/order/get_order_list", token, ctx["shop_id"], {
                 "time_range_field": "create_time", "time_from": janela, "time_to": fim,
                 "page_size": 100, "cursor": cursor, "response_optional_fields": "order_status",
             })
-            resp = (d or {}).get("response") or {}
-            for o in resp.get("order_list", []):
+            if DEBUG and primeira:
+                print("  [debug] resposta crua da 1a janela:", json.dumps(d)[:600])
+                primeira = False
+            if err:
+                per = f"{datetime.fromtimestamp(janela).date()} a {datetime.fromtimestamp(fim).date()}"
+                print(f"  ERRO da Shopee em {per}: {err}")
+                erros.append(err)
+                break
+            resp = d.get("response") or {}
+            lote = resp.get("order_list", []) or []
+            for o in lote:
                 if o.get("order_sn"):
                     achados[o["order_sn"]] = o.get("order_status")
             if resp.get("more") and resp.get("next_cursor"):
@@ -127,32 +163,55 @@ def listar_order_sn(token, shop_id):
             else:
                 break
         janela = fim
-    return achados
+    return achados, erros
 
 
-def main():
-    contas = sb_get("shopee_contas?select=shop_id,refresh_token")
-    if not contas:
-        raise SystemExit("Nenhuma loja em shopee_contas.")
-    c = contas[0]
+def ctx_token(ctx):
+    """Token valido: renova sozinho em execucoes longas."""
+    if time.time() - ctx["t0"] > REFRESH_A_CADA:
+        ctx["token"] = refresh(ctx["shop_id"], ctx["refresh_token"])
+        ctx["t0"] = time.time()
+        print("  (token renovado no meio da execucao)")
+    return ctx["token"]
+
+
+def processar_loja(c):
     shop_id = c["shop_id"]
+    print(f"\n=== Loja {shop_id} ===")
     token = refresh(shop_id, c["refresh_token"])
-    print(f"Loja {shop_id} — token renovado. Puxando {DIAS} dias...")
+    ctx = {"shop_id": shop_id, "refresh_token": c["refresh_token"], "token": token, "t0": time.time()}
+    print(f"token OK. Puxando {DIAS} dias (janelas de {JANELA_DIAS})...")
 
-    sns = listar_order_sn(token, shop_id)
-    print(f"{len(sns)} pedidos no período.")
+    sns, erros = listar_order_sn(ctx)
+    print(f"{len(sns)} pedido(s) encontrado(s).")
+    if not sns:
+        if erros:
+            print("  >> A Shopee RECUSOU as chamadas. Causas comuns:")
+            print("     error_auth / error_permission -> app sem permissao de Pedidos,")
+            print("       ou a loja precisa reautorizar o app (refresh_token velho).")
+            print("     error_param -> janela de datas invalida.")
+            print("     error_sign  -> partner_id/partner_key errados.")
+        else:
+            print("  >> Sem erro da Shopee: nao existem pedidos nesse periodo.")
+            print("     Tente aumentar DIAS (ex.: DIAS=90) ou confira se e a loja certa.")
+        return 0, 0
+
     lista = list(sns.keys())
-
     vendas, repasses = [], []
     NAO_PAGO = {"CANCELLED", "UNPAID", "INVOICE_PENDING"}
 
+    falhas_det = 0
     for i in range(0, len(lista), 50):
         lote = lista[i:i + 50]
-        st, d = shop_get("/api/v2/order/get_order_detail", token, shop_id, {
+        d, err = shop_get("/api/v2/order/get_order_detail", ctx_token(ctx), shop_id, {
             "order_sn_list": ",".join(lote),
             "response_optional_fields": "item_list,total_amount,order_status,create_time,buyer_username,payment_method",
         })
-        for o in ((d or {}).get("response") or {}).get("order_list", []):
+        if err:
+            falhas_det += 1
+            print(f"  ERRO no detalhe (lote {i//50+1}): {err}")
+            continue
+        for o in (d.get("response") or {}).get("order_list", []):
             osn = o.get("order_sn")
             data = iso(o.get("create_time"))
             for it in o.get("item_list", []):
@@ -168,20 +227,25 @@ def main():
                     "comprador": o.get("buyer_username"),
                     "total_pedido": o.get("total_amount"),
                 })
-
     if vendas:
         sb_upsert("shopee_vendas", vendas, "order_sn,item_id,model_id")
 
-    # Escrow (financeiro) — só dos pedidos que não são cancelados/não pagos.
     pagos = [sn for sn, stt in sns.items() if stt not in NAO_PAGO]
+    falhas_esc = 0
     for sn in pagos:
-        st, d = shop_get("/api/v2/payment/get_escrow_detail", token, shop_id, {"order_sn": sn})
-        oi = (((d or {}).get("response") or {}).get("order_income") or {})
+        d, err = shop_get("/api/v2/payment/get_escrow_detail", ctx_token(ctx), shop_id, {"order_sn": sn})
+        if err:
+            falhas_esc += 1
+            if falhas_esc <= 3:
+                print(f"  ERRO no escrow de {sn}: {err}")
+            continue
+        resp = d.get("response") or {}
+        oi = resp.get("order_income") or {}
         if not oi:
             continue
         repasses.append({
             "order_sn": sn, "shop_id": shop_id, "status": sns.get(sn),
-            "data": iso(((d or {}).get("response") or {}).get("create_time")),
+            "data": iso(resp.get("create_time")),
             "buyer_total": oi.get("buyer_total_amount"),
             "comissao": oi.get("commission_fee"),
             "service_fee": oi.get("net_service_fee"),
@@ -191,9 +255,29 @@ def main():
     if repasses:
         sb_upsert("shopee_repasses", repasses, "order_sn")
 
-    tot_rep = sum((r["repasse"] or 0) for r in repasses)
-    print(f"OK. {len(vendas)} itens de venda, {len(repasses)} repasses. "
-          f"Repasse somado (líquido): R$ {tot_rep:,.2f}")
+    tot = sum((r["repasse"] or 0) for r in repasses)
+    print(f"OK: {len(vendas)} itens de venda, {len(repasses)} repasses. Liquido: R$ {tot:,.2f}")
+    if falhas_det:
+        print(f"  atencao: {falhas_det} lote(s) de detalhe falharam")
+    if falhas_esc:
+        print(f"  atencao: {falhas_esc} escrow(s) falharam (comum em pedidos muito recentes)")
+    return len(vendas), len(repasses)
+
+
+def main():
+    contas = sb_get("shopee_contas?select=shop_id,refresh_token")
+    if not contas:
+        raise SystemExit("Nenhuma loja em shopee_contas.")
+    print(f"{len(contas)} loja(s) cadastrada(s).")
+    tv = tr = 0
+    for c in contas:                     # todas as lojas, nao so a primeira
+        try:
+            v, r = processar_loja(c)
+            tv += v
+            tr += r
+        except Exception as e:
+            print(f"ERRO na loja {c.get('shop_id')}: {e}")
+    print(f"\nTOTAL: {tv} itens de venda, {tr} repasses.")
 
 
 if __name__ == "__main__":
