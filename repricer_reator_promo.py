@@ -10,15 +10,17 @@ Como funciona:
      lógica do repricer_sugestoes (processar_item) — atualizando o repricer_sugestoes
      daquele anúncio (campo 'ofertas' do box, ação sugerida, etc.).
   3) Marca as notificações desses anúncios como processado=true.
-  4) NOVO: sincroniza STATUS/ESTOQUE a partir do tópico 'items' — mantém a fila
-     Pausados do painel em dia em tempo real (pausa real entra; voltou a ativo sai
-     e vira ativo; sem estoque fica fora).
-Roda de X em X minutos (agendado). O repricer_sugestoes COMPLETO, rodando poucas
-vezes ao dia, é a rede de segurança (pega o que a notificação perder).
-Env: ML_* e SUPABASE_* (os mesmos secrets). Opcional: MAX_ITENS_REATOR (default 600).
+  4) Sincroniza STATUS/ESTOQUE a partir do tópico 'items' — mantém a fila Pausados
+     do painel em dia em tempo real (pausa real entra; voltou a ativo sai e vira ativo;
+     sem estoque fica fora).
+Os anúncios são processados EM PARALELO (ThreadPoolExecutor) — o gargalo é rede.
+Roda por webhook (repository_dispatch), no agendamento, ou no botão.
+Env: ML_* e SUPABASE_* (os mesmos secrets). Opcional: MAX_ITENS_REATOR (default 600),
+     WORKERS_REATOR (default 12).
 """
 import os
 from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor
 import repricer_sugestoes as rec
 from ml_auth import obter_access
 # tópicos que mexem no que o box mostra
@@ -30,6 +32,8 @@ STATUS_TOPICS = ["items"]
 MAX_ITENS = int(os.environ.get("MAX_ITENS_REATOR", "600"))
 # quantas notificações pendentes ler por rodada (bem acima do teto de itens)
 LIMITE_NOTIF = int(os.environ.get("LIMITE_NOTIF_REATOR", "6000"))
+# processamento paralelo (reaproveita a sessão keep-alive do repricer_sugestoes)
+WORKERS = int(os.environ.get("WORKERS_REATOR", os.environ.get("WORKERS", "12")))
 def _agora():
     return datetime.now(timezone.utc).isoformat()
 def _chunks(lst, n=100):
@@ -101,7 +105,8 @@ def reagir_promocoes(tokens):
         return
     total_pend = len(ordem)
     ordem = ordem[:MAX_ITENS]                      # teto por rodada
-    print(f"Reator: {total_pend} anúncio(s) com mudança; processando {len(ordem)} nesta rodada.", flush=True)
+    print(f"Reator: {total_pend} anúncio(s) com mudança; processando {len(ordem)} nesta rodada "
+          f"(paralelo x{WORKERS}).", flush=True)
     rec.preload()                                  # custos/grupos (uma vez)
     # agrupa por conta (um access por conta)
     por_conta = {}
@@ -118,11 +123,16 @@ def reagir_promocoes(tokens):
         except Exception as e:
             print(f"  conta {sid}: token falhou ({e}) — pulando.", flush=True)
             continue
-        for iid in iids:
+        def _proc(iid):
             try:
-                sug = rec.processar_item(iid, access, sid_ok, {})
+                return iid, rec.processar_item(iid, access, sid_ok, {}), None
             except Exception as e:
-                print(f"  erro ao processar {iid}: {e}", flush=True)
+                return iid, None, str(e)
+        with ThreadPoolExecutor(max_workers=WORKERS) as ex:   # análise em paralelo
+            resultados = list(ex.map(_proc, iids))
+        for iid, sug, err in resultados:
+            if err is not None:
+                print(f"  erro ao processar {iid}: {err}", flush=True)
                 continue                            # não marca: tenta de novo na próxima
             gravar_item(sid_ok, iid, sug)
             feitos.append(iid)
@@ -224,7 +234,7 @@ def sincronizar_status(tokens):
             if status == "paused" and "out_of_stock" not in ss:
                 add.append({"seller_id": str(sid_ok), "item_id": iid, "sku": sku, "titulo": b.get("title")})
                 virou_pausa += 1
-            elif iid in existentes:            # estava em Pausados e não está mais
+            elif iid in existentes:            # estava em Pausados e não está mais "pausa real"
                 rem.append(iid)
                 if status == "active":
                     logs.append({"seller_id": str(sid_ok), "item_id": iid, "sku": sku,
