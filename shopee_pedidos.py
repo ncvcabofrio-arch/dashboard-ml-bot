@@ -12,6 +12,7 @@ ENV: SHOPEE_PARTNER_ID, SHOPEE_PARTNER_KEY, SUPABASE_URL, SUPABASE_KEY
      DIAS (padrao 15)  |  DEBUG=1 (imprime a resposta crua da 1a janela)
 """
 import os
+import sys
 import json
 import time
 import hmac
@@ -20,6 +21,14 @@ import urllib.request
 import urllib.error
 import urllib.parse
 from datetime import datetime, timezone, timedelta
+
+# Log AO VIVO no GitHub Actions: sem isto o Python segura os prints em buffer
+# e o log so aparece quando o robo termina.
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+except Exception:
+    pass
 
 HOST = "https://partner.shopeemobile.com"
 PID = int(os.environ.get("SHOPEE_PARTNER_ID") or "2039646")
