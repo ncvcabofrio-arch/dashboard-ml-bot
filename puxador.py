@@ -3,19 +3,23 @@ Puxador Mercado Livre -> Supabase (automatico / GitHub Actions)
 + Notificacoes Telegram
 + Comissao (sale_fee), Frete (envio) e calculo de repasse/margem.
 """
+
 import os
 import time
 import urllib.parse
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+
 import requests
 from supabase import create_client
+
 # quantas chamadas ao ML em paralelo no enriquecimento (frete/repasse/estado)
 WORKERS = int(os.environ.get("ENRIQ_WORKERS", "6"))
 # no mutirão histórico dá pra pular a busca do rebate (2ª chamada por pedido),
 # o que corta o tempo do repasse pela metade. Rebate é só informativo.
 PULAR_REBATE = os.environ.get("PULAR_REBATE", "0") == "1"
+
 # ---- Configuracao (vem dos secrets do GitHub) ----
 CLIENT_ID = os.environ["ML_CLIENT_ID"]
 CLIENT_SECRET = os.environ["ML_CLIENT_SECRET"]
@@ -25,13 +29,17 @@ SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 DIAS = int(os.environ.get("DIAS", "7"))
 SO_SELLER = os.environ.get("SO_SELLER", "").strip()   # se preenchido, processa SÓ essa conta (backfill)
 LIMITE_ENRICH = int(os.environ.get("ENRICH_LIMITE", "80"))   # frete/local/repasse por rodada (backfill sobe isso)
+
 # Telegram (opcional)
 TG_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TG_CHAT = os.environ.get("TELEGRAM_CHAT_ID", "")
 NOTIFICAR = os.environ.get("NOTIFICAR", "1") == "1"
+
 API = "https://api.mercadolibre.com"
 sb = create_client(SUPABASE_URL, SUPABASE_KEY)
 from ml_auth import obter_access  # token compartilhado (evita colisao com o puxador de devolucoes)
+
+
 # ---------------- Telegram ----------------
 def tg_send(text):
     if not TG_TOKEN or not TG_CHAT:
@@ -42,6 +50,8 @@ def tg_send(text):
                       timeout=30)
     except Exception as e:
         print("Aviso: falha ao enviar Telegram:", e)
+
+
 def estoque_atual_de(sku):
     """Consulta o estoque atual de um SKU na view estoque_atual."""
     if not sku:
@@ -54,21 +64,13 @@ def estoque_atual_de(sku):
     except Exception:
         return None
     return None
+
+
 def pct_br(v):
     """17.58 -> '17,58%'"""
     return f"{v:.2f}".replace(".", ",") + "%"
-def _minutos_desde(iso):
-    """Minutos desde uma data ISO (data_aprovacao/date_created). Retorna um número
-    grande se a data não der pra ler — assim, na dúvida, o aviso NÃO é segurado."""
-    if not iso:
-        return 9999
-    try:
-        t = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
-        if t.tzinfo is None:
-            t = t.replace(tzinfo=timezone.utc)
-        return (datetime.now(timezone.utc) - t).total_seconds() / 60
-    except Exception:
-        return 9999
+
+
 def margem_do_mes():
     """Margem % acumulada do mês (America/Sao_Paulo), via bot_sql. None se falhar."""
     try:
@@ -83,6 +85,8 @@ def margem_do_mes():
     except Exception:
         pass
     return None
+
+
 def notificar_vendas_novas():
     if not TG_TOKEN or not TG_CHAT:
         return
@@ -97,11 +101,9 @@ def notificar_vendas_novas():
         pedidos[r["order_id"]].append(r)
     margem_mes = margem_do_mes()   # calcula 1x por rodada
     linha_mes = (f"\n📅 Margem do mês: {pct_br(margem_mes)}" if margem_mes is not None else "")
-    notificados = []               # só marca como avisados os que REALMENTE saíram
     if len(pedidos) > 20:
         total = sum((its[0].get("total") or 0) for its in pedidos.values())
         tg_send(f"🛒 <b>{len(pedidos)} vendas novas!</b>\nTotal: R$ {total:,.2f}{linha_mes}")
-        notificados = list(pedidos.keys())
     else:
         for oid, itens in pedidos.items():
             it0 = itens[0]
@@ -109,21 +111,14 @@ def notificar_vendas_novas():
             total = it0.get("total") or 0
             titulo = it0.get("titulo") or "(produto)"
             extra = f" (+{len(itens)-1} item)" if len(itens) > 1 else ""
+
             # margem do pedido = receita - custo - comissao - frete
             receita = sum((x.get("valor_unitario") or 0) * (x.get("quantidade") or 1) for x in itens)
             comissao = sum((x.get("comissao") or 0) for x in itens)
             frete = sum((x.get("frete") or 0) for x in itens)
             tem_custo = all(x.get("custo_unitario") is not None for x in itens)
-            tem_comissao = all(x.get("comissao") is not None for x in itens)
-            # A comissão vem do sale_fee do ML e às vezes ainda não saiu no instante
-            # da venda. Sem ela, a margem sai INFLADA (conta a comissão como zero).
-            # Então: se falta a comissão e o pedido é recente, SEGURA o aviso pra
-            # próxima rodada (a comissão costuma cair em minutos). Passou de 30 min
-            # sem vir? Avisa assim mesmo, mas sem mostrar um número de margem errado.
-            if tem_custo and not tem_comissao and _minutos_desde(it0.get("data_aprovacao")) < 30:
-                continue
             alerta = False
-            if tem_custo and tem_comissao and receita > 0:
+            if tem_custo and receita > 0:
                 custo = sum((x.get("custo_unitario") or 0) * (x.get("quantidade") or 1) for x in itens)
                 margem = receita - custo - comissao - frete
                 pct = margem / receita * 100
@@ -131,21 +126,22 @@ def notificar_vendas_novas():
                 linha_margem = f"💰 Margem da venda: R$ {margem:,.2f} ({pct_br(pct)})"
                 if alerta:
                     linha_margem += " 🚨"
-            elif not tem_custo:
-                linha_margem = "💰 Margem da venda: aguardando custo do produto"
             else:
-                linha_margem = "💰 Margem da venda: aguardando comissão do ML"
+                linha_margem = "💰 Margem da venda: aguardando custo do produto"
+
             # estoque atual do produto principal
             est = estoque_atual_de(it0.get("sku"))
             linha_estoque = f"\n📦 Estoque atual: {float(est):g}" if est is not None else ""
+
             cabecalho = ("🚨 <b>Nova venda — MARGEM BAIXA!</b>" if alerta
                          else "🛒 <b>Nova venda!</b>")
             tg_send(f"{cabecalho}\nConta: {conta}\n"
                     f"Valor: R$ {total:,.2f}\nProduto: {titulo}{extra}\n"
                     f"{linha_margem}{linha_mes}{linha_estoque}")
-            notificados.append(oid)
-    for oid in notificados:
+    for oid in pedidos:
         sb.table("vendas").update({"notificado": True}).eq("order_id", oid).execute()
+
+
 # ---------------- Mercado Livre ----------------
 def renovar_token(refresh_token):
     r = requests.post(API + "/oauth/token", data={
@@ -158,6 +154,8 @@ def renovar_token(refresh_token):
     if "access_token" not in d:
         raise RuntimeError("Falha ao renovar token: " + str(d))
     return d
+
+
 def ml_get(path, access, tentativas=3):
     r = None
     for i in range(tentativas):
@@ -169,10 +167,14 @@ def ml_get(path, access, tentativas=3):
             continue
         break
     return r.json()
+
+
 def tipo_anuncio(lt):
     """gold_pro = Premium, gold_special = Clássico (mantém o resto como veio)."""
     return {"gold_pro": "Premium", "gold_special": "Clássico",
             "gold_premium": "Premium", "gold": "Clássico"}.get(lt, lt)
+
+
 def lista_refresh_tokens():
     res = sb.table("contas").select("seller_id, refresh_token").execute()
     tokens = [(c["seller_id"], c["refresh_token"])
@@ -180,13 +182,26 @@ def lista_refresh_tokens():
     if not tokens and SEED_REFRESH:
         tokens = [(None, SEED_REFRESH)]
     return tokens
+
+
 def linhas_do_pedido(o, seller_id):
     """Transforma um pedido (/orders/{id}) nas linhas de 'vendas' (uma por item)."""
     ship = (o.get("shipping") or {}).get("id")
     pay = (o.get("payments") or [{}])[0]
+    # dados do comprador (aparecem na aba "Comprador" do app)
+    comprador = o.get("buyer") or {}
+    nome_comprador = " ".join(
+        p for p in [comprador.get("first_name"), comprador.get("last_name")] if p
+    ).strip() or None
     linhas = []
     for it in o.get("order_items", []):
         item = it.get("item") or {}
+        # variacao legivel: [{name:'Cor', value_name:'Dourado'}] -> "Cor - Dourado"
+        variacao = "; ".join(
+            f"{a.get('name')} - {a.get('value_name')}"
+            for a in (item.get("variation_attributes") or [])
+            if a.get("name") and a.get("value_name")
+        ) or None
         # O ML manda a tarifa (sale_fee) POR UNIDADE. A comissão da linha é
         # sale_fee × quantidade (igual o preço, que também é por unidade).
         sale_fee = it.get("sale_fee")
@@ -212,8 +227,42 @@ def linhas_do_pedido(o, seller_id):
             "categoria_id": item.get("category_id"),
             "quantidade": it.get("quantity"),
             "valor_unitario": it.get("unit_price"),
+            # --- campos novos, usados no detalhe do pedido no app ---
+            "variacao": variacao,
+            "comprador_nome": nome_comprador,
+            "comprador_apelido": comprador.get("nickname"),
+            "parcelas": pay.get("installments"),
+            "total_pago": pay.get("total_paid_amount"),
         })
     return linhas
+
+
+def preencher_thumbnails(linhas, access):
+    """Foto do produto: o pedido nao traz, entao buscamos em /items (20 por vez).
+
+    So consulta os item_id que aparecem no lote, uma vez cada — barato mesmo
+    com muitos pedidos, porque varios pedidos repetem o mesmo anuncio.
+    """
+    ids = sorted({l["item_id"] for l in linhas if l.get("item_id")})
+    if not ids:
+        return
+    fotos = {}
+    for i in range(0, len(ids), 20):
+        lote = ids[i:i + 20]
+        try:
+            resp = ml_get("/items?ids=" + ",".join(lote)
+                          + "&attributes=id,secure_thumbnail,thumbnail", access)
+        except Exception:
+            continue
+        for w in (resp or []):
+            b = (w or {}).get("body") or {}
+            if b.get("id"):
+                fotos[b["id"]] = b.get("secure_thumbnail") or b.get("thumbnail")
+    for l in linhas:
+        if l.get("item_id") in fotos and fotos[l["item_id"]]:
+            l["thumbnail"] = fotos[l["item_id"]]
+
+
 def cadastrar_skus_novos(linhas):
     skus = sorted({l["sku"] for l in linhas if l.get("sku")})
     if skus:
@@ -223,6 +272,8 @@ def cadastrar_skus_novos(linhas):
                 on_conflict="sku", ignore_duplicates=True).execute()
         except Exception as e:
             print("Aviso: falha ao cadastrar SKUs novos:", e)
+
+
 def pagamentos_do_pedido(o, seller_id):
     """TODOS os pagamentos de um pedido (meios combinados: saldo + cartão, etc.).
     Vira linhas pra tabela 'ordem_pagamentos', pra a conciliação somar tudo."""
@@ -233,6 +284,8 @@ def pagamentos_do_pedido(o, seller_id):
         if pid:
             out.append({"order_id": oid, "payment_id": str(pid), "seller_id": seller_id})
     return out
+
+
 def gravar_pagamentos(pags):
     """Grava os pagamentos por pedido em 'ordem_pagamentos' (sem duplicar)."""
     if not pags:
@@ -248,17 +301,22 @@ def gravar_pagamentos(pags):
                 uniq[i:i + 200], on_conflict="order_id,payment_id").execute()
         except Exception as e:
             print("Aviso: falha ao gravar ordem_pagamentos:", str(e)[:120])
+
+
 def puxar_conta(access, seller_id):
     u = ml_get("/users/" + seller_id, access)
     sb.table("contas").upsert(
         {"seller_id": seller_id, "apelido": u.get("nickname")},
         on_conflict="seller_id").execute()
+
     rep = u.get("seller_reputation") or {}
     tr = rep.get("transactions") or {}
     rt = tr.get("ratings") or {}
     met = rep.get("metrics") or {}
+
     def taxa(k):
         return (met.get(k) or {}).get("rate")
+
     sb.table("reputacao").upsert({
         "seller_id": seller_id,
         "nivel": rep.get("level_id"),
@@ -270,6 +328,7 @@ def puxar_conta(access, seller_id):
         "taxa_cancelamentos": taxa("cancellations"),
         "taxa_atrasos": taxa("delayed_handling_time"),
     }, on_conflict="seller_id,data").execute()
+
     desde = (datetime.now(timezone.utc) - timedelta(days=DIAS)) \
         .strftime("%Y-%m-%dT%H:%M:%S.000-03:00")
     linhas, pags, offset, total = [], [], 0, 1
@@ -284,13 +343,18 @@ def puxar_conta(access, seller_id):
             pags.extend(pagamentos_do_pedido(o, seller_id))
         offset += 50
         time.sleep(0.3)
+    preencher_thumbnails(linhas, access)     # foto do produto pro app
+
     for i in range(0, len(linhas), 200):
         sb.table("vendas").upsert(
             linhas[i:i + 200],
             on_conflict="order_id,item_id,seller_id").execute()
+
     gravar_pagamentos(pags)
     cadastrar_skus_novos(linhas)
     return len(linhas)
+
+
 def _select_all(tabela, cols, filtros=None, is_null=None):
     """Lê TODAS as linhas (o PostgREST devolve no máx. 1000 por vez, então
     paginamos com .range até acabar)."""
@@ -307,6 +371,8 @@ def _select_all(tabela, cols, filtros=None, is_null=None):
             break
         ini += passo
     return out
+
+
 def _retry(fn, tentativas=4):
     """Tenta uma operação (ex.: gravar no banco) algumas vezes antes de desistir."""
     for i in range(tentativas):
@@ -317,6 +383,8 @@ def _retry(fn, tentativas=4):
                 raise
             print("  retry por erro:", str(e)[:80], flush=True)
             time.sleep(2 * (i + 1))
+
+
 def _distintos_envios(pend):
     envios, visto = [], set()
     for r in pend:
@@ -325,6 +393,8 @@ def _distintos_envios(pend):
             visto.add(s)
             envios.append(s)
     return envios
+
+
 def _frete_de_envio(ship_id, access, seller_id):
     """Calcula e grava o frete rateado de um envio. Retorna True se preencheu.
     Blindado: qualquer erro (conexão etc.) vira False, sem derrubar a rodada."""
@@ -332,6 +402,8 @@ def _frete_de_envio(ship_id, access, seller_id):
         return _frete_de_envio_inner(ship_id, access, seller_id)
     except Exception:
         return False
+
+
 def _frete_de_envio_inner(ship_id, access, seller_id):
     itens = (_retry(lambda: sb.table("vendas").select("id, valor_unitario, quantidade")
              .eq("seller_id", seller_id).eq("shipping_id", ship_id)
@@ -355,6 +427,8 @@ def _frete_de_envio_inner(ship_id, access, seller_id):
         _retry(lambda it=it, fr=frete_item: sb.table("vendas").update({"frete": fr}).eq("id", it["id"]).execute())
         ok = True
     return ok
+
+
 def enriquecer_frete(access, seller_id, limite=LIMITE_ENRICH):
     """Frete rateado por envio (paralelo). Só preenche o que está vazio."""
     pend = _select_all("vendas", "shipping_id",
@@ -372,6 +446,8 @@ def enriquecer_frete(access, seller_id, limite=LIMITE_ENRICH):
                 print(f"  ...frete {i+1}/{len(envios)}", flush=True)
     print(f"Frete: {feitos} envios rateados.", flush=True)
     return feitos
+
+
 def _local_de_envio(ship_id, access, seller_id):
     """Busca UF/estado/cidade do envio e grava nos itens. Retorna True se ok."""
     try:
@@ -381,14 +457,24 @@ def _local_de_envio(ship_id, access, seller_id):
     ra = (sj or {}).get("receiver_address") or {}
     st = ra.get("state") or {}
     ci = ra.get("city") or {}
+    ng = ra.get("neighborhood") or {}
     uf = (st.get("id") or "").replace("BR-", "").strip() or "ND"  # 'ND' evita reprocessar sem fim
-    dados = {"uf": uf, "estado": st.get("name"), "cidade": ci.get("name")}
+    dados = {
+        "uf": uf, "estado": st.get("name"), "cidade": ci.get("name"),
+        # --- endereco completo, usado na aba "Comprador" do app ---
+        "bairro": ng.get("name") if isinstance(ng, dict) else (ng or None),
+        "cep": ra.get("zip_code"),
+        "receptor_nome": ra.get("receiver_name"),
+        "receptor_telefone": ra.get("receiver_phone"),
+    }
     try:
         _retry(lambda: sb.table("vendas").update(dados).eq("seller_id", seller_id)
                .eq("shipping_id", ship_id).eq("status", "paid").execute())
         return True
     except Exception:
         return False
+
+
 def enriquecer_local(access, seller_id, limite=LIMITE_ENRICH):
     """Preenche UF/estado/cidade do comprador (/shipments/{id}) — paralelo."""
     pend = _select_all("vendas", "shipping_id",
@@ -406,6 +492,8 @@ def enriquecer_local(access, seller_id, limite=LIMITE_ENRICH):
                 print(f"  ...estado/cidade {i+1}/{len(envios)}", flush=True)
     print(f"Local: {feitos} envios localizados.", flush=True)
     return feitos
+
+
 def _repasse_de_pedido(oid, pid, access, seller_id):
     """Busca o líquido (/collections) e o rebate (/orders/discounts). Retorna
     o dict pronto pra gravar, ou None se ainda não há repasse."""
@@ -437,6 +525,8 @@ def _repasse_de_pedido(oid, pid, access, seller_id):
         "released": c.get("released"), "amount_refunded": c.get("amount_refunded"),
         "status": c.get("status"), "rebate": round(rebate, 2),
     }
+
+
 def enriquecer_repasse(access, seller_id, limite=LIMITE_ENRICH):
     """Repasse + rebate por pedido (paralelo). Grava em lote na tabela 'repasses'."""
     vds = _select_all("vendas", "order_id, payment_id",
@@ -453,6 +543,7 @@ def enriquecer_repasse(access, seller_id, limite=LIMITE_ENRICH):
         print("Repasse: 0 pendentes.", flush=True)
         return 0
     print(f"Repasse: {len(pares)} pedidos pendentes (paralelo x{WORKERS})...", flush=True)
+
     resultados = []
     with ThreadPoolExecutor(max_workers=WORKERS) as ex:
         for i, r in enumerate(ex.map(lambda p: _repasse_de_pedido(p[0], p[1], access, seller_id), pares)):
@@ -460,11 +551,14 @@ def enriquecer_repasse(access, seller_id, limite=LIMITE_ENRICH):
                 resultados.append(r)
             if (i + 1) % 200 == 0:
                 print(f"  ...repasse {i+1}/{len(pares)} (ok: {len(resultados)})", flush=True)
+
     for i in range(0, len(resultados), 200):
         lote = resultados[i:i + 200]
         _retry(lambda l=lote: sb.table("repasses").upsert(l, on_conflict="order_id").execute())
     print(f"Repasse: {len(resultados)} gravados (de {len(pares)}).", flush=True)
     return len(resultados)
+
+
 def processar_fila():
     """MODO FILA (webhook): processa só os pedidos que estão na 'fila_pedidos',
     na hora. Reaproveita tudo: puxa cada pedido, enriquece (frete/repasse/local)
@@ -473,10 +567,12 @@ def processar_fila():
     if not pend:
         print("Fila vazia — nada a processar.")
         return 0
+
     # agrupa os pedidos por conta
     por_conta = defaultdict(list)
     for r in pend:
         por_conta[str(r.get("seller_id") or "")].append(str(r["order_id"]))
+
     tokens = {str(sid): rt for sid, rt in lista_refresh_tokens() if sid}
     total = 0
     for sid, order_ids in por_conta.items():
@@ -494,6 +590,8 @@ def processar_fila():
                     pags.extend(pagamentos_do_pedido(o, sid))
             except Exception as e:
                 print(f"  erro ao puxar pedido {oid}: {str(e)[:80]}")
+
+        preencher_thumbnails(linhas, access)   # foto do produto pro app
         if linhas:
             for i in range(0, len(linhas), 200):
                 _retry(lambda l=linhas[i:i + 200]: sb.table("vendas").upsert(
@@ -501,6 +599,7 @@ def processar_fila():
             cadastrar_skus_novos(linhas)
             total += len(linhas)
         gravar_pagamentos(pags)
+
         # enriquece (pega os pendentes, inclui os que acabaram de entrar)
         for fn, nome in ((enriquecer_frete, "frete"),
                          (enriquecer_repasse, "repasse"),
@@ -509,11 +608,13 @@ def processar_fila():
                 fn(access, sid)
             except Exception as e:
                 print(f"Aviso: falha no {nome}:", e)
+
         # marca esses pedidos como processados (o puxador diário é a rede de segurança)
         agora = datetime.now(timezone.utc).isoformat()
         _retry(lambda ids=order_ids: sb.table("fila_pedidos").update(
             {"processado": True, "processado_em": agora}).in_("order_id", ids).execute())
         print(f"[{sid}] {len(order_ids)} pedido(s) da fila processados.")
+
     # MESMO aviso do Telegram de sempre (venda, estoque e margem)
     if NOTIFICAR:
         try:
@@ -521,14 +622,18 @@ def processar_fila():
         except Exception as e:
             print("Aviso: falha na notificacao:", e)
     return total
+
+
 def main():
     tokens = lista_refresh_tokens()
     if not tokens:
         raise SystemExit("Nenhum refresh_token. Configure o secret ML_REFRESH_TOKEN.")
+
     for seller_id, refresh in tokens:
         if SO_SELLER and str(seller_id) != SO_SELLER:
             continue                      # backfill de uma conta só: pula as outras (nem renova o token delas)
         access, sid, refresh = obter_access(sb, seller_id, refresh)
+
         n = puxar_conta(access, sid)
         try:
             enriquecer_frete(access, sid)
@@ -543,11 +648,14 @@ def main():
         except Exception as e:
             print("Aviso: falha na localizacao:", e)
         print(f"[{sid}] {n} vendas atualizadas em {datetime.now()}")
+
     if NOTIFICAR:
         try:
             notificar_vendas_novas()
         except Exception as e:
             print("Aviso: falha na notificacao:", e)
+
+
 if __name__ == "__main__":
     # MODO=fila -> processa só a fila do webhook (tempo real)
     # sem MODO    -> rodada normal (a cada 5 min, últimos DIAS dias)
