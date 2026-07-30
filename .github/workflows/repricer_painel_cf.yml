@@ -1,0 +1,75 @@
+name: Repricer - Painel Arcos (CF, so leitura)
+
+# ---------------------------------------------------------------------------
+# PARA QUE SERVE
+#
+# Alimentar o painel da Arcos com a concorrência da conta Ponto Musical CF
+# (177795203): price_to_win, menor concorrente, quem está ganhando e a lista
+# de pausados. É o mesmo repricer_piloto.py que já roda para as outras contas
+# - a diferença é que aqui ele NUNCA aplica preço.
+#
+# POR QUE ELE PRECISA EXISTIR
+#
+# O repricer_piloto.yml roda de hora em hora, mas com
+#     SELLER_ID: ${{ github.event.inputs.seller_id || '471489691' }}
+# ou seja, na Cabo Frio. A CF só recebia dado quando alguém disparava na mão -
+# a última vez foi 27/07, e era por isso que o painel mostrava concorrência de
+# três dias atrás como se fosse de agora.
+#
+# AS TRÊS TRAVAS QUE MANTÊM A CF EM SIMULAÇÃO
+#
+#   CONFIRMA: 'NAO'   modo simulação. O seu próprio comentário no piloto diz
+#                     o que isso faz: "Agendado = SIMULAÇÃO (alimenta o painel
+#                     sem escrever)". Grava o log, não toca no anúncio.
+#
+#   ATIVO: 'SIM'      precisa ficar SIM. Na linha 543 do piloto, ATIVO=NAO
+#                     imprime "botão de pânico - nada será escrito" e SAI
+#                     antes de analisar. Desligar aqui não protegeria nada:
+#                     mataria justamente o dado que queremos.
+#
+#   MAX_ALTERACOES: '0' redundante em simulação, e de propósito. Se um dia
+#                     alguém rodar isto na mão marcando confirma=SIM, o teto
+#                     de alterações continua barrando.
+#
+# Nada aqui muda o comportamento da MG nem da Cabo Frio: é arquivo novo, com
+# fila própria.
+# ---------------------------------------------------------------------------
+
+on:
+  schedule:
+    # :30 de propósito. O piloto que aplica preço roda em :00 - se os dois
+    # começassem juntos, disputariam a mesma janela de API do Mercado Livre e
+    # a conta que aplica preço é a que não pode atrasar.
+    - cron: '30 * * * *'
+  workflow_dispatch:
+  repository_dispatch:
+    types: [painel_cf]
+
+concurrency:
+  # Fila PRÓPRIA. Se usasse ml-repricer-piloto, esta rodada de leitura entraria
+  # atrás da que aplica preço e poderia segurá-la.
+  group: ml-repricer-cf
+  cancel-in-progress: false
+
+jobs:
+  cf:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Instalar dependencias
+        run: pip install requests supabase
+      - name: Ler concorrencia da CF (simulacao, nao aplica preco)
+        env:
+          ML_CLIENT_ID: ${{ secrets.ML_CLIENT_ID }}
+          ML_CLIENT_SECRET: ${{ secrets.ML_CLIENT_SECRET }}
+          ML_REFRESH_TOKEN: ${{ secrets.ML_REFRESH_TOKEN }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          SELLER_ID: '177795203'   # Ponto Musical CF
+          CONFIRMA: 'NAO'          # simulação: alimenta o painel, não aplica
+          ATIVO: 'SIM'             # ver o comentário lá em cima antes de mudar
+          MAX_ALTERACOES: '0'
+        run: python repricer_piloto.py
