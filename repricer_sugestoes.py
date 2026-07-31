@@ -372,6 +372,33 @@ def preco_oferta(o):
         except (TypeError, ValueError):
             pass
     return None
+def preco_exibicao(o):
+    """Preço para MOSTRAR — nunca para decidir.
+
+    Existe um tipo de candidata em que o VENDEDOR escolhe o valor: a API
+    manda price = 0 e, no lugar, uma faixa (min/max/suggested). É o caso da
+    SELLER_CAMPAIGN FLEXIBLE_PERCENTAGE e de parte das PRICE_DISCOUNT.
+
+    O preco_oferta() devolve None nesses casos, e faz certo: o robô não pode
+    inventar um preço para entrar numa promoção. Só que a tela da Arcos
+    precisa MOSTRAR a campanha — foi assim que a "ARCOS BASE - 08-26" ficou
+    invisível no painel apesar de estar candidata no Mercado Livre.
+
+    Então esta função existe em separado, e o nome é para não haver dúvida:
+    ela alimenta a vitrine, não a decisão."""
+    p = preco_oferta(o)
+    if p:
+        return p
+    for k in ("suggested_discounted_price", "max_discounted_price"):
+        try:
+            v = float(o.get(k))
+            if v > 0:
+                return v
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
 def avaliar(o, cat, ltid, access, frete, custo):
     """Calcula a margem de UMA oferta (candidata ou ativa).
     Retorna None se não der pra avaliar (sem preço ou sem preço original)."""
@@ -463,12 +490,18 @@ def _oferta_dict(a, ativa_flag, recomendada_flag, acao=None, access=None):
         if isinstance(det, dict):
             ini = ini or _data_promo(det, "start_date")
             fim = fim or _data_promo(det, "finish_date", "end_date")
-    return {"nome": o.get("name"), "tipo": o.get("type"),
-            "rebate": a.get("mp"), "desconto_vendedor": a.get("sp"),
-            "preco": a.get("pb"), "inicio": ini, "fim": fim,
-            "margem": a.get("margem"), "ativa": ativa_flag,
-            "recomendada": recomendada_flag,
-            "acao": (acao if recomendada_flag else None)}
+    d = {"nome": o.get("name"), "tipo": o.get("type"),
+         "rebate": a.get("mp"), "desconto_vendedor": a.get("sp"),
+         "preco": a.get("pb"), "inicio": ini, "fim": fim,
+         "margem": a.get("margem"), "ativa": ativa_flag,
+         "recomendada": recomendada_flag,
+         "acao": (acao if recomendada_flag else None)}
+    # campanha de preço aberto: o valor mostrado é o SUGERIDO, e a faixa
+    # inteira vai junto para a tela poder simular qualquer desconto dentro dela
+    if a.get("faixa"):
+        d["preco_min"], d["preco_max"] = a["faixa"]
+        d["preco_aberto"] = True
+    return d
 # NOTA: as campanhas de marketplace (SMART/PRICE_MATCHING etc.) já vêm no endpoint
 # por item (/seller-promotions/items/{id}) como candidatas — não precisa varrer as
 # campanhas do vendedor. Pro PAINEL mostramos TODAS as candidatas (inclusive as
@@ -486,7 +519,14 @@ def processar_item(item_id, access, sid, detalhes):
         cand_raw = [o for o in ofertas if isinstance(o, dict)
                     and (o.get("status") or "").lower() == "candidate"
                     and o.get("original_price") and preco_oferta(o)]
-        if not ativas_raw and not cand_raw:
+        # candidatas de preço aberto (price = 0 + faixa). Elas NÃO entram na
+        # decisão do robô, mas não podem fazer o anúncio inteiro desaparecer.
+        tem_aberta = any(isinstance(o, dict)
+                         and (o.get("status") or "").lower() == "candidate"
+                         and o.get("original_price")
+                         and not preco_oferta(o) and preco_exibicao(o)
+                         for o in ofertas)
+        if not ativas_raw and not cand_raw and not tem_aberta:
             return None
         it = detalhes.get(item_id)
         if not isinstance(it, dict):
@@ -522,6 +562,26 @@ def processar_item(item_id, access, sid, detalhes):
         # Esta trava vale só pra DECISÃO do robô — no painel mostramos todas (inclusive pending).
         cand = [c for c in cand_todas if cand_vigente(c["o"], access)]
         seguras = [c for c in cand if c["margem"] >= piso]
+        # ---- de preço aberto: avaliadas pelo valor SUGERIDO, só para a tela ----
+        # Ficam fora de cand/cand_todas de propósito: se entrassem, virariam
+        # candidatas a 'alvo' e o robô tentaria aplicar um preço que ninguém
+        # escolheu. Nas contas que aplicam de verdade isso seria grave.
+        cand_abertas = []
+        for _o in ofertas:
+            if not (isinstance(_o, dict) and (_o.get("status") or "").lower() == "candidate"
+                    and _o.get("original_price")):
+                continue
+            if preco_oferta(_o):
+                continue                      # essa já está na decisão
+            _pe = preco_exibicao(_o)
+            if not _pe:
+                continue
+            _o2 = dict(_o)
+            _o2["price"] = _pe
+            _ev = avaliar(_o2, cat, ltid, access, frete, custo)
+            if _ev:
+                _ev["faixa"] = (_o.get("min_discounted_price"), _o.get("max_discounted_price"))
+                cand_abertas.append(_ev)
         # ---- decide a ação (sua regra) ----
         # NUNCA sai de uma promoção que já está — mesmo abaixo do piso. Só TROCA se houver
         # uma que respeite o piso E pague MAIS (recebe maior). Senão, MANTÉM (com alerta se abaixo).
@@ -561,7 +621,7 @@ def processar_item(item_id, access, sid, detalhes):
                         "grupo": grupo, "margem_minima": piso,
                         "tem_ativa": False,
                         "ofertas": [_oferta_dict(_c, False, False, None, access)
-                                    for _c in sorted(cand_todas,
+                                    for _c in sorted(cand_todas + cand_abertas,
                                         key=lambda x: (x["margem"] if x.get("margem") is not None else -999),
                                         reverse=True)],
                         "motivo": f"nenhuma campanha vigente acima do piso de {piso:.0f}%",
@@ -578,7 +638,9 @@ def processar_item(item_id, access, sid, detalhes):
         ofertas_lst = []
         if ativa:
             ofertas_lst.append(_oferta_dict(ativa, True, acao == "manter", acao, access))
-        for _c in sorted(cand_todas, key=lambda x: (x["margem"] if x.get("margem") is not None else -999), reverse=True):
+        for _c in sorted(cand_todas + cand_abertas,
+                         key=lambda x: (x["margem"] if x.get("margem") is not None else -999),
+                         reverse=True):
             ofertas_lst.append(_oferta_dict(_c, False, _c is alvo, acao, access))
         sug = {
             "seller_id": str(sid),
