@@ -644,38 +644,42 @@ def _linha_log(s):
     flag = " ⚠️ABAIXO DO PISO" if s.get("alerta") else ""
     return f"[{s['acao']}]{flag} {s['item_id']} {str(s.get('titulo'))[:26]}{at}{alvo_txt} (piso {s['margem_minima']})"
 def gravar_em_lote(sugs, tam=200):
+    """Devolve True se TODOS os lotes entraram. Isso passou a importar: a
+    limpeza da rodada anterior agora depende de a nova ter entrado inteira."""
+    ok = True
     for i in range(0, len(sugs), tam):
         try:
             sb.table("repricer_sugestoes").insert(sugs[i:i + tam]).execute()
         except Exception as e:
+            ok = False
             print(f"  erro ao gravar lote {i}: {e}", flush=True)
+    return ok
 def main():
+    """GRAVAR ANTES, APAGAR DEPOIS.
+
+    Antes, esta função começava apagando as sugestões e só gravava as novas
+    no fim — e a rodada leva minutos. Nessa janela a tabela ficava vazia, e
+    QUALQUER leitura pegava a conta inteira sem campanha: o painel abrindo,
+    um F5, a atualização automática. Não adianta ensinar cada leitor a
+    esperar; enquanto existir um buraco, alguém cai nele.
+
+    Agora não existe buraco. As linhas novas entram PRIMEIRO, convivendo com
+    as velhas; só depois de tudo gravado é que as da rodada anterior saem. A
+    tela sempre pega a linha mais nova de cada anúncio, então durante a
+    troca ela vê uma foto completa — parte nova, parte velha, nenhuma
+    faltando.
+
+    E se a gravação falhar no meio, a limpeza NÃO acontece: fica valendo a
+    rodada anterior inteira, que é melhor que meia rodada nova.
+    """
     preload()
     total_sug = 0
     contadores = {"entrar": 0, "trocar": 0, "sair": 0, "manter": 0}
     SEM_CUSTO.clear()
-    try:
-        q = sb.table("repricer_sugestoes").delete().neq("status", "aplicada")  # limpa tudo menos aplicadas
-        if SELLER_ID_FILTRO:
-            q = q.eq("seller_id", SELLER_ID_FILTRO)                            # só a conta em teste
-        q.execute()
-    except Exception as e:
-        print("Aviso: não consegui limpar pendentes:", e, flush=True)
-    try:
-        q = sb.table("repricer_sem_custo").delete().neq("item_id", "")         # limpa a lista anterior
-        if SELLER_ID_FILTRO:
-            q = q.eq("seller_id", SELLER_ID_FILTRO)
-        q.execute()
-    except Exception as e:
-        print("Aviso: não consegui limpar sem_custo:", e, flush=True)
     VITRINE.clear()
-    try:
-        q = sb.table("promo_vitrine").delete().neq("item_id", "")              # limpa a vitrine anterior
-        if SELLER_ID_FILTRO:
-            q = q.eq("seller_id", SELLER_ID_FILTRO)
-        q.execute()
-    except Exception as e:
-        print("Aviso: não consegui limpar a vitrine:", e, flush=True)
+    tudo_ok = True
+    # marco da rodada: o que for mais velho que isto é da rodada anterior
+    T0 = datetime.now(timezone.utc).isoformat()
     for seller_id, refresh in contas():
         access, sid, refresh = obter_access(sb, seller_id, refresh)
         if SELLER_ID_FILTRO and str(sid) != SELLER_ID_FILTRO:
@@ -694,25 +698,61 @@ def main():
         for s in sugs:
             contadores[s["acao"]] = contadores.get(s["acao"], 0) + 1
             print(_linha_log(s), flush=True)
-        gravar_em_lote(sugs)
+        tudo_ok = gravar_em_lote(sugs) and tudo_ok
         total_sug += len(sugs)
         print(f"--- conta {sid}: {len(sugs)} registros gravados ---", flush=True)
-    # grava os "sem custo" (promoção disponível mas sem custo cadastrado)
+    # a vitrine tem chave (seller_id, item_id), então é upsert: a linha do
+    # anúncio é reescrita no lugar, sem nunca deixar de existir. O criado_em
+    # vai explícito para marcar a rodada — no upsert o valor padrão da coluna
+    # não é reaplicado, e sem isso a linha nova pareceria velha na limpeza.
+    if VITRINE:
+        try:
+            for v in VITRINE:
+                v["criado_em"] = T0
+            for i in range(0, len(VITRINE), 200):
+                sb.table("promo_vitrine").upsert(VITRINE[i:i + 200],
+                                                 on_conflict="seller_id,item_id").execute()
+            print(f"vitrine: {len(VITRINE)} anúncios gravados (só para o painel da Arcos)", flush=True)
+        except Exception as e:
+            tudo_ok = False
+            print("Aviso: não consegui gravar a vitrine:", e, flush=True)
+
+    # ---- só agora sai a rodada anterior ----
+    if tudo_ok:
+        try:
+            q = sb.table("repricer_sugestoes").delete().neq("status", "aplicada").lt("criado_em", T0)
+            if SELLER_ID_FILTRO:
+                q = q.eq("seller_id", SELLER_ID_FILTRO)
+            q.execute()
+        except Exception as e:
+            print("Aviso: não consegui limpar as sugestões antigas:", e, flush=True)
+        try:
+            q = sb.table("promo_vitrine").delete().lt("criado_em", T0)
+            if SELLER_ID_FILTRO:
+                q = q.eq("seller_id", SELLER_ID_FILTRO)
+            q.execute()
+        except Exception as e:
+            print("Aviso: não consegui limpar a vitrine antiga:", e, flush=True)
+    else:
+        print("ATENÇÃO: houve falha ao gravar — NÃO apaguei a rodada anterior. "
+              "Fica valendo o dado de antes, inteiro.", flush=True)
+
+    # O sem_custo continua sendo apagado e regravado: ele não alimenta o
+    # painel da Arcos, e eu não conheço as colunas dessa tabela bem o
+    # bastante para trocar o método sem olhar.
+    try:
+        q = sb.table("repricer_sem_custo").delete().neq("item_id", "")
+        if SELLER_ID_FILTRO:
+            q = q.eq("seller_id", SELLER_ID_FILTRO)
+        q.execute()
+    except Exception as e:
+        print("Aviso: não consegui limpar sem_custo:", e, flush=True)
     if SEM_CUSTO:
         try:
             for i in range(0, len(SEM_CUSTO), 200):
                 sb.table("repricer_sem_custo").insert(SEM_CUSTO[i:i + 200]).execute()
         except Exception as e:
             print("Aviso: não consegui gravar sem_custo:", e, flush=True)
-    # grava a vitrine (anúncios com campanha mas sem nada a recomendar) —
-    # tabela separada, lida só pelo painel da Arcos
-    if VITRINE:
-        try:
-            for i in range(0, len(VITRINE), 200):
-                sb.table("promo_vitrine").insert(VITRINE[i:i + 200]).execute()
-            print(f"vitrine: {len(VITRINE)} anúncios gravados (só para o painel da Arcos)", flush=True)
-        except Exception as e:
-            print("Aviso: não consegui gravar a vitrine:", e, flush=True)
     resumo = ", ".join(f"{k}: {v}" for k, v in contadores.items())
     print(f"\n=== {total_sug} registros gravados ({resumo}) | {len(SEM_CUSTO)} sem custo — nada foi aplicado no ML ===", flush=True)
 if __name__ == "__main__":
