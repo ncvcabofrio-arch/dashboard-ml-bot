@@ -28,6 +28,15 @@ PISOS = {}           # sku -> (margem_minima, nome_grupo)
 _pct_lock = threading.Lock()
 SEM_CUSTO = []       # anúncios com promoção disponível MAS sem custo cadastrado (pra cadastrar)
 _sc_lock = threading.Lock()
+# VITRINE: anúncios que TÊM campanha mas nenhuma a recomendar (todas abaixo do
+# piso, ou programadas para o futuro). Hoje eles somem: processar_item devolve
+# None e o anúncio não ganha linha nenhuma. O painel do repricer está certo em
+# não mostrá-los — não há o que aprovar. O painel da Arcos precisa vê-los,
+# porque ele existe para MOSTRAR campanha, não para recomendar.
+# Vão para a tabela promo_vitrine, separada. A repricer_sugestoes continua
+# recebendo exatamente as mesmas linhas de sempre.
+VITRINE = []
+_vt_lock = threading.Lock()
 def _estrategia_promo():
     """Estratégia p/ ESCOLHER a promoção nos anúncios TRADICIONAIS (fora do catálogo):
       - 'equilibrado' -> mira a MARGEM PADRÃO cadastrada (o piso do grupo) — recomendado
@@ -538,6 +547,25 @@ def processar_item(item_id, access, sid, detalhes):
                 alvo = (escolher_alvo(seguras, piso, ESTRATEGIA) if tradicional
                         else min(seguras, key=lambda a: a["pb"]))
             else:
+                # Nada a recomendar. Continua devolvendo None — a
+                # repricer_sugestoes fica idêntica ao que é hoje. Antes de
+                # sair, guarda o retrato do anúncio com TODAS as campanhas
+                # (cand_todas inclui as programadas) para o painel da Arcos.
+                with _vt_lock:
+                    VITRINE.append({
+                        "seller_id": str(sid), "item_id": item_id, "sku": sku,
+                        "titulo": titulo, "preco_atual": preco,
+                        "custo": custo, "custo_envio": frete,
+                        "custo_envio_origem": frete_origem,
+                        "estoque": it.get("available_quantity"),
+                        "grupo": grupo, "margem_minima": piso,
+                        "tem_ativa": False,
+                        "ofertas": [_oferta_dict(_c, False, False, None, access)
+                                    for _c in sorted(cand_todas,
+                                        key=lambda x: (x["margem"] if x.get("margem") is not None else -999),
+                                        reverse=True)],
+                        "motivo": f"nenhuma campanha vigente acima do piso de {piso:.0f}%",
+                    })
                 return None
         rejeitadas = " | ".join(
             _rotulo(a) + (" (ok)" if a["margem"] >= piso else f" (<{piso:.0f}%)")
@@ -640,6 +668,14 @@ def main():
         q.execute()
     except Exception as e:
         print("Aviso: não consegui limpar sem_custo:", e, flush=True)
+    VITRINE.clear()
+    try:
+        q = sb.table("promo_vitrine").delete().neq("item_id", "")              # limpa a vitrine anterior
+        if SELLER_ID_FILTRO:
+            q = q.eq("seller_id", SELLER_ID_FILTRO)
+        q.execute()
+    except Exception as e:
+        print("Aviso: não consegui limpar a vitrine:", e, flush=True)
     for seller_id, refresh in contas():
         access, sid, refresh = obter_access(sb, seller_id, refresh)
         if SELLER_ID_FILTRO and str(sid) != SELLER_ID_FILTRO:
@@ -668,6 +704,15 @@ def main():
                 sb.table("repricer_sem_custo").insert(SEM_CUSTO[i:i + 200]).execute()
         except Exception as e:
             print("Aviso: não consegui gravar sem_custo:", e, flush=True)
+    # grava a vitrine (anúncios com campanha mas sem nada a recomendar) —
+    # tabela separada, lida só pelo painel da Arcos
+    if VITRINE:
+        try:
+            for i in range(0, len(VITRINE), 200):
+                sb.table("promo_vitrine").insert(VITRINE[i:i + 200]).execute()
+            print(f"vitrine: {len(VITRINE)} anúncios gravados (só para o painel da Arcos)", flush=True)
+        except Exception as e:
+            print("Aviso: não consegui gravar a vitrine:", e, flush=True)
     resumo = ", ".join(f"{k}: {v}" for k, v in contadores.items())
     print(f"\n=== {total_sug} registros gravados ({resumo}) | {len(SEM_CUSTO)} sem custo — nada foi aplicado no ML ===", flush=True)
 if __name__ == "__main__":
