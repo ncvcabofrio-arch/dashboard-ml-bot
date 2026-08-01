@@ -64,14 +64,42 @@ def _buscar(H, offset, limit, endpoint="/listingModel/search"):
         headers=H, timeout=60)
 
 
+def _custo_num(v):
+    """Custo do Ideris como NUMERO, ou 0 quando nao der para ler.
+
+    O campo vem ora numero, ora texto — este arquivo ja sabia disso: o
+    comentario do coletar() cita o valor invalido '300O'. Devolver 0 no
+    que nao der para ler e de proposito: quem chama so grava quando for
+    maior que zero, entao valor duvidoso nunca sobrescreve custo bom."""
+    if isinstance(v, bool) or v is None:
+        return 0.0
+    if isinstance(v, (int, float)):
+        return float(v)
+    if isinstance(v, str):
+        t = v.strip().replace(" ", "").replace("R$", "")
+        # tenta como esta (1234.56) e depois no formato brasileiro (1.234,56)
+        for tentativa in (t, t.replace(".", "").replace(",", ".")):
+            try:
+                return float(tentativa)
+            except ValueError:
+                pass
+    return 0.0
+
+
 def _processar(batch, custos, nomes, modelos):
     """Extrai custo/nome/modelo de cada item e guarda por sku."""
     for item in batch:
         sku = item.get("sku")
         if not sku:
             continue
-        if item.get("cost") is not None:
-            custos[sku] = item.get("cost")
+        # Só grava custo REAL (> 0). Zero e nulo são "sem custo" e NÃO
+        # sobrescrevem. A trava anterior era  is not None  — o numero 0
+        # passava por ela e apagava custo digitado a mao. Foi assim que
+        # quatro custos viraram zero em 01/08 07:31 (o gravador registrou:
+        # service_role, POST /produtos).
+        c = _custo_num(item.get("cost"))
+        if c > 0:
+            custos[sku] = c
         nome = extrair_nome(item)
         if nome:
             nomes[sku] = nome
