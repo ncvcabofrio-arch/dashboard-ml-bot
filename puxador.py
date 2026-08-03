@@ -176,9 +176,54 @@ def tipo_anuncio(lt):
 
 
 def lista_refresh_tokens():
-    res = sb.table("contas").select("seller_id, refresh_token").execute()
-    tokens = [(c["seller_id"], c["refresh_token"])
-              for c in (res.data or []) if c.get("refresh_token")]
+    """As contas que ESTE robo deve puxar.
+
+    Ate hoje era "todas as que tem token", e isso funcionou enquanto todas
+    as contas eram da casa. Parou de servir na primeira conta de cliente:
+    este robo alimenta a tabela 'vendas', que e a base do BI, do DRE e do
+    App Vendas. Puxar a conta de um cliente aqui nao vaza nada pra fora -
+    contamina pra dentro, somando o faturamento dele ao seu. Dar baixa
+    nisso depois e bem pior do que nao deixar entrar.
+
+    A regra e por DONO, e no sentido de incluir, nao de excluir: o BI puxa
+    as contas da org da casa. Conta de cliente nao entra porque nao e sua,
+    e nao porque alguem lembrou de desmarcar. Conta nova sua entra sozinha,
+    porque nasce com a org certa (quem escreve e a edge function ml_oauth,
+    na hora de conectar).
+
+    ORG_BI e o nome da org da casa; da para mudar por variavel de ambiente
+    sem mexer aqui.
+
+    A leitura e tolerante de proposito: se a coluna 'org' ainda nao existir
+    (este arquivo subiu antes do PROMO_92), o robo volta ao comportamento
+    antigo e AVISA, em vez de morrer. Robo que quebra por coluna que falta
+    e pior que robo desatualizado - mas robo que muda de comportamento em
+    silencio e pior que os dois.
+    """
+    org_bi = os.environ.get("ORG_BI", "pontomusical").strip()
+
+    try:
+        res = sb.table("contas").select("seller_id, refresh_token, org").execute()
+        linhas = res.data or []
+        tem_org = True
+    except Exception:
+        res = sb.table("contas").select("seller_id, refresh_token").execute()
+        linhas = res.data or []
+        tem_org = False
+        print("AVISO: coluna 'org' nao existe na tabela contas - puxando TODAS "
+              "as contas (comportamento antigo). Rode o PROMO_92.")
+
+    tokens, fora = [], []
+    for c in linhas:
+        if not c.get("refresh_token"):
+            continue
+        if tem_org and (c.get("org") or "") != org_bi:
+            fora.append(f"{c.get('seller_id')} (org={c.get('org') or 'vazia'})")
+            continue
+        tokens.append((c["seller_id"], c["refresh_token"]))
+
+    if fora:
+        print(f"Fora do BI, nao sao da org '{org_bi}' ({len(fora)}): {', '.join(fora)}")
     if not tokens and SEED_REFRESH:
         tokens = [(None, SEED_REFRESH)]
     return tokens
@@ -586,12 +631,26 @@ def processar_fila():
     for r in pend:
         por_conta[str(r.get("seller_id") or "")].append(str(r["order_id"]))
 
+    # lista_refresh_tokens ja devolve so as contas da casa, entao um pedido de
+    # cliente que caia na fila nao encontra token e e pulado. Isso resolve o
+    # BI, mas deixaria a linha na fila para sempre - e a fila so cresce.
     tokens = {str(sid): rt for sid, rt in lista_refresh_tokens() if sid}
     total = 0
     for sid, order_ids in por_conta.items():
         refresh = tokens.get(sid)
         if not refresh:
-            print(f"Conta {sid} sem token cadastrado — pulando {len(order_ids)} pedido(s).")
+            # O webhook do Mercado Livre avisa sobre TODAS as contas que
+            # autorizaram o aplicativo - inclusive as de cliente. Elas nao
+            # entram no BI (e o certo), mas precisam sair da fila, senao
+            # voltam a ser tentadas a cada rodada, para sempre.
+            print(f"Conta {sid} nao e da casa (ou sem token) — {len(order_ids)} "
+                  f"pedido(s) marcados como processados sem entrar no BI.")
+            try:
+                agora = datetime.now(timezone.utc).isoformat()
+                _retry(lambda ids=order_ids: sb.table("fila_pedidos").update(
+                    {"processado": True, "processado_em": agora}).in_("order_id", ids).execute())
+            except Exception as e:
+                print("  aviso: nao consegui limpar a fila:", str(e)[:100])
             continue
         access, sid, refresh = obter_access(sb, sid, refresh)
         linhas, pags = [], []
