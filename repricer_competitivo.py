@@ -384,6 +384,7 @@ def analisar(item_id, access, sid):
                 "preco_venda": round(pv, 2) if pv else None, "promo": promo_ativa,
                 "tipo_anuncio": _tipo_anuncio(ltid), "catalog": catalog_listing,
                 "catalog_pid": pid, "desligado": desligado,
+                "upid": it.get("user_product_id"),
                 "sku_sugerido": sug_sku, "sku_origem": sug_org}
     frete, _ = rec.frete_de(sku, item_id, access)
     piso, grupo = rec.margem_minima_do(sku)
@@ -404,6 +405,12 @@ def analisar(item_id, access, sid):
             "margem_cheio": round(m_cheio, 1), "preco_piso": pmin, "pma": pma, "catalog": catalog_listing,
             "custo": custo, "frete": round(frete, 2), "cat": cat, "ltid": ltid,
             "tipo_anuncio": _tipo_anuncio(ltid), "catalog_pid": pid,
+            # user_product_id: o agrupamento do PROPRIO Mercado Livre para o
+            # mesmo produto vendido em condicoes diferentes (Premium, Classico,
+            # variacao de frete). Se um irmao tem SKU, o que nao tem e o mesmo
+            # produto - nao e palpite, e definicao. Quem usa isto e o piloto,
+            # que ve a conta inteira; aqui so carrego o dado.
+            "upid": it.get("user_product_id"),
             "sku_sugerido": sug_sku, "sku_origem": sug_org}  # p/ avaliar campanhas
     if not catalog_listing:
         m = MATCH.get(sku) or MATCH.get(item_id)   # sem SKU -> busca pelo item_id
