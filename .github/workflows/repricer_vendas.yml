@@ -1,0 +1,96 @@
+name: Repricer - vendas recentes (todas as contas)
+
+# ---------------------------------------------------------------------------
+# PARA QUE SERVE
+#
+# Encher a tabela repricer_vendas, que e a fonte PROPRIA do repricer para
+# "o que vendeu nos ultimos dias". Ate agora o repricer lia a tabela
+# 'vendas', que e do BI - e isso amarrava os dois sistemas: ligar uma conta
+# de cliente no repricer obrigava a puxar os pedidos dela para dentro do
+# financeiro da casa.
+#
+# Este robo puxa TODAS as contas com token, de qualquer org, e escreve so
+# na repricer_vendas. O puxador do BI continua puxando so a org da casa.
+# Duas fontes, dois donos, nenhuma contaminacao.
+#
+# ---------------------------------------------------------------------------
+# POR QUE :15 E NAO :00
+#
+# Nesta conta de API do Mercado Livre ja rodam, de hora em hora:
+#
+#     :00  repricer_piloto  (aplica preco - e o que nao pode atrasar)
+#     :30  painel da Arcos  (leitura da CF)
+#
+# Este e leitura e nao tem pressa, entao fica no :15, longe dos dois. Se um
+# dia der 429 (limite de taxa), o primeiro lugar a olhar e se alguem
+# aproximou os horarios.
+#
+# ---------------------------------------------------------------------------
+# A JANELA
+#
+# DIAS: 35 cobre com folga o que o repricer usa hoje - o piloto olha 5 dias
+# no portao de vendas, o painel olha um corte curto. Folga custa pouco aqui
+# (o robo pede pouco de cada pedido) e evita o dia em que alguem aumenta a
+# janela do piloto e o dado nao esta la.
+#
+# A tabela se limpa sozinha: o robo apaga o que passou de DIAS+5.
+# ---------------------------------------------------------------------------
+
+on:
+  schedule:
+    - cron: '15 * * * *'
+  workflow_dispatch:
+    inputs:
+      seller_id:
+        description: 'Rodar SO esta conta (vazio = todas)'
+        required: false
+        default: ''
+      dias:
+        description: 'Janela em dias (vazio = 35)'
+        required: false
+        default: ''
+
+concurrency:
+  # fila propria: esta rodada nunca deve segurar a que aplica preco
+  group: repricer-vendas
+  cancel-in-progress: false
+
+jobs:
+  vendas:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Instalar dependencias
+        run: pip install requests supabase
+      - name: Puxar vendas recentes para o repricer
+        env:
+          ML_CLIENT_ID: ${{ secrets.ML_CLIENT_ID }}
+          ML_CLIENT_SECRET: ${{ secrets.ML_CLIENT_SECRET }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          DIAS: ${{ github.event.inputs.dias || '35' }}
+          SO_SELLER: ${{ github.event.inputs.seller_id || '' }}
+        run: python repricer_vendas.py
+
+# ---------------------------------------------------------------------------
+# NA PRIMEIRA VEZ
+#
+# Dispare na mao (Run workflow), deixe terminar, e confira no SQL Editor:
+#
+#   select seller_id, org, count(*) linhas,
+#          to_char(max(data_aprovacao),'DD/MM') as mais_recente
+#     from public.repricer_vendas group by 1,2 order by 1;
+#
+# Esperado: as tres contas da casa com linhas, e as duas da cliente com
+# linhas tambem (ou zero, se ela nao vendeu nada em 35 dias - o log do robo
+# diz "nenhum pedido na janela" quando e esse o caso, entao da para
+# distinguir "nao vendeu" de "nao puxou").
+#
+# SO DEPOIS de a tabela estar cheia e que os leitores mudam de 'vendas'
+# para 'repricer_vendas'. Trocar antes faria o portao de vendas do piloto
+# ler zero - e zero, para ele, nao e "nao sei": e "nao vende", que muda
+# decisao de preco.
+# ---------------------------------------------------------------------------
