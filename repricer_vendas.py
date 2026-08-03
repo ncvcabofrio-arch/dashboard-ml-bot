@@ -59,6 +59,10 @@ SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 DIAS = int(os.environ.get("DIAS", "35"))
 SO_SELLER = os.environ.get("SO_SELLER", "").strip()
+# o rebate custa uma chamada de API por pedido, entao ele e limitado em
+# janela e em teto por rodada - ver enriquecer_rebate()
+REBATE_DIAS = int(os.environ.get("REBATE_DIAS", "7"))
+REBATE_MAX = int(os.environ.get("REBATE_MAX", "300"))
 
 sb = create_client(SUPABASE_URL, SUPABASE_KEY)
 
@@ -175,28 +179,96 @@ def linhas_do_pedido(o, seller_id, org):
             "quantidade": qtd,
             "status": status,
             "data_aprovacao": data,
-            "rebate": _rebate(it),
+            # rebate nao vem no pedido: e preenchido depois, por
+            # enriquecer_rebate(), numa segunda chamada por pedido
+            "rebate": None,
             "atualizado_em": datetime.now(timezone.utc).isoformat(),
         })
     return linhas
 
 
-def _rebate(it):
-    """O desconto que o Mercado Livre bancou naquele item, quando existe.
+def rebate_do_pedido(oid, access):
+    """O desconto que o Mercado Livre bancou no pedido.
 
-    O campo muda de nome conforme a campanha; pego o primeiro que vier e
-    devolvo None se nenhum aparecer - None e 'nao sei', e o painel mostra
-    vazio. Preencher com zero seria dizer 'o ML nao bancou nada', que e
-    outra afirmacao, e eu nao tenho como saber.
+    Este numero NAO vem no pedido. Vem de uma segunda chamada,
+    /orders/{id}/discounts, somando (total - seller) dos descontos em que
+    existe um 'supplier' - ou seja, os que alguem que nao voce bancou. E
+    exatamente o que o puxador.py do BI ja faz; copiei a conta de la em
+    vez de inventar outra, senao os dois numeros divergiriam e ninguem
+    saberia qual esta certo.
+
+    Minha primeira versao procurava um campo de rebate dentro do item do
+    pedido. Nao existe: a conferencia veio com 0 de 1405 preenchidos, o
+    que teria virado uma coluna morta no painel.
+
+    Devolve None quando a chamada falha - None e 'nao sei', e o painel
+    mostra vazio. Zero seria afirmar que o ML nao bancou nada, que e
+    outra coisa.
     """
-    for k in ("sale_fee_rebate", "rebate", "discount_amount"):
-        v = it.get(k)
-        if v is not None:
-            try:
-                return float(v)
-            except (TypeError, ValueError):
-                pass
-    return None
+    try:
+        disc = ml_get(f"/orders/{oid}/discounts", access)
+    except Exception:
+        return None
+    if not isinstance(disc, dict):
+        return None
+    total = 0.0
+    for det in (disc.get("details") or []):
+        if not det.get("supplier"):
+            continue
+        for itx in (det.get("items") or []):
+            amts = itx.get("amounts") or {}
+            total += max((amts.get("total") or 0) - (amts.get("seller") or 0), 0)
+    return round(total, 2)
+
+
+def enriquecer_rebate(seller_id, access, apelido):
+    """Preenche o rebate dos pedidos recentes que ainda nao tem.
+
+    E uma chamada de API POR PEDIDO, entao ela e limitada de proposito em
+    duas dimensoes:
+
+      REBATE_DIAS  so os pedidos recentes - e o unico intervalo que o
+                   painel mostra. Rebate de 30 dias atras nao muda
+                   decisao nenhuma.
+      REBATE_MAX   teto por rodada. Se sobrar, a proxima rodada pega o
+                   resto, porque so busco quem esta com rebate nulo.
+
+    Assim o custo por hora fica previsivel, e o robo se acerta sozinho
+    depois de um dia parado, em vez de tentar mil chamadas de uma vez.
+    """
+    corte = (datetime.now(timezone.utc) - timedelta(days=REBATE_DIAS)).isoformat()
+    try:
+        pend = (sb.table("repricer_vendas")
+                .select("order_id")
+                .eq("seller_id", seller_id)
+                .is_("rebate", "null")
+                .gte("data_aprovacao", corte)
+                .order("data_aprovacao", desc=True)
+                .limit(REBATE_MAX).execute().data) or []
+    except Exception as e:
+        print(f"  {apelido}: nao consegui listar pedidos sem rebate - {str(e)[:120]}")
+        return 0
+
+    pedidos = sorted({str(p["order_id"]) for p in pend})
+    if not pedidos:
+        return 0
+
+    feitos = 0
+    for oid in pedidos:
+        v = rebate_do_pedido(oid, access)
+        if v is None:
+            continue
+        try:
+            (sb.table("repricer_vendas").update({"rebate": v})
+               .eq("seller_id", seller_id).eq("order_id", oid).execute())
+            feitos += 1
+        except Exception:
+            pass
+        time.sleep(0.15)
+
+    print(f"  {apelido}: rebate preenchido em {feitos} de {len(pedidos)} pedido(s)"
+          + (f" (teto de {REBATE_MAX} por rodada)" if len(pedidos) >= REBATE_MAX else ""))
+    return feitos
 
 
 def puxar(seller_id, access, org, apelido):
@@ -273,6 +345,13 @@ def main():
             total += puxar(seller_id, access, org, apelido)
         except Exception as e:
             print(f"  {apelido}: falhou ao puxar - {str(e)[:150]}")
+            continue
+        try:
+            enriquecer_rebate(seller_id, access, apelido)
+        except Exception as e:
+            # rebate e enfeite de tela: se falhar, as vendas ja estao
+            # gravadas e o portao do piloto continua funcionando
+            print(f"  {apelido}: falhou no rebate - {str(e)[:150]}")
 
     limpar_janela()
     print(f"Pronto: {total} linha(s) gravada(s).")
