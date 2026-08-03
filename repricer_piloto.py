@@ -215,12 +215,28 @@ def _datas():
 
 
 def carregar_vendas(sid, dias):
-    """Unidades vendidas (NÃO canceladas) nos últimos `dias`, por item_id e por sku."""
+    """Unidades vendidas (NÃO canceladas) nos últimos `dias`, por item_id e por sku.
+
+    FONTE: repricer_vendas, e não mais a tabela 'vendas'.
+
+    A 'vendas' é do BI: ela junta Mercado Livre e Shopee e é enchida pelo
+    puxador do financeiro. Enquanto o repricer lia de lá, ligar uma conta
+    de CLIENTE aqui obrigava a puxar os pedidos dele para dentro do DRE
+    da casa - dois sistemas presos pela mesma tabela.
+
+    A repricer_vendas é do repricer: só Mercado Livre, só o que este robô
+    consome, e para todas as orgs. Conferimos as duas lado a lado antes
+    de trocar, na janela de 5 dias que este portão usa: itens iguais nas
+    três contas da casa (7/7, 63/63, 5/5). A única diferença era um item
+    da Shopee, que não é anúncio do ML e não deve entrar aqui mesmo.
+
+    As colunas são as mesmas, então o resto desta função não mudou.
+    """
     corte = (date.today() - timedelta(days=dias)).isoformat()
     por_item, por_sku, ini = {}, {}, 0
     while True:
         try:
-            lote = (rec.sb.table("vendas")
+            lote = (rec.sb.table("repricer_vendas")
                     .select("item_id,sku,quantidade,status,data_aprovacao")
                     .eq("seller_id", str(sid)).gte("data_aprovacao", corte)
                     .range(ini, ini + 999).execute().data) or []
@@ -262,7 +278,7 @@ def ultima_venda_dia(sid, dias=90):
     it, ini = {}, 0
     while True:
         try:
-            lote = (rec.sb.table("vendas").select("item_id,status,data_aprovacao")
+            lote = (rec.sb.table("repricer_vendas").select("item_id,status,data_aprovacao")
                     .eq("seller_id", str(sid)).gte("data_aprovacao", corte)
                     .range(ini, ini + 999).execute().data) or []
         except Exception as e:
@@ -311,7 +327,7 @@ def vendas_pedidos_por_item(sid, dias=120):
     tmp, ini = {}, 0   # tmp[iid] = {order_id: dia}
     while True:
         try:
-            lote = (rec.sb.table("vendas").select("item_id,order_id,status,data_aprovacao")
+            lote = (rec.sb.table("repricer_vendas").select("item_id,order_id,status,data_aprovacao")
                     .eq("seller_id", str(sid)).gte("data_aprovacao", corte)
                     .range(ini, ini + 999).execute().data) or []
         except Exception as e:
