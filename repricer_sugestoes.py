@@ -32,6 +32,83 @@ PISOS = {}           # sku -> (margem_minima, nome_grupo)
 _pct_lock = threading.Lock()
 SEM_CUSTO = []       # anúncios com promoção disponível MAS sem custo cadastrado (pra cadastrar)
 _sc_lock = threading.Lock()
+# ---------------------------------------------------------------------------
+# DE ONDE VEM O SKU DO ANÚNCIO
+#
+# O Mercado Livre guarda o SKU do vendedor em TRÊS lugares, e por muito tempo
+# este robô olhou só dois:
+#
+#     item.seller_custom_field       campo antigo (ERP, formulário velho)
+#     item.attributes[SELLER_SKU]    formulário ATUAL do ML
+#     variations[].(os dois acima)   quando o anúncio tem variação
+#
+# O preço disso apareceu na IRMAOS_BROTHERS: 227 anúncios, vários com SKU no
+# Mercado Livre, e ZERO SKU chegando aqui. Zero exato nunca é "não preencheu"
+# — é campo que ninguém leu. Confirmado item a item pelo diagnóstico:
+# seller_custom_field=None, atributo SELLER_SKU='40P5'.
+#
+# O contador SKU_ORIGEM existe pra isso não voltar a passar despercebido:
+# toda rodada imprime de onde os SKUs vieram.
+# ---------------------------------------------------------------------------
+SKU_ORIGEM = {}      # origem -> quantos anúncios (só pro log)
+_sku_lock = threading.Lock()
+def _txt(v):
+    """Texto limpo de um campo que pode vir nulo, número ou string."""
+    return "" if v is None else str(v).strip()
+def _attr_sku(bloco):
+    """SKU guardado como ATRIBUTO 'SELLER_SKU'. Serve pro item e pra variação.
+    Devolve None pra atributo em branco: SKU vazio é pior que SKU nenhum,
+    porque casaria com qualquer produto sem SKU do catálogo."""
+    if not isinstance(bloco, dict):
+        return None
+    for a in (bloco.get("attributes") or []):
+        if isinstance(a, dict) and a.get("id") == "SELLER_SKU":
+            return _txt(a.get("value_name")) or None
+    return None
+def sku_do_item(it):
+    """O SKU do anúncio, procurado nos três lugares, nesta ordem:
+        1. seller_custom_field / seller_sku    (campos de nível de anúncio)
+        2. atributo SELLER_SKU                  (formulário atual do ML)
+        3. dentro das variações                 SÓ SE TODAS CONCORDAREM
+    O item 3 tem essa condição por um motivo prático: um anúncio cujas
+    variações têm SKUs DIFERENTES é mais de um produto no mesmo lugar.
+    Escolher um deles daria um custo único pra coisas de custo diferente —
+    margem errada com cara de certa. Nesse caso devolvo None de propósito e
+    conto como 'variacoes_divergentes', pra virar decisão sua no painel em
+    vez de chute meu aqui.
+    """
+    if not isinstance(it, dict):
+        return None
+    sku = _txt(it.get("seller_custom_field")) or _txt(it.get("seller_sku")) or None
+    origem = "campo_antigo" if sku else None
+    if not sku:
+        sku = _attr_sku(it)
+        origem = "atributo_SELLER_SKU" if sku else None
+    if not sku:
+        vs = []
+        for v in (it.get("variations") or []):
+            if not isinstance(v, dict):
+                continue
+            s = _txt(v.get("seller_custom_field")) or _txt(v.get("seller_sku")) or _attr_sku(v)
+            if s:
+                vs.append(s)
+        distintos = set(vs)
+        if len(distintos) == 1:
+            sku, origem = vs[0], "variacao"
+        elif len(distintos) > 1:
+            origem = "variacoes_divergentes"        # fica SEM sku, de propósito
+    with _sku_lock:
+        k = origem or "sem_sku_nenhum"
+        SKU_ORIGEM[k] = SKU_ORIGEM.get(k, 0) + 1
+    return sku
+def _resumo_sku():
+    """Devolve e ZERA o contador de origens (uma linha por conta no log)."""
+    with _sku_lock:
+        if not SKU_ORIGEM:
+            return "nenhum anuncio avaliado"
+        txt = " · ".join(f"{k}={v}" for k, v in sorted(SKU_ORIGEM.items()))
+        SKU_ORIGEM.clear()
+    return txt
 def _estrategia_promo():
     """Estratégia p/ ESCOLHER a promoção nos anúncios TRADICIONAIS (fora do catálogo):
       - 'equilibrado' -> mira a MARGEM PADRÃO cadastrada (o piso do grupo) — recomendado
@@ -62,7 +139,6 @@ def escolher_alvo(cands, piso, estrategia):
     return min(cands, key=lambda a: abs(a["margem"] - piso))
 def _todas_linhas(tabela, cols, passo=1000, org=None):
     """Lê a tabela INTEIRA paginando (PostgREST devolve no máx 1000 linhas por vez).
-
     org: se vier, filtra por essa coluna. Existe por causa da
     produtos_repricer, que guarda o catálogo de vários donos na mesma
     tabela - ler ela inteira e confiar no sku seria juntar catálogo de
@@ -81,7 +157,6 @@ def _todas_linhas(tabela, cols, passo=1000, org=None):
     return linhas
 def org_da_conta(seller_id):
     """A org (o dono) de uma conta. Devolve None se não souber.
-
     None é tratado como CASA em todo lugar que usa isto - é o
     comportamento de antes, e não faz o robô ir procurar catálogo numa
     tabela de cliente por causa de um dado faltando.
@@ -94,34 +169,26 @@ def org_da_conta(seller_id):
         return (d[0].get("org") if d else None) or None
     except Exception:
         return None
-
-
 def preload(seller_id=None):
     """Carrega custos e grupos de uma vez só, pra não bater no banco por item.
-
     DE QUAL CATÁLOGO: depende de quem é a conta.
-
         casa    -> tabela 'produtos'          (a de sempre)
         cliente -> tabela 'produtos_repricer' (chave (org, sku))
-
     Sem este desvio, um SKU do cliente igual a um SKU da casa faria ele
     receber o CUSTO DA CASA - e margem errada não parece errada. Este
     robô roda como service_role, então o RLS não protege aqui: a
     separação tem que ser explícita no código.
-
     Chamar sem seller_id mantém o comportamento antigo (só a casa), pra
     não quebrar quem chama assim.
     """
     org = org_da_conta(seller_id)
     da_casa = (org is None) or (org == ORG_CASA)
     tabela = "produtos" if da_casa else "produtos_repricer"
-
     # LIMPA antes de encher. Sem isto, rodar duas contas de donos
     # diferentes na mesma execução deixaria os custos da primeira no mapa
     # da segunda - exatamente o vazamento que este desvio existe para
     # evitar, só que por dentro do processo em vez de por dentro da tabela.
     CUSTOS.clear()
-
     try:
         if da_casa:
             linhas = _todas_linhas("produtos", "sku, custo")
@@ -259,11 +326,9 @@ def custo_de(sku):
     return CUSTOS.get(sku) if sku else None
 def custo_efetivo(item_id, sku):
     """Custo do anúncio, em três tentativas, nesta ordem:
-
       1. SKU do próprio anúncio (o que o Mercado Livre devolve) -> catálogo
       2. SKU ESCRITO NA MÃO para este anúncio -> catálogo
       3. custo digitado só para este anúncio
-
     A ordem importa. O SKU do ML vem primeiro porque é o que o vendedor
     mantém; o manual é remendo para quem ainda não preencheu lá. E o custo
     por anúncio fica por último porque é o menos reaproveitável: vale para
@@ -359,9 +424,20 @@ def comissao(preco, cat, ltid, access):
     d = _consulta_listing(round(preco, 2), cat, ltid, access)
     return d.get("sale_fee_amount") if d else None
 def detalhes_itens(ids, access):
-    """Busca detalhes de VÁRIOS itens de uma vez (multiget, 20 por chamada)."""
+    """Busca detalhes de VÁRIOS itens de uma vez (multiget, 20 por chamada).
+
+    'attributes' e 'variations' entraram na lista porque é ONDE O SKU MORA
+    nos anúncios feitos pelo formulário atual do ML. Sem eles, o multiget
+    devolve seller_custom_field=None e o anúncio chega aqui como se não
+    tivesse SKU — foi o que aconteceu com os 227 anúncios da IRMAOS.
+
+    Custo disso: a resposta fica maior, principalmente em anúncio com
+    muitas variações. Se a rodada ficar lenta, o primeiro corte é tirar
+    'variations' e ficar só com 'attributes', que já resolve a maioria.
+    """
     out = {}
-    attrs = "id,price,listing_type_id,category_id,seller_sku,seller_custom_field,title,status,available_quantity,catalog_listing"
+    attrs = ("id,price,listing_type_id,category_id,seller_sku,seller_custom_field,"
+             "attributes,variations,title,status,available_quantity,catalog_listing")
     for i in range(0, len(ids), 20):
         lote = ids[i:i + 20]
         st, d = get(f"/items?ids={','.join(lote)}&attributes={attrs}", access)
@@ -579,7 +655,7 @@ def processar_item(item_id, access, sid, detalhes):
         preco = it.get("price")
         ltid = it.get("listing_type_id")
         cat = it.get("category_id")
-        sku = it.get("seller_sku") or it.get("seller_custom_field")
+        sku = sku_do_item(it)      # <- os TRÊS lugares, não só os dois campos antigos
         titulo = it.get("title")
         tradicional = not bool(it.get("catalog_listing"))   # tradicional = fora do catálogo
         custo = custo_efetivo(item_id, sku)
@@ -751,6 +827,10 @@ def main():
             for sug in ex.map(lambda i: processar_item(i, access, sid, detalhes), ids):
                 if sug:
                     sugs.append(sug)
+        # De onde vieram os SKUs desta conta. Existe pra um zero suspeito nunca
+        # mais passar despercebido: se 'atributo_SELLER_SKU' aparecer alto, era
+        # exatamente o que o robô estava perdendo antes.
+        print(f"    SKU dos anuncios avaliados: {_resumo_sku()}", flush=True)
         for s in sugs:
             contadores[s["acao"]] = contadores.get(s["acao"], 0) + 1
             print(_linha_log(s), flush=True)
