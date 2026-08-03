@@ -56,6 +56,62 @@ def _sku_do(it):
     return it.get("seller_sku") or it.get("seller_custom_field")
 def _norm(s):
     return re.sub(r"\s+", "", str(s)).upper() if s else ""
+# ---------------------------------------------------------------------------
+# CANDIDATO A SKU PARA ANÚNCIO QUE NÃO TEM NENHUM
+#
+# Só MEDE, não grava nada. Serve pra decidir se vale construir a tela de
+# vínculo em cima disto: se os candidatos saírem bons, um clique resolve
+# dezenas de anúncios; se saírem ruins, é digitação mesmo e não adianta
+# enfeitar.
+#
+# A ordem é por CONFIABILIDADE, e a origem vai junto no log de propósito -
+# um código vindo da ficha técnica merece confiança diferente de um chutado
+# no título, e quem decide isso é você, não eu.
+#
+#   1. ficha técnica: atributos de MODELO / PART_NUMBER (dado estruturado)
+#   2. GTIN/EAN: não é SKU, mas é único e estável - serve de chave
+#   3. título: o token que parece código (tem letra e número juntos)
+#
+# O título é o último porque é o único que INVENTA. 'Lx10' num título pode
+# ser modelo, pode ser potência, pode ser medida.
+# ---------------------------------------------------------------------------
+_ATTR_MODELO = ("MODEL", "PART_NUMBER", "ALPHANUMERIC_MODEL", "MPN")
+# token que parece código: tem dígito E letra, ou tem hífen/barra com dígito
+_COD_RE = re.compile(r"^(?=.*\d)(?=.*[A-Za-zÀ-ÿ])[0-9A-Za-zÀ-ÿ][0-9A-Za-zÀ-ÿ.\-/]{1,19}$")
+def _attr_valor(it, ids):
+    for a in (it.get("attributes") or []):
+        if not isinstance(a, dict):
+            continue
+        aid = str(a.get("id") or "")
+        if aid in ids:
+            v = (a.get("value_name") or "").strip()
+            if v and v.lower() not in ("n/a", "na", "-", "sem modelo", "generico", "genérico"):
+                return v, aid
+    return None, None
+def _cod_do_titulo(titulo):
+    """Token do título que parece código de modelo. Ignora medidas óbvias
+    (10m, 220v, 61 teclas) - elas passam no teste de 'letra+número' e não
+    são modelo nenhum."""
+    lixo = re.compile(r"^\d+(m|cm|mm|kg|g|w|v|ml|l|pol|un)$", re.I)
+    for t in re.findall(r"[0-9A-Za-zÀ-ÿ.\-/]+", str(titulo or "")):
+        t = t.strip(".-/")
+        if len(t) < 3 or lixo.match(t) or t.lower() in _GENERICO:
+            continue
+        if _COD_RE.match(t):
+            return t
+    return None
+def candidato_sku(it):
+    """(candidato, origem) ou (None, None). NÃO grava nada."""
+    v, aid = _attr_valor(it, _ATTR_MODELO)
+    if v:
+        return v, f"ficha:{aid}"
+    g = gtin_do_item(it)
+    if g:
+        return "EAN" + str(g), "ean"
+    c = _cod_do_titulo(it.get("title"))
+    if c:
+        return c, "titulo"
+    return None, None
 def _parece_kit(titulo):
     """Título com 'kit' ou 'set' => conjunto (não casa com página de produto avulso)."""
     return bool(re.search(r"\bkit\b|\bset\b", (titulo or "").lower()))
@@ -297,6 +353,9 @@ def analisar(item_id, access, sid):
     # variações inclusive. O SKU sempre esteve na resposta; era a leitura que
     # olhava só os dois campos antigos.
     sku = _sku_do(it)
+    # anúncio sem SKU: qual código a gente PROPORIA, e de onde ele viria.
+    # Só medição - nada é gravado nem usado em cálculo nenhum.
+    sug_sku, sug_org = (candidato_sku(it) if not sku else (None, None))
     pid = it.get("catalog_product_id")
     catalog_listing = bool(it.get("catalog_listing"))   # SÓ True = compete de fato no catálogo
     ctl = CONTROLE.get(item_id) or {}
@@ -324,7 +383,8 @@ def analisar(item_id, access, sid):
                 "preco_cheio": round(p0, 2) if p0 else None,
                 "preco_venda": round(pv, 2) if pv else None, "promo": promo_ativa,
                 "tipo_anuncio": _tipo_anuncio(ltid), "catalog": catalog_listing,
-                "catalog_pid": pid, "desligado": desligado}
+                "catalog_pid": pid, "desligado": desligado,
+                "sku_sugerido": sug_sku, "sku_origem": sug_org}
     frete, _ = rec.frete_de(sku, item_id, access)
     piso, grupo = rec.margem_minima_do(sku)
     if ctl.get("piso_override") is not None:     # regra individual do item (painel)
@@ -343,7 +403,8 @@ def analisar(item_id, access, sid):
             "desligado": desligado,
             "margem_cheio": round(m_cheio, 1), "preco_piso": pmin, "pma": pma, "catalog": catalog_listing,
             "custo": custo, "frete": round(frete, 2), "cat": cat, "ltid": ltid,
-            "tipo_anuncio": _tipo_anuncio(ltid), "catalog_pid": pid}  # p/ avaliar campanhas
+            "tipo_anuncio": _tipo_anuncio(ltid), "catalog_pid": pid,
+            "sku_sugerido": sug_sku, "sku_origem": sug_org}  # p/ avaliar campanhas
     if not catalog_listing:
         m = MATCH.get(sku) or MATCH.get(item_id)   # sem SKU -> busca pelo item_id
         if m:
@@ -516,6 +577,33 @@ def main():
         print(f"\n--- {len(faltando)} SEM CUSTO (preencher na tabela 'produtos') ---", flush=True)
         for l in faltando:
             print(f"   {l['item_id']} | SKU={l.get('sku') or '—'} | {str(l.get('titulo'))[:45]}", flush=True)
+    # ---- ANÚNCIOS SEM SKU: o que a gente PROPORIA como código ----
+    # Medição para decidir a tela de vínculo. Nada foi gravado.
+    sem = [l for l in linhas if not (l.get("sku") or "").strip()]
+    if sem:
+        com = [l for l in sem if l.get("sku_sugerido")]
+        por_origem = {}
+        for l in com:
+            o = (l.get("sku_origem") or "?").split(":")[0]
+            por_origem[o] = por_origem.get(o, 0) + 1
+        print(f"\n--- {len(sem)} ANUNCIO(S) SEM SKU · candidato para {len(com)} "
+              f"({', '.join(f'{k}={v}' for k, v in sorted(por_origem.items())) or 'nenhum'}) ---", flush=True)
+        for l in sem[:40]:
+            c = l.get("sku_sugerido") or "—"
+            print(f"   {l['item_id']} | {c:<22} | {(l.get('sku_origem') or 'sem candidato'):<18} "
+                  f"| {str(l.get('titulo'))[:44]}", flush=True)
+        # candidato REPETIDO em anuncios diferentes: ou e o Premium/Classico do
+        # mesmo produto (certo), ou sao produtos diferentes com o mesmo token no
+        # titulo (errado). E o numero que diz se da pra confiar no titulo.
+        cnt = {}
+        for l in com:
+            cnt[l["sku_sugerido"]] = cnt.get(l["sku_sugerido"], 0) + 1
+        rep = {k: v for k, v in cnt.items() if v > 1}
+        if rep:
+            print(f"   >>> {len(rep)} candidato(s) caem em MAIS DE UM anuncio: "
+                  + ", ".join(f"{k}({v})" for k, v in sorted(rep.items())[:12]), flush=True)
+            print("       (pode ser Premium+Classico do mesmo produto, pode ser palpite errado)", flush=True)
+
     baixos = [l for l in linhas if (l.get("piso_orig") is not None and l["piso_orig"] < 0)]
     if PISO_MIN_ABS is not None:
         print(f"\n🔒 trava de segurança LIGADA: piso nunca abaixo de {PISO_MIN_ABS:.0f}%.", flush=True)
