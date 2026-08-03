@@ -1,0 +1,149 @@
+name: Repricer - contas de cliente (SO leitura)
+
+# ---------------------------------------------------------------------------
+# PARA QUE SERVE
+#
+# Trazer os anuncios das contas de CLIENTE para o painel. O catalogo da tela
+# vem da tabela repricer_log, e quem a enche e o repricer_piloto - enquanto
+# ele nao rodar para uma conta, o painel dela fica vazio.
+#
+# ---------------------------------------------------------------------------
+# A LISTA DE CONTAS NAO ESTA NESTE ARQUIVO, E ESSE E O PONTO
+#
+# A primeira versao que eu escrevi tinha os seller_id chumbados numa matrix.
+# Funcionava, e estava errada: cliente novo so entraria quando alguem
+# lembrasse de editar este arquivo, commitar e publicar. Era exatamente o
+# tipo de passo manual que este sistema inteiro existe para nao ter.
+#
+# Agora o primeiro job PERGUNTA AO BANCO quais sao as contas de cliente, e o
+# segundo roda uma vez para cada. Onboarding de cliente novo passa a ser:
+#
+#     1. voce cria o login na tela de usuarios
+#     2. ele conecta a conta dele pelo botao do painel
+#     3. na hora cheia seguinte, os anuncios dele aparecem
+#
+# Nenhum passo aqui. Nenhum arquivo para editar.
+#
+# COMO O BANCO SABE QUEM E CLIENTE: pela coluna 'org' da tabela contas.
+# Tudo que nao e ORG_CASA e cliente. Quem escreve essa coluna e a edge
+# function ml_oauth, na hora de conectar - admin conecta conta da casa,
+# cliente conecta na org dele.
+#
+# CONTA SEM ORG e PULADA e aparece no log com nome. Nao rodar numa conta que
+# eu nao sei de quem e, e dizer isso em voz alta, e melhor que adivinhar.
+#
+# ---------------------------------------------------------------------------
+# POR QUE SO LEITURA (CONFIRMA fixo em 'NAO')
+#
+# Enquanto a tabela produtos nao souber de quem e cada linha, o preload() do
+# repricer carrega TODOS os custos sem filtro de dono:
+#
+#     for r in _todas_linhas("produtos", "sku, custo"):
+#         CUSTOS[r["sku"]] = float(r["custo"])
+#
+# Se um SKU da cliente for igual a um seu, ela recebe o SEU custo. Em
+# simulacao e um numero torto na tela; ao vivo seria preco errado no anuncio
+# de outra empresa. Quando a etapa 2 (coluna de dono na produtos) estiver de
+# pe, este arquivo ganha o input de CONFIRMA como os outros.
+# ---------------------------------------------------------------------------
+
+on:
+  schedule:
+    # :45 - longe do piloto da casa (:00), do repricer_vendas (:15) e do
+    # painel da Arcos (:30). Sao todos a mesma cota de API do Mercado Livre.
+    - cron: '45 * * * *'
+  workflow_dispatch:
+    inputs:
+      seller_id:
+        description: 'Rodar SO esta conta (vazio = todas as de cliente)'
+        required: false
+        default: ''
+
+concurrency:
+  group: repricer-clientes
+  cancel-in-progress: false
+
+jobs:
+  # --- 1. quais contas sao de cliente, segundo o banco ---
+  listar:
+    runs-on: ubuntu-latest
+    outputs:
+      contas: ${{ steps.q.outputs.contas }}
+      tem: ${{ steps.q.outputs.tem }}
+    steps:
+      - id: q
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          ORG_CASA: 'pontomusical'
+          FORCAR: ${{ github.event.inputs.seller_id }}
+        run: |
+          set -euo pipefail
+
+          # disparo manual com uma conta especifica: nao pergunta ao banco
+          if [ -n "${FORCAR}" ]; then
+            echo "contas=[\"${FORCAR}\"]" >> "$GITHUB_OUTPUT"
+            echo "tem=sim" >> "$GITHUB_OUTPUT"
+            echo "Disparo manual: so a conta ${FORCAR}"
+            exit 0
+          fi
+
+          RESP=$(curl -sS -f \
+            "${SUPABASE_URL}/rest/v1/contas?select=seller_id,org,apelido&refresh_token=not.is.null" \
+            -H "apikey: ${SUPABASE_KEY}" \
+            -H "Authorization: Bearer ${SUPABASE_KEY}")
+
+          CLIENTES=$(echo "$RESP" | jq -c --arg casa "$ORG_CASA" \
+            '[.[] | select(.org != null and .org != $casa) | .seller_id]')
+          NOMES=$(echo "$RESP" | jq -r --arg casa "$ORG_CASA" \
+            '[.[] | select(.org != null and .org != $casa) | .apelido] | join(", ")')
+          SEM_ORG=$(echo "$RESP" | jq -r '[.[] | select(.org == null) | .apelido] | join(", ")')
+          N=$(echo "$CLIENTES" | jq 'length')
+
+          echo "Contas de cliente ($N): ${NOMES:-nenhuma}"
+          if [ -n "$SEM_ORG" ]; then
+            # nao rodar numa conta de dono desconhecido, e dizer isso
+            echo "PULEI, sem org definida: $SEM_ORG"
+            echo "  (a org e escrita pela ml_oauth ao conectar; conta antiga pode estar sem)"
+          fi
+
+          echo "contas=$CLIENTES" >> "$GITHUB_OUTPUT"
+          if [ "$N" -gt 0 ]; then echo "tem=sim" >> "$GITHUB_OUTPUT";
+          else echo "tem=nao" >> "$GITHUB_OUTPUT"; fi
+
+  # --- 2. uma rodada por conta ---
+  rodar:
+    needs: listar
+    # matrix vazia quebra o workflow: se nao ha cliente, este job nem comeca
+    if: needs.listar.outputs.tem == 'sim'
+    runs-on: ubuntu-latest
+    strategy:
+      max-parallel: 1     # uma conta por vez: mesma cota de API do ML
+      fail-fast: false    # uma conta com problema nao derruba as outras
+      matrix:
+        seller_id: ${{ fromJSON(needs.listar.outputs.contas) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install requests supabase
+      - name: Ler anuncios da conta ${{ matrix.seller_id }} (simulacao)
+        env:
+          ML_CLIENT_ID: ${{ secrets.ML_CLIENT_ID }}
+          ML_CLIENT_SECRET: ${{ secrets.ML_CLIENT_SECRET }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          SELLER_ID: ${{ matrix.seller_id }}
+          CONFIRMA: 'NAO'   # simulacao - ver o comentario la em cima
+          ATIVO: 'SIM'      # ATIVO=NAO faz o piloto SAIR antes de analisar
+          MAX_ALTERACOES: '0'
+        run: python repricer_piloto.py
+
+# ---------------------------------------------------------------------------
+# O QUE ESPERAR NA PRIMEIRA RODADA
+#
+# Quase tudo sai como 'sem_custo' ou 'sem_match': a cliente ainda nao tem
+# produto cadastrado. E o certo - os anuncios aparecem no painel com "-" onde
+# falta dado, e e dessa lista que o botao de criar produtos vai trabalhar.
+# ---------------------------------------------------------------------------
