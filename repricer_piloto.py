@@ -586,7 +586,14 @@ def main():
         print(f"⛔ repricer_competitivo.py DESATUALIZADO no repo (falta: {', '.join(faltando)}).", flush=True)
         print("   Suba a versão mais nova do repricer_competitivo.py JUNTO com este piloto.", flush=True)
         return
-    rec.preload()
+    # PASSA A CONTA. Sem o argumento, o preload assume CASA e carrega os custos
+    # da Ponto Musical mesmo quando este robô roda numa conta de CLIENTE - que
+    # é justamente o que o workflow 'repricer_clientes' faz. Um SKU do cliente
+    # igual a um seu receberia o SEU custo. Em simulação seria um número torto
+    # no painel; com CONFIRMA=SIM seria preço errado no anúncio de outra
+    # empresa. O preload já sabe escolher a tabela certa - só precisava saber
+    # de quem é a conta.
+    rec.preload(SELLER_ID)
     sonda.carregar_match()
     sonda.carregar_controle()
     sonda.carregar_config()
