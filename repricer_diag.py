@@ -135,6 +135,19 @@ def _g(path, access):
         return rec.get(path, access)
     except Exception as e:
         return None, {"erro": str(e)}
+def _attr_sku(bloco):
+    """SKU guardado como ATRIBUTO 'SELLER_SKU' — serve pro item e pra variação.
+
+    Existe porque o Mercado Livre guarda o SKU do vendedor em TRÊS lugares:
+      item.seller_custom_field        campo antigo (ERP, formulário velho)
+      item.attributes[SELLER_SKU]     formulário atual — é o que o robô NÃO lê
+      variations[].(os dois acima)    quando o anúncio tem variação
+    Devolve None pra atributo em branco: SKU vazio é pior que SKU nenhum,
+    porque casaria com qualquer produto sem SKU do catálogo."""
+    for a in (bloco.get("attributes") or []):
+        if a.get("id") == "SELLER_SKU":
+            return (a.get("value_name") or "").strip() or None
+    return None
 def raio_x(item_id, it, access):
     """0) RAIO-X: TUDO que dá pra consultar do anúncio pela API + MARGEM ATUAL.
     Base pra bolar estratégia: preço venda x lista, todos os preços, tarifa detalhada, frete,
@@ -146,6 +159,28 @@ def raio_x(item_id, it, access):
     cat = it.get("category_id")
     ltid = it.get("listing_type_id")
     sku = it.get("seller_sku") or it.get("seller_custom_field")
+    # [SKU] ONDE ESTÁ O SKU — os 3 lugares possíveis, e o robô só olha 2.
+    # Motivo: a IRMAOS_BROTHERS tem SKU nos anúncios do ML e chegou no banco
+    # com ZERO. Zero exato não é "não preencheu", é campo que ninguém leu.
+    # Este bloco NÃO muda nada: só imprime os três lugares lado a lado.
+    _sku_attr = _attr_sku(it)
+    _vars = it.get("variations") or []
+    _skus_var = []
+    for _v in _vars:
+        _s = (_v.get("seller_custom_field") or "").strip() or _attr_sku(_v)
+        if _s:
+            _skus_var.append(_s)
+    print(f"\n  [SKU] seller_custom_field={it.get('seller_custom_field')!r} | "
+          f"seller_sku={it.get('seller_sku')!r} | atributo SELLER_SKU={_sku_attr!r} | "
+          f"variacoes={len(_vars)} -> {sorted(set(_skus_var))[:6]}", flush=True)
+    if not sku and (_sku_attr or _skus_var):
+        print("        >>> O ROBO ESTA PERDENDO ESTE SKU: ele existe no anuncio, mas nao "
+              "nos dois campos que o robo le hoje.", flush=True)
+        if len(set(_skus_var)) > 1:
+            print("        >>> ATENCAO: as variacoes tem SKUs DIFERENTES entre si. Um custo "
+                  "unico por anuncio seria errado aqui - este caso pede decisao, nao conserto.", flush=True)
+    elif not sku:
+        print("        >>> este anuncio nao tem SKU em lugar nenhum - e cadastro mesmo.", flush=True)
     catalog_pid = it.get("catalog_product_id")
     ship = it.get("shipping") or {}
     logistic = ship.get("logistic_type")
@@ -153,7 +188,6 @@ def raio_x(item_id, it, access):
     print(f"  lista(price)={brl(lista)} | base_price={brl(it.get('base_price'))} | estoque={it.get('available_quantity')} "
           f"| vendidos={it.get('sold_quantity')} | health={it.get('health')} | catálogo={catalog_pid} "
           f"| logística={logistic}/{smode} | frete_grátis={ship.get('free_shipping')}", flush=True)
-
     # [A] preço de VENDA atual x lista + promoção associada
     st, sp = _g(f"/items/{item_id}/sale_price?context=channel_marketplace", access)
     amount = regular = ptipo = pid = None
@@ -170,11 +204,9 @@ def raio_x(item_id, it, access):
               f"-> EM PROMOÇÃO ✅ ({pct:.1f}% OFF) tipo={ptipo} promo_id={pid}", flush=True)
     else:
         print(f"\n  [A] SALE_PRICE: venda ATUAL={brl(amount)} | lista(regular)={brl(regular)} -> SEM promoção", flush=True)
-
     # [B] TODOS os preços (standard + promotion, com datas e canais)
     st, pr = _g(f"/items/{item_id}/prices", access)
     dump("  [B] /items/{id}/prices — todos os preços (standard e promotion, com vigência/canal)", pr, 3500)
-
     # [C] tarifa DETALHADA no preço de venda de hoje (sale_fee_details)
     preco_fee = amount or lista
     q = f"/sites/MLB/listing_prices?price={preco_fee}"
@@ -186,26 +218,21 @@ def raio_x(item_id, it, access):
         q += f"&logistic_type={logistic}&shipping_mode={smode}"
     st, lp = _g(q, access)
     dump(f"  [C] LISTING_PRICES — tarifa no preço de venda {brl(preco_fee)} (gross = tarifa CHEIA, sem abater promoção)", lp, 2500)
-
     # [D] frete estimado
     frete, forg = rec.frete_de(sku, item_id, access)
     print(f"\n  [D] FRETE estimado: {brl(frete)} ({forg})", flush=True)
-
     # [E] concorrência / buy box
     st, ptw = _g(f"/items/{item_id}/price_to_win?version=v2", access)
     dump("  [E] PRICE_TO_WIN — concorrência / preço pra ganhar a caixa", ptw, 2500)
-
     # [F] concorrentes no catálogo (outros vendedores no mesmo produto)
     if catalog_pid:
         st, comp = _g(f"/products/{catalog_pid}/items?limit=10", access)
         dump("  [F] CATÁLOGO — ofertas dos concorrentes (/products/{id}/items)", comp, 3000)
     else:
         print("\n  [F] CATÁLOGO: anúncio NÃO é de catálogo (sem catalog_product_id) — sem concorrência de catálogo", flush=True)
-
     # [G] demanda: visitas nos últimos 30 dias
     st, vis = _g(f"/items/{item_id}/visits/time_window?last=30&unit=day", access)
     dump("  [G] VISITAS — demanda (últimos 30 dias)", vis, 1500)
-
     # [H] MARGEM ATUAL (a conta que interessa)
     custo = rec.custo_efetivo(item_id, sku)
     try:
@@ -236,7 +263,6 @@ def raio_x(item_id, it, access):
               f"{'✅ acima do piso' if (piso is None or margem >= piso) else '⚠️ ABAIXO do piso'}", flush=True)
         if tem_promo and mp == 0 and ptipo not in ("PRICE_DISCOUNT", "custom", "CUSTOM", None):
             print(f"      OBS: promo '{ptipo}' pode ser cofinanciada, mas não achei meli% na oferta ativa — margem acima está com tarifa CHEIA (conservadora; a real pode ser melhor).", flush=True)
-
     # [I] REFERÊNCIA DE PREÇO DO ML (o motor de recomendação do próprio Mercado Livre)
     st, ref = _g(f"/suggestions/items/{item_id}/details", access)
     if isinstance(ref, dict) and isinstance(ref.get("status"), str):
@@ -260,7 +286,6 @@ def raio_x(item_id, it, access):
                 print(f"        - {brl(p)} | vendidos {info.get('sold_quantity')} | {(info.get('title') or '')[:34]}", flush=True)
     else:
         print(f"\n  [I] REFERÊNCIA DE PREÇO (ML): sem referência pra este item (status HTTP {st})", flush=True)
-
     # [J] AUTOMAÇÃO DE PREÇO (item automatizado BLOQUEIA PUT de preço a partir de 18/03/2026)
     tags = it.get("tags") or []
     automatizado_tag = "dynamic_standard_price" in tags
@@ -276,7 +301,6 @@ def raio_x(item_id, it, access):
     else:
         rl = (rules.get("rules") if isinstance(rules, dict) else None) or []
         print(f"      sem automação atribuída. Regras que o item aceitaria: {[r.get('rule_id') for r in rl] or 'nenhuma'}", flush=True)
-
     # [K] USER PRODUCT (MLBU) + condições de venda irmãs (mesmo produto, preços/ tipos diferentes)
     upid = it.get("user_product_id")
     if upid:
