@@ -54,6 +54,21 @@ def _sku_do(it):
     if fn:
         return fn(it)
     return it.get("seller_sku") or it.get("seller_custom_field")
+_ORG_CONTA = {}      # seller_id -> e cliente? (cache; org_da_conta bate no banco)
+def _conta_e_cliente(sid):
+    """True se a conta NAO e da casa. Cacheado porque analisar() roda uma vez
+    por anuncio e em varias threads - sem cache seriam centenas de consultas
+    identicas. Na duvida (org nula, erro de leitura) devolve False, que e o
+    comportamento antigo: quem nao sabe de quem e a conta nao muda a regra
+    dela por conta propria."""
+    s = str(sid or "")
+    if s not in _ORG_CONTA:
+        try:
+            org = rec.org_da_conta(s)
+        except Exception:
+            org = None
+        _ORG_CONTA[s] = bool(org) and org != rec.ORG_CASA
+    return _ORG_CONTA[s]
 def _norm(s):
     return re.sub(r"\s+", "", str(s)).upper() if s else ""
 # ---------------------------------------------------------------------------
@@ -363,7 +378,16 @@ def analisar(item_id, access, sid):
         sku = ctl.get("sku")
     # DESLIGADO não para mais a análise (igual ao Pricebot): continua LENDO e mostrando tudo
     # (preço, status, price_to_win, promoções); só NÃO aplica.
-    if str(sid) in DEFAULT_OFF_SELLERS:
+    # CONTA DE CLIENTE NASCE DESLIGADA, igual a CF. Antes so a CF estava na
+    # lista, e conta de cliente caia no 'else': sem linha no repricer_controle
+    # o 'ativo' e NULO, e nulo nao e False - entao nascia LIGADA.
+    #
+    # Enquanto o workflow dos clientes tem CONFIRMA='NAO' fixo, nada e
+    # aplicado e o estrago e zero. Mas e armadilha guardada: basta alguem
+    # rodar o piloto naquela conta com CONFIRMA=SIM para ele mexer no preco
+    # de 227 anuncios de OUTRA empresa. Preco de terceiro e o ultimo lugar
+    # onde um padrao permissivo pode estar.
+    if str(sid) in DEFAULT_OFF_SELLERS or _conta_e_cliente(sid):
         desligado = (ctl.get("ativo") is not True)   # nasce desligado; liga só se você ligar no painel
     else:
         desligado = (ctl.get("ativo") is False)
