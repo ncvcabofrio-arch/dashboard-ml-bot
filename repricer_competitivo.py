@@ -36,6 +36,24 @@ DEFAULT_OFF_SELLERS = set(filter(None, (os.environ.get("DEFAULT_OFF_SELLERS") or
 MATCH = {}             # item_id -> {product_ids, confianca, tipo} (mapa confirmado com IA)
 CONTROLE = {}          # item_id -> {ativo, piso_override, undercut_override, pma, preco_manual} (painel)
 CONFIG = {}            # chave -> valor (regras globais editáveis no painel: undercut, piso etc.)
+def _sku_do(it):
+    """SKU do anúncio, usando o extrator do repricer_sugestoes — que olha os três
+    lugares onde o Mercado Livre guarda SKU: os campos antigos, o ATRIBUTO
+    'SELLER_SKU' (formulário atual) e as variações.
+
+    Esta função é o ponto que decide o 'sku' gravado no repricer_log, e era ela
+    que fazia a IRMAOS_BROTHERS aparecer com 227 anúncios e ZERO SKU: o
+    seller_custom_field vem nulo nos anúncios novos, e o SKU está no atributo.
+    Confirmado item a item pelo diagnóstico (atributo SELLER_SKU='40P5').
+
+    O getattr é por causa da ORDEM DE SUBIDA: com o repricer_sugestoes antigo
+    ainda no repositório, volta ao comportamento de antes em vez de quebrar a
+    rodada inteira com AttributeError.
+    """
+    fn = getattr(rec, "sku_do_item", None)
+    if fn:
+        return fn(it)
+    return it.get("seller_sku") or it.get("seller_custom_field")
 def _norm(s):
     return re.sub(r"\s+", "", str(s)).upper() if s else ""
 def _parece_kit(titulo):
@@ -275,7 +293,10 @@ def analisar(item_id, access, sid):
     pv, promo_ativa = sale_price(item_id, access)  # preço REAL que o cliente paga + promoção ativa
     pv = pv if pv else p0                           # sem sale_price -> usa o cheio
     cat, ltid = it.get("category_id"), it.get("listing_type_id")
-    sku = it.get("seller_sku") or it.get("seller_custom_field")
+    # O '?include_attributes=all' acima já traz o item COMPLETO — atributos e
+    # variações inclusive. O SKU sempre esteve na resposta; era a leitura que
+    # olhava só os dois campos antigos.
+    sku = _sku_do(it)
     pid = it.get("catalog_product_id")
     catalog_listing = bool(it.get("catalog_listing"))   # SÓ True = compete de fato no catálogo
     ctl = CONTROLE.get(item_id) or {}
@@ -477,6 +498,12 @@ def main():
               f"{str(r.get('titulo'))[:30]} | cheio R${r.get('preco_cheio')} "
               f"(margem {r.get('margem_cheio')}%) | {r.get('detalhe')}", flush=True)
     print("\n=== RESUMO: " + ", ".join(f"{k}: {v}" for k, v in cont.items()) + " ===", flush=True)
+    # DE ONDE VEIO O SKU: a linha que teria denunciado o problema da IRMAOS na
+    # primeira rodada, em vez de depois de 227 anúncios sem custo.
+    try:
+        print(f"SKU dos anuncios: {rec._resumo_sku()}", flush=True)
+    except AttributeError:
+        pass                      # repricer_sugestoes antigo: sem contador, tudo bem
     cat = sum(1 for l in linhas if l.get("catalog"))
     print(f"competindo no catálogo (opt-in feito): {cat}/{len(linhas)} — só esses têm price_to_win.", flush=True)
     faltando = [l for l in linhas if l["acao"] == "sem_custo"]
