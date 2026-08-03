@@ -575,6 +575,58 @@ def snapshot_pausados(sid, access):
     except Exception as e:
         print(f"   (pausados: tabela repricer_status_ml ausente/erro — rode o SQL: {e})", flush=True)
         return 0
+def gravar_sugestoes(sid, analises):
+    """Grava, na repricer_sku_sugerido, o SKU que a FICHA TÉCNICA do anúncio
+    sugere — para os anúncios que não têm SKU nenhum.
+
+    Por que aqui e não no painel: quem lê a ficha técnica do Mercado Livre é
+    este robô, que tem o token. O painel fala só com o Supabase. Então o robô
+    propõe e o painel mostra pra você aprovar.
+
+    RASCUNHO, NÃO VERDADE. Nada aqui vira custo sozinho: o vínculo aprovado
+    continua indo pra repricer_custo_item, e quem aprova é você na tela.
+
+    GRAVA MESMO EM SIMULAÇÃO (CONFIRMA=NAO). Isto não toca no Mercado Livre;
+    é o insumo da tela. As contas de cliente rodam sempre em simulação - se
+    eu respeitasse o CONFIRMA aqui, a tela nasceria vazia justamente para
+    quem mais precisa dela.
+
+    SNAPSHOT por conta: apaga as desta conta e regrava. Assim sugestão de
+    anúncio que ganhou SKU (ou que saiu do ar) desaparece sozinha, sem
+    ninguém precisar limpar. Se o insert falhar no meio, a próxima rodada
+    conserta - é rascunho, e rascunho se refaz.
+    """
+    linhas, sem_candidato = [], 0
+    for a in analises:
+        if (a.get("sku") or "").strip():
+            continue                       # já tem SKU: não é caso desta tela
+        s = (a.get("sku_sugerido") or "").strip()
+        if not s:
+            sem_candidato += 1
+            continue
+        linhas.append({"item_id": a.get("item_id"), "seller_id": str(sid),
+                       "titulo": a.get("titulo"), "sku_sugerido": s,
+                       "origem": a.get("sku_origem"), "atualizado_em": _agora_iso()})
+    try:
+        rec.sb.table("repricer_sku_sugerido").delete().eq("seller_id", str(sid)).execute()
+        for i in range(0, len(linhas), 300):
+            rec.sb.table("repricer_sku_sugerido").insert(linhas[i:i + 300]).execute()
+    except Exception as e:
+        # tabela ainda não criada (PROMO_B1) ou erro de rede: avisa e segue.
+        # Isto NÃO pode derrubar a rodada - o trabalho principal do piloto é
+        # outro, e uma sugestão que falta não estraga nada do que já funciona.
+        print(f"   (sugestoes de SKU: nao gravei — {e})", flush=True)
+        return 0
+    por_origem = {}
+    for l in linhas:
+        o = (l.get("origem") or "?").split(":")[0]
+        por_origem[o] = por_origem.get(o, 0) + 1
+    if linhas or sem_candidato:
+        print(f"   ({len(linhas)} sugestao(oes) de SKU gravada(s)"
+              + (f" · {', '.join(f'{k}={v}' for k, v in sorted(por_origem.items()))}" if por_origem else "")
+              + (f" · {sem_candidato} anuncio(s) sem candidato nenhum" if sem_candidato else "")
+              + ")", flush=True)
+    return len(linhas)
 def main():
     if not ATIVO:
         print("⛔ ATIVO=NAO (botão de pânico) — nada será escrito. Saindo.", flush=True)
@@ -638,6 +690,7 @@ def main():
             return None
     with ThreadPoolExecutor(max_workers=WORKERS) as ex:   # análise em paralelo (grande ganho)
         analises = [a for a in ex.map(_an, todos) if a]
+    gravar_sugestoes(sid, analises)   # insumo da tela de vínculo (não toca no ML)
     cont = {"criado": 0, "removido": 0, "vende": 0, "barato": 0, "fila": 0, "campanha": 0,
             "subiu": 0, "semc": 0, "passo": 0, "pede": 0}
     criados = 0
