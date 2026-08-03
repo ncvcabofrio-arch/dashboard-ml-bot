@@ -73,6 +73,11 @@ jobs:
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           DIAS: ${{ github.event.inputs.dias || '35' }}
           SO_SELLER: ${{ github.event.inputs.seller_id || '' }}
+          # o rebate custa uma chamada de API por pedido; por isso ele so
+          # olha os ultimos dias e tem teto por rodada. Se sobrar, a
+          # rodada seguinte pega o resto - ele so busca quem esta nulo.
+          REBATE_DIAS: '7'
+          REBATE_MAX: '300'
         run: python repricer_vendas.py
 
 # ---------------------------------------------------------------------------
