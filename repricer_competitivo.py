@@ -449,7 +449,12 @@ def main():
     if not SELLER_ID:
         print("Defina SELLER_ID (ex 177795203).", flush=True); return
     print(">>> SONDA v7 (mapa por SKU + anti-bundle) <<<", flush=True)
-    rec.preload()
+    # PASSA A CONTA. Sem o argumento, o preload assume CASA e carrega a tabela
+    # 'produtos' - os custos da Ponto Musical - mesmo rodando numa conta de
+    # cliente. Se um SKU do cliente for igual a um seu, ele recebe o SEU custo
+    # e a margem sai errada com cara de certa. Com o seller_id, o preload
+    # escolhe 'produtos_repricer' filtrado pela org do dono.
+    rec.preload(SELLER_ID)
     carregar_match()
     carregar_controle()
     carregar_config()
