@@ -468,7 +468,11 @@ def main():
             rec.MARGEM_PADRAO = float(mm.replace(",", "."))
         except ValueError:
             pass
-    rec.preload()
+    # PASSA A CONTA: sem o argumento, o preload carrega o catálogo da CASA
+    # mesmo diagnosticando anúncio de cliente - e aí um SKU coincidente
+    # mostraria o SEU custo como se fosse o dele. Diagnóstico que mente é
+    # pior que diagnóstico nenhum.
+    rec.preload(SID)
     # 1) o anúncio — COMPLETO (o raio-x usa vários campos: catálogo, shipping, vendidos, health...)
     st, it = rec.get(f"/items/{ITEM}", access)
     dump("1) ANÚNCIO (/items/{id})", it, 2500)
