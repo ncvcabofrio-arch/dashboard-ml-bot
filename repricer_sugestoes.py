@@ -22,21 +22,16 @@ WORKERS = int(os.environ.get("WORKERS", "8"))   # itens processados em paralelo
 SELLER_ID_FILTRO = (os.environ.get("SELLER_ID") or "").strip()   # se setado, roda SÓ essa conta (ex.: testar a CF)
 sb = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"])
 # caches pré-carregados (evitam ida ao banco por item; seguros entre threads)
+# nome da org da casa: o que separa "catálogo da casa" de "catálogo de
+# cliente". Mesmo valor do ORG_BI do puxador e do ORG_CASA da ml_oauth.
+ORG_CASA = os.environ.get("ORG_CASA", "pontomusical")
 CUSTOS = {}          # sku -> custo
 CUSTO_ITEM = {}      # item_id -> custo (pra anúncios SEM SKU, preenchido no painel)
+SKU_ITEM = {}        # item_id -> sku ESCRITO NA MÃO (pra anúncio que não tem SKU no ML)
 PISOS = {}           # sku -> (margem_minima, nome_grupo)
 _pct_lock = threading.Lock()
 SEM_CUSTO = []       # anúncios com promoção disponível MAS sem custo cadastrado (pra cadastrar)
 _sc_lock = threading.Lock()
-# VITRINE: anúncios que TÊM campanha mas nenhuma a recomendar (todas abaixo do
-# piso, ou programadas para o futuro). Hoje eles somem: processar_item devolve
-# None e o anúncio não ganha linha nenhuma. O painel do repricer está certo em
-# não mostrá-los — não há o que aprovar. O painel da Arcos precisa vê-los,
-# porque ele existe para MOSTRAR campanha, não para recomendar.
-# Vão para a tabela promo_vitrine, separada. A repricer_sugestoes continua
-# recebendo exatamente as mesmas linhas de sempre.
-VITRINE = []
-_vt_lock = threading.Lock()
 def _estrategia_promo():
     """Estratégia p/ ESCOLHER a promoção nos anúncios TRADICIONAIS (fora do catálogo):
       - 'equilibrado' -> mira a MARGEM PADRÃO cadastrada (o piso do grupo) — recomendado
@@ -65,28 +60,101 @@ def escolher_alvo(cands, piso, estrategia):
         return max(cands, key=lambda a: a["margem"])       # menor desconto
     # equilibrado (padrão): margem mais próxima da margem padrão cadastrada (o piso)
     return min(cands, key=lambda a: abs(a["margem"] - piso))
-def _todas_linhas(tabela, cols, passo=1000):
-    """Lê a tabela INTEIRA paginando (PostgREST devolve no máx 1000 linhas por vez)."""
+def _todas_linhas(tabela, cols, passo=1000, org=None):
+    """Lê a tabela INTEIRA paginando (PostgREST devolve no máx 1000 linhas por vez).
+
+    org: se vier, filtra por essa coluna. Existe por causa da
+    produtos_repricer, que guarda o catálogo de vários donos na mesma
+    tabela - ler ela inteira e confiar no sku seria juntar catálogo de
+    clientes diferentes num mapa só.
+    """
     linhas, ini = [], 0
     while True:
-        lote = (sb.table(tabela).select(cols).range(ini, ini + passo - 1).execute().data) or []
+        q = sb.table(tabela).select(cols)
+        if org is not None:
+            q = q.eq("org", org)
+        lote = (q.range(ini, ini + passo - 1).execute().data) or []
         linhas += lote
         if len(lote) < passo:
             break
         ini += passo
     return linhas
-def preload():
-    """Carrega custos e grupos de uma vez só, pra não bater no banco por item."""
+def org_da_conta(seller_id):
+    """A org (o dono) de uma conta. Devolve None se não souber.
+
+    None é tratado como CASA em todo lugar que usa isto - é o
+    comportamento de antes, e não faz o robô ir procurar catálogo numa
+    tabela de cliente por causa de um dado faltando.
+    """
+    if not seller_id:
+        return None
     try:
-        for r in _todas_linhas("produtos", "sku, custo"):
+        d = (sb.table("contas").select("org")
+             .eq("seller_id", str(seller_id)).limit(1).execute().data) or []
+        return (d[0].get("org") if d else None) or None
+    except Exception:
+        return None
+
+
+def preload(seller_id=None):
+    """Carrega custos e grupos de uma vez só, pra não bater no banco por item.
+
+    DE QUAL CATÁLOGO: depende de quem é a conta.
+
+        casa    -> tabela 'produtos'          (a de sempre)
+        cliente -> tabela 'produtos_repricer' (chave (org, sku))
+
+    Sem este desvio, um SKU do cliente igual a um SKU da casa faria ele
+    receber o CUSTO DA CASA - e margem errada não parece errada. Este
+    robô roda como service_role, então o RLS não protege aqui: a
+    separação tem que ser explícita no código.
+
+    Chamar sem seller_id mantém o comportamento antigo (só a casa), pra
+    não quebrar quem chama assim.
+    """
+    org = org_da_conta(seller_id)
+    da_casa = (org is None) or (org == ORG_CASA)
+    tabela = "produtos" if da_casa else "produtos_repricer"
+
+    # LIMPA antes de encher. Sem isto, rodar duas contas de donos
+    # diferentes na mesma execução deixaria os custos da primeira no mapa
+    # da segunda - exatamente o vazamento que este desvio existe para
+    # evitar, só que por dentro do processo em vez de por dentro da tabela.
+    CUSTOS.clear()
+
+    try:
+        if da_casa:
+            linhas = _todas_linhas("produtos", "sku, custo")
+        else:
+            # o filtro por org é cinto: a chave já é (org, sku), mas ler a
+            # tabela inteira e confiar no sku seria voltar ao problema
+            linhas = _todas_linhas("produtos_repricer", "sku, custo", org=org)
+        for r in linhas:
             if r.get("sku") and r.get("custo") is not None:
                 CUSTOS[r["sku"]] = float(r["custo"])
+        print(f"catálogo: {tabela}" + (f" (org {org})" if not da_casa else ""), flush=True)
     except Exception as e:
         print("Aviso: não consegui pré-carregar custos:", e, flush=True)
+    # Da mesma tabela saem DUAS coisas, e por muito tempo a segunda ficou
+    # parada: o custo por anúncio (pra quem não tem SKU) e o SKU ESCRITO
+    # NA MÃO. A coluna 'sku' já existia aqui e ninguém lia - o custo_efetivo
+    # só usava o 'custo'.
+    #
+    # Ler o sku muda o que dá pra fazer: um anúncio sem SKU no Mercado
+    # Livre passa a poder apontar pra um produto do catálogo, e aí UM custo
+    # serve o Premium e o Clássico do mesmo item. Sem isso, cada anúncio
+    # precisaria do próprio custo digitado - 414 deles, nas contas novas.
+    CUSTO_ITEM.clear()
+    SKU_ITEM.clear()
     try:
-        for r in _todas_linhas("repricer_custo_item", "item_id, custo"):
-            if r.get("item_id") and r.get("custo") is not None:
-                CUSTO_ITEM[r["item_id"]] = float(r["custo"])
+        for r in _todas_linhas("repricer_custo_item", "item_id, sku, custo"):
+            iid = r.get("item_id")
+            if not iid:
+                continue
+            if r.get("custo") is not None:
+                CUSTO_ITEM[iid] = float(r["custo"])
+            if (r.get("sku") or "").strip():
+                SKU_ITEM[iid] = r["sku"].strip()
     except Exception as e:
         print("Aviso: não consegui pré-carregar custo por anúncio:", e, flush=True)
     try:
@@ -190,11 +258,26 @@ def pausados_ids(sid, access):
 def custo_de(sku):
     return CUSTOS.get(sku) if sku else None
 def custo_efetivo(item_id, sku):
-    """Custo do anúncio: pelo SKU (tabela produtos) ou, se não tiver SKU/custo,
-    pelo custo POR ANÚNCIO preenchido no painel (repricer_custo_item)."""
+    """Custo do anúncio, em três tentativas, nesta ordem:
+
+      1. SKU do próprio anúncio (o que o Mercado Livre devolve) -> catálogo
+      2. SKU ESCRITO NA MÃO para este anúncio -> catálogo
+      3. custo digitado só para este anúncio
+
+    A ordem importa. O SKU do ML vem primeiro porque é o que o vendedor
+    mantém; o manual é remendo para quem ainda não preencheu lá. E o custo
+    por anúncio fica por último porque é o menos reaproveitável: vale para
+    um anúncio só, enquanto um SKU serve o Premium e o Clássico do mesmo
+    produto de uma vez.
+    """
     c = CUSTOS.get(sku) if sku else None
     if c is not None:
         return c
+    sku_manual = SKU_ITEM.get(item_id)
+    if sku_manual:
+        c = CUSTOS.get(sku_manual)
+        if c is not None:
+            return c
     return CUSTO_ITEM.get(item_id)
 CEP = os.environ.get("CEP", "01310100")   # destino de referência (Av. Paulista, SP)
 def frete_anuncio(item_id, access):
@@ -372,33 +455,6 @@ def preco_oferta(o):
         except (TypeError, ValueError):
             pass
     return None
-def preco_exibicao(o):
-    """Preço para MOSTRAR — nunca para decidir.
-
-    Existe um tipo de candidata em que o VENDEDOR escolhe o valor: a API
-    manda price = 0 e, no lugar, uma faixa (min/max/suggested). É o caso da
-    SELLER_CAMPAIGN FLEXIBLE_PERCENTAGE e de parte das PRICE_DISCOUNT.
-
-    O preco_oferta() devolve None nesses casos, e faz certo: o robô não pode
-    inventar um preço para entrar numa promoção. Só que a tela da Arcos
-    precisa MOSTRAR a campanha — foi assim que a "ARCOS BASE - 08-26" ficou
-    invisível no painel apesar de estar candidata no Mercado Livre.
-
-    Então esta função existe em separado, e o nome é para não haver dúvida:
-    ela alimenta a vitrine, não a decisão."""
-    p = preco_oferta(o)
-    if p:
-        return p
-    for k in ("suggested_discounted_price", "max_discounted_price"):
-        try:
-            v = float(o.get(k))
-            if v > 0:
-                return v
-        except (TypeError, ValueError):
-            pass
-    return None
-
-
 def avaliar(o, cat, ltid, access, frete, custo):
     """Calcula a margem de UMA oferta (candidata ou ativa).
     Retorna None se não der pra avaliar (sem preço ou sem preço original)."""
@@ -490,18 +546,12 @@ def _oferta_dict(a, ativa_flag, recomendada_flag, acao=None, access=None):
         if isinstance(det, dict):
             ini = ini or _data_promo(det, "start_date")
             fim = fim or _data_promo(det, "finish_date", "end_date")
-    d = {"nome": o.get("name"), "tipo": o.get("type"),
-         "rebate": a.get("mp"), "desconto_vendedor": a.get("sp"),
-         "preco": a.get("pb"), "inicio": ini, "fim": fim,
-         "margem": a.get("margem"), "ativa": ativa_flag,
-         "recomendada": recomendada_flag,
-         "acao": (acao if recomendada_flag else None)}
-    # campanha de preço aberto: o valor mostrado é o SUGERIDO, e a faixa
-    # inteira vai junto para a tela poder simular qualquer desconto dentro dela
-    if a.get("faixa"):
-        d["preco_min"], d["preco_max"] = a["faixa"]
-        d["preco_aberto"] = True
-    return d
+    return {"nome": o.get("name"), "tipo": o.get("type"),
+            "rebate": a.get("mp"), "desconto_vendedor": a.get("sp"),
+            "preco": a.get("pb"), "inicio": ini, "fim": fim,
+            "margem": a.get("margem"), "ativa": ativa_flag,
+            "recomendada": recomendada_flag,
+            "acao": (acao if recomendada_flag else None)}
 # NOTA: as campanhas de marketplace (SMART/PRICE_MATCHING etc.) já vêm no endpoint
 # por item (/seller-promotions/items/{id}) como candidatas — não precisa varrer as
 # campanhas do vendedor. Pro PAINEL mostramos TODAS as candidatas (inclusive as
@@ -519,14 +569,7 @@ def processar_item(item_id, access, sid, detalhes):
         cand_raw = [o for o in ofertas if isinstance(o, dict)
                     and (o.get("status") or "").lower() == "candidate"
                     and o.get("original_price") and preco_oferta(o)]
-        # candidatas de preço aberto (price = 0 + faixa). Elas NÃO entram na
-        # decisão do robô, mas não podem fazer o anúncio inteiro desaparecer.
-        tem_aberta = any(isinstance(o, dict)
-                         and (o.get("status") or "").lower() == "candidate"
-                         and o.get("original_price")
-                         and not preco_oferta(o) and preco_exibicao(o)
-                         for o in ofertas)
-        if not ativas_raw and not cand_raw and not tem_aberta:
+        if not ativas_raw and not cand_raw:
             return None
         it = detalhes.get(item_id)
         if not isinstance(it, dict):
@@ -562,26 +605,6 @@ def processar_item(item_id, access, sid, detalhes):
         # Esta trava vale só pra DECISÃO do robô — no painel mostramos todas (inclusive pending).
         cand = [c for c in cand_todas if cand_vigente(c["o"], access)]
         seguras = [c for c in cand if c["margem"] >= piso]
-        # ---- de preço aberto: avaliadas pelo valor SUGERIDO, só para a tela ----
-        # Ficam fora de cand/cand_todas de propósito: se entrassem, virariam
-        # candidatas a 'alvo' e o robô tentaria aplicar um preço que ninguém
-        # escolheu. Nas contas que aplicam de verdade isso seria grave.
-        cand_abertas = []
-        for _o in ofertas:
-            if not (isinstance(_o, dict) and (_o.get("status") or "").lower() == "candidate"
-                    and _o.get("original_price")):
-                continue
-            if preco_oferta(_o):
-                continue                      # essa já está na decisão
-            _pe = preco_exibicao(_o)
-            if not _pe:
-                continue
-            _o2 = dict(_o)
-            _o2["price"] = _pe
-            _ev = avaliar(_o2, cat, ltid, access, frete, custo)
-            if _ev:
-                _ev["faixa"] = (_o.get("min_discounted_price"), _o.get("max_discounted_price"))
-                cand_abertas.append(_ev)
         # ---- decide a ação (sua regra) ----
         # NUNCA sai de uma promoção que já está — mesmo abaixo do piso. Só TROCA se houver
         # uma que respeite o piso E pague MAIS (recebe maior). Senão, MANTÉM (com alerta se abaixo).
@@ -607,25 +630,6 @@ def processar_item(item_id, access, sid, detalhes):
                 alvo = (escolher_alvo(seguras, piso, ESTRATEGIA) if tradicional
                         else min(seguras, key=lambda a: a["pb"]))
             else:
-                # Nada a recomendar. Continua devolvendo None — a
-                # repricer_sugestoes fica idêntica ao que é hoje. Antes de
-                # sair, guarda o retrato do anúncio com TODAS as campanhas
-                # (cand_todas inclui as programadas) para o painel da Arcos.
-                with _vt_lock:
-                    VITRINE.append({
-                        "seller_id": str(sid), "item_id": item_id, "sku": sku,
-                        "titulo": titulo, "preco_atual": preco,
-                        "custo": custo, "custo_envio": frete,
-                        "custo_envio_origem": frete_origem,
-                        "estoque": it.get("available_quantity"),
-                        "grupo": grupo, "margem_minima": piso,
-                        "tem_ativa": False,
-                        "ofertas": [_oferta_dict(_c, False, False, None, access)
-                                    for _c in sorted(cand_todas + cand_abertas,
-                                        key=lambda x: (x["margem"] if x.get("margem") is not None else -999),
-                                        reverse=True)],
-                        "motivo": f"nenhuma campanha vigente acima do piso de {piso:.0f}%",
-                    })
                 return None
         rejeitadas = " | ".join(
             _rotulo(a) + (" (ok)" if a["margem"] >= piso else f" (<{piso:.0f}%)")
@@ -638,9 +642,7 @@ def processar_item(item_id, access, sid, detalhes):
         ofertas_lst = []
         if ativa:
             ofertas_lst.append(_oferta_dict(ativa, True, acao == "manter", acao, access))
-        for _c in sorted(cand_todas + cand_abertas,
-                         key=lambda x: (x["margem"] if x.get("margem") is not None else -999),
-                         reverse=True):
+        for _c in sorted(cand_todas, key=lambda x: (x["margem"] if x.get("margem") is not None else -999), reverse=True):
             ofertas_lst.append(_oferta_dict(_c, False, _c is alvo, acao, access))
         sug = {
             "seller_id": str(sid),
@@ -706,47 +708,39 @@ def _linha_log(s):
     flag = " ⚠️ABAIXO DO PISO" if s.get("alerta") else ""
     return f"[{s['acao']}]{flag} {s['item_id']} {str(s.get('titulo'))[:26]}{at}{alvo_txt} (piso {s['margem_minima']})"
 def gravar_em_lote(sugs, tam=200):
-    """Devolve True se TODOS os lotes entraram. Isso passou a importar: a
-    limpeza da rodada anterior agora depende de a nova ter entrado inteira."""
-    ok = True
     for i in range(0, len(sugs), tam):
         try:
             sb.table("repricer_sugestoes").insert(sugs[i:i + tam]).execute()
         except Exception as e:
-            ok = False
             print(f"  erro ao gravar lote {i}: {e}", flush=True)
-    return ok
 def main():
-    """GRAVAR ANTES, APAGAR DEPOIS.
-
-    Antes, esta função começava apagando as sugestões e só gravava as novas
-    no fim — e a rodada leva minutos. Nessa janela a tabela ficava vazia, e
-    QUALQUER leitura pegava a conta inteira sem campanha: o painel abrindo,
-    um F5, a atualização automática. Não adianta ensinar cada leitor a
-    esperar; enquanto existir um buraco, alguém cai nele.
-
-    Agora não existe buraco. As linhas novas entram PRIMEIRO, convivendo com
-    as velhas; só depois de tudo gravado é que as da rodada anterior saem. A
-    tela sempre pega a linha mais nova de cada anúncio, então durante a
-    troca ela vê uma foto completa — parte nova, parte velha, nenhuma
-    faltando.
-
-    E se a gravação falhar no meio, a limpeza NÃO acontece: fica valendo a
-    rodada anterior inteira, que é melhor que meia rodada nova.
-    """
+    # o preload de custos agora acontece DENTRO do laço das contas, porque
+    # cada conta pode ter um dono - e um dono, um catálogo. Aqui fora fica
+    # só o que é comum a todas (grupos, custo por anúncio).
     preload()
     total_sug = 0
     contadores = {"entrar": 0, "trocar": 0, "sair": 0, "manter": 0}
     SEM_CUSTO.clear()
-    VITRINE.clear()
-    tudo_ok = True
-    # marco da rodada: o que for mais velho que isto é da rodada anterior
-    T0 = datetime.now(timezone.utc).isoformat()
+    try:
+        q = sb.table("repricer_sugestoes").delete().neq("status", "aplicada")  # limpa tudo menos aplicadas
+        if SELLER_ID_FILTRO:
+            q = q.eq("seller_id", SELLER_ID_FILTRO)                            # só a conta em teste
+        q.execute()
+    except Exception as e:
+        print("Aviso: não consegui limpar pendentes:", e, flush=True)
+    try:
+        q = sb.table("repricer_sem_custo").delete().neq("item_id", "")         # limpa a lista anterior
+        if SELLER_ID_FILTRO:
+            q = q.eq("seller_id", SELLER_ID_FILTRO)
+        q.execute()
+    except Exception as e:
+        print("Aviso: não consegui limpar sem_custo:", e, flush=True)
     for seller_id, refresh in contas():
         access, sid, refresh = obter_access(sb, seller_id, refresh)
         if SELLER_ID_FILTRO and str(sid) != SELLER_ID_FILTRO:
             continue                              # roda SÓ a conta escolhida (ex.: testar a CF)
         print(f"\n===== CONTA {sid} =====", flush=True)
+        preload(sid)          # catálogo do DONO desta conta (limpa o da anterior)
         ids, total = todos_ativos(sid, access)
         cap = f" (varrendo {len(ids)}, limite de teste MAX_ITENS={MAX_ITENS})" if MAX_ITENS else ""
         print(f"itens ativos: {len(ids)} de {total if total is not None else '?'}{cap}", flush=True)
@@ -760,55 +754,10 @@ def main():
         for s in sugs:
             contadores[s["acao"]] = contadores.get(s["acao"], 0) + 1
             print(_linha_log(s), flush=True)
-        tudo_ok = gravar_em_lote(sugs) and tudo_ok
+        gravar_em_lote(sugs)
         total_sug += len(sugs)
         print(f"--- conta {sid}: {len(sugs)} registros gravados ---", flush=True)
-    # a vitrine tem chave (seller_id, item_id), então é upsert: a linha do
-    # anúncio é reescrita no lugar, sem nunca deixar de existir. O criado_em
-    # vai explícito para marcar a rodada — no upsert o valor padrão da coluna
-    # não é reaplicado, e sem isso a linha nova pareceria velha na limpeza.
-    if VITRINE:
-        try:
-            for v in VITRINE:
-                v["criado_em"] = T0
-            for i in range(0, len(VITRINE), 200):
-                sb.table("promo_vitrine").upsert(VITRINE[i:i + 200],
-                                                 on_conflict="seller_id,item_id").execute()
-            print(f"vitrine: {len(VITRINE)} anúncios gravados (só para o painel da Arcos)", flush=True)
-        except Exception as e:
-            tudo_ok = False
-            print("Aviso: não consegui gravar a vitrine:", e, flush=True)
-
-    # ---- só agora sai a rodada anterior ----
-    if tudo_ok:
-        try:
-            q = sb.table("repricer_sugestoes").delete().neq("status", "aplicada").lt("criado_em", T0)
-            if SELLER_ID_FILTRO:
-                q = q.eq("seller_id", SELLER_ID_FILTRO)
-            q.execute()
-        except Exception as e:
-            print("Aviso: não consegui limpar as sugestões antigas:", e, flush=True)
-        try:
-            q = sb.table("promo_vitrine").delete().lt("criado_em", T0)
-            if SELLER_ID_FILTRO:
-                q = q.eq("seller_id", SELLER_ID_FILTRO)
-            q.execute()
-        except Exception as e:
-            print("Aviso: não consegui limpar a vitrine antiga:", e, flush=True)
-    else:
-        print("ATENÇÃO: houve falha ao gravar — NÃO apaguei a rodada anterior. "
-              "Fica valendo o dado de antes, inteiro.", flush=True)
-
-    # O sem_custo continua sendo apagado e regravado: ele não alimenta o
-    # painel da Arcos, e eu não conheço as colunas dessa tabela bem o
-    # bastante para trocar o método sem olhar.
-    try:
-        q = sb.table("repricer_sem_custo").delete().neq("item_id", "")
-        if SELLER_ID_FILTRO:
-            q = q.eq("seller_id", SELLER_ID_FILTRO)
-        q.execute()
-    except Exception as e:
-        print("Aviso: não consegui limpar sem_custo:", e, flush=True)
+    # grava os "sem custo" (promoção disponível mas sem custo cadastrado)
     if SEM_CUSTO:
         try:
             for i in range(0, len(SEM_CUSTO), 200):
