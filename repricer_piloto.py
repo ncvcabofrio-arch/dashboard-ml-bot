@@ -596,17 +596,46 @@ def gravar_sugestoes(sid, analises):
     ninguém precisar limpar. Se o insert falhar no meio, a próxima rodada
     conserta - é rascunho, e rascunho se refaz.
     """
+    # ---- IRMÃOS DE ANÚNCIO: a fonte mais forte de todas ----
+    # user_product_id é o agrupamento do PRÓPRIO Mercado Livre para o mesmo
+    # produto vendido em condições diferentes (Premium, Clássico, variação de
+    # frete). Se um irmão tem SKU, o anúncio sem SKU É aquele produto - e o
+    # custo é o mesmo, por definição. Isso vale mais que a ficha técnica, que
+    # é um texto que o vendedor digitou e pode estar errado.
+    #
+    # Só o piloto consegue fazer isso: a sonda analisa um item por vez e não
+    # enxerga os irmãos. Aqui eu tenho a conta inteira na mão.
+    #
+    # IRMÃOS DISCORDANDO viram nenhuma sugestão, de propósito: se dois irmãos
+    # têm SKUs diferentes, o vendedor tratou como produtos distintos e não
+    # cabe a mim escolher um.
+    irmaos, conflito = {}, set()
+    for a in analises:
+        up, sk = a.get("upid"), (a.get("sku") or "").strip()
+        if not up or not sk:
+            continue
+        if up in irmaos and irmaos[up] != sk:
+            conflito.add(up)
+        irmaos[up] = sk
+    for up in conflito:
+        irmaos.pop(up, None)
+
     linhas, sem_candidato = [], 0
     for a in analises:
         if (a.get("sku") or "").strip():
             continue                       # já tem SKU: não é caso desta tela
-        s = (a.get("sku_sugerido") or "").strip()
+        s, origem = "", a.get("sku_origem")
+        up = a.get("upid")
+        if up and irmaos.get(up):
+            s, origem = irmaos[up], "irmao"          # o ML diz que é o mesmo produto
+        else:
+            s = (a.get("sku_sugerido") or "").strip()
         if not s:
             sem_candidato += 1
             continue
         linhas.append({"item_id": a.get("item_id"), "seller_id": str(sid),
                        "titulo": a.get("titulo"), "sku_sugerido": s,
-                       "origem": a.get("sku_origem"), "atualizado_em": _agora_iso()})
+                       "origem": origem, "atualizado_em": _agora_iso()})
     try:
         rec.sb.table("repricer_sku_sugerido").delete().eq("seller_id", str(sid)).execute()
         for i in range(0, len(linhas), 300):
