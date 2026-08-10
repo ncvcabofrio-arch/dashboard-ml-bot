@@ -1,0 +1,53 @@
+name: Anuncios vs BaseLinker
+
+# Roda so quando VOCE mandar (botao "Run workflow" na aba Actions).
+# Nao entra em nenhum cron: e' uma conferencia pontual, nao rotina.
+on:
+  workflow_dispatch:
+    inputs:
+      sellers:
+        description: 'seller_id das contas a conferir (virgula). So conta com lista mlbs_na_base_<id>.txt'
+        required: false
+        default: '177795203'
+      com_pausados:
+        description: 'Incluir anuncios PAUSADOS? (1 = sim, 0 = so ativos)'
+        required: false
+        default: '0'
+
+jobs:
+  conferir:
+    runs-on: ubuntu-latest
+    # varredura de catalogo inteiro pode demorar; o padrao (6h) e' de sobra,
+    # mas 60 min evita ficar preso se o ML travar
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Instalar dependencias
+        run: pip install requests supabase openpyxl
+
+      - name: Conferir anuncios contra a BaseLinker
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          ML_CLIENT_ID: ${{ secrets.ML_CLIENT_ID }}
+          ML_CLIENT_SECRET: ${{ secrets.ML_CLIENT_SECRET }}
+          COM_PAUSADOS: ${{ github.event.inputs.com_pausados }}
+          SELLERS: ${{ github.event.inputs.sellers }}
+        run: python anuncios_vs_base.py
+
+      - name: Guardar as planilhas
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: anuncios-vs-base
+          path: |
+            anuncios_vs_base.xlsx
+            anuncios_vs_base.csv
+          if-no-files-found: warn
+          retention-days: 30
