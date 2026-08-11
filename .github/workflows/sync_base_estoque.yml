@@ -1,9 +1,5 @@
-# .github/workflows/sync_base_estoque.yml
 # Espelha o estoque da BaseLinker em base_produtos.
-#
-# SEM AGENDAMENTO POR ENQUANTO — de propósito. Só roda quando você mandar.
-# Depois de validar, descomente o schedule (de 2 em 2 horas, no mesmo ritmo do
-# sync_estoque.yml do Ideris, mas 20 minutos depois para não competirem).
+# Roda de 2 em 2 horas, 20 minutos depois do horário do sync_estoque do Ideris.
 name: Base — estoque
 
 on:
@@ -13,8 +9,8 @@ on:
         description: 'SKUs para imprimir no log e conferir no painel (separados por vírgula)'
         required: false
         default: ''
-  # schedule:
-  #   - cron: '25 */2 * * *'
+  schedule:
+    - cron: '25 */2 * * *'
 
 jobs:
   estoque:
