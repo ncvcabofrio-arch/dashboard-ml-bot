@@ -3,11 +3,14 @@ Sincronizador de PRODUTOS BaseLinker -> Supabase (1x/dia).
 
 DUAS ETAPAS:
   1) getInventoryProductsList  -> id, sku, ean, nome, preco   (1000 por pagina)
-  2) getInventoryProductsData  -> custo, kit, tax_rate        (1000 por chamada)
+  2) getInventoryProductsData  -> custo, kit, tax_rate, FOTO  (1000 por chamada)
 
 A etapa 2 existe porque o CUSTO nao vem na listagem simples. E o custo sustenta
 margem, DRE, alerta de margem baixa e repricer — so da' para desligar o
 sync_ideris.py depois que esta etapa estiver rodando.
+
+A FOTO sai de carona nessa mesma chamada: 'images' vem junto com o custo, entao
+o app de contagem ganha imagem sem gastar nada da cota de 100 chamadas/min.
 
 Protecoes (as mesmas dos robos do Ideris):
   - coleta vazia NAO grava nada e avisa no Telegram
@@ -76,8 +79,31 @@ def numero(v):
         return None
 
 
+def primeira_foto(imagens):
+    """Primeira foto utilizavel do cadastro da Base.
+
+    'images' vem ora como dict {"0": url, "1": url}, ora como lista. So aceita
+    http(s): em algumas contas vem base64 embutido, e guardar isso numa coluna
+    de texto incha a tabela a toa - o app precisa de um endereco para carregar,
+    nao do arquivo.
+    """
+    if isinstance(imagens, dict):
+        # a ordem importa: "0" e' a foto principal
+        valores = [imagens[k] for k in sorted(imagens.keys(), key=lambda x: str(x))]
+    elif isinstance(imagens, (list, tuple)):
+        valores = list(imagens)
+    else:
+        valores = []
+
+    for v in valores:
+        s = str(v or "").strip()
+        if s.startswith("http://") or s.startswith("https://"):
+            return s
+    return None
+
+
 def buscar_dados(inv_id, ids):
-    """Etapa 2: custo, kit e imposto, em lotes. Devolve {product_id: {...}}."""
+    """Etapa 2: custo, kit, imposto e foto, em lotes. Devolve {product_id: {...}}."""
     saida = {}
     for i in range(0, len(ids), LOTE_DADOS):
         lote = ids[i:i + LOTE_DADOS]
@@ -98,6 +124,7 @@ def buscar_dados(inv_id, ids):
                 "tax_rate": numero(p.get("tax_rate")),
                 "is_bundle": bool(p.get("is_bundle")),
                 "bundle_itens": json.dumps(bundle, ensure_ascii=False) if bundle else None,
+                "imagem": primeira_foto(p.get("images")),
             }
         print(f"  etapa 2: lote {i // LOTE_DADOS + 1} — {len(itens)} produtos")
     return saida
@@ -142,8 +169,9 @@ def main():
     # ---------------------------------------------------------------- etapa 2
     com_custo = 0
     kits = 0
+    com_foto = 0
     if not PULAR_CUSTO:
-        print("Etapa 2: buscando custo e composição de kit...")
+        print("Etapa 2: buscando custo, composição de kit e foto...")
         dados = buscar_dados(inv_id, [int(k) for k in linhas.keys()])
         for pid, extra in dados.items():
             if pid in linhas:
@@ -153,6 +181,8 @@ def main():
                     com_custo += 1
                 if extra.get("is_bundle"):
                     kits += 1
+                if extra.get("imagem"):
+                    com_foto += 1
     else:
         print("Etapa 2 pulada (PULAR_CUSTO=1)")
 
@@ -171,12 +201,15 @@ def main():
 
     pct_ean = com_ean / total * 100
     pct_custo = com_custo / total * 100 if total else 0
+    pct_foto = com_foto / total * 100 if total else 0
     print(f"✅ Espelho atualizado: {total} produtos. "
-          f"{com_ean} com EAN, {com_sku} com SKU, {com_custo} com custo, {kits} kits.")
+          f"{com_ean} com EAN, {com_sku} com SKU, {com_custo} com custo, "
+          f"{com_foto} com foto, {kits} kits.")
     tg_send(f"📦 <b>Base — produtos espelhados</b>\n"
             f"{total} produtos\n"
             f"{com_ean} com EAN ({pct_ean:.1f}%)\n"
             f"{com_custo} com custo ({pct_custo:.1f}%)\n"
+            f"{com_foto} com foto ({pct_foto:.1f}%)\n"
             f"{kits} kits")
 
 
