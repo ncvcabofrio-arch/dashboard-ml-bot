@@ -1,0 +1,25 @@
+# .github/workflows/base_explorar.yml
+# Só lê a BaseLinker e imprime a estrutura. Não grava nada em lugar nenhum.
+# Rode este PRIMEIRO, antes dos sync.
+name: Base — explorar
+
+on:
+  workflow_dispatch:
+
+jobs:
+  explorar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Instalar dependências
+        run: pip install requests
+
+      - name: Explorar a BaseLinker
+        env:
+          BASELINKER_TOKEN: ${{ secrets.BASELINKER_TOKEN }}
+        run: python base_explorar.py

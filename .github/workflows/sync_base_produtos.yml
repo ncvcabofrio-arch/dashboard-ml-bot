@@ -1,0 +1,34 @@
+# .github/workflows/sync_base_produtos.yml
+# Espelha o catálogo da BaseLinker em base_produtos.
+#
+# SEM AGENDAMENTO POR ENQUANTO — de propósito. Só roda quando você mandar.
+# Depois de validar, é só descomentar o bloco schedule abaixo (9h, igual ao
+# sync_ideris.yml).
+name: Base — produtos
+
+on:
+  workflow_dispatch:
+  # schedule:
+  #   - cron: '30 9 * * *'   # 06h30 de Brasília, meia hora depois do sync_ideris
+
+jobs:
+  produtos:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Instalar dependências
+        run: pip install requests supabase
+
+      - name: Espelhar produtos da Base
+        env:
+          BASELINKER_TOKEN: ${{ secrets.BASELINKER_TOKEN }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python sync_base_produtos.py

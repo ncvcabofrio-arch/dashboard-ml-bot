@@ -1,0 +1,40 @@
+# .github/workflows/sync_base_estoque.yml
+# Espelha o estoque da BaseLinker em base_produtos.
+#
+# SEM AGENDAMENTO POR ENQUANTO — de propósito. Só roda quando você mandar.
+# Depois de validar, descomente o schedule (de 2 em 2 horas, no mesmo ritmo do
+# sync_estoque.yml do Ideris, mas 20 minutos depois para não competirem).
+name: Base — estoque
+
+on:
+  workflow_dispatch:
+    inputs:
+      conferir:
+        description: 'SKUs para imprimir no log e conferir no painel (separados por vírgula)'
+        required: false
+        default: ''
+  # schedule:
+  #   - cron: '25 */2 * * *'
+
+jobs:
+  estoque:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Instalar dependências
+        run: pip install requests supabase
+
+      - name: Espelhar estoque da Base
+        env:
+          BASELINKER_TOKEN: ${{ secrets.BASELINKER_TOKEN }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          CONFERIR: ${{ github.event.inputs.conferir }}
+        run: python sync_base_estoque.py
