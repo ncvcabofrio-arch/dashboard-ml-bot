@@ -1,15 +1,11 @@
-# .github/workflows/sync_base_produtos.yml
 # Espelha o catálogo da BaseLinker em base_produtos.
-#
-# SEM AGENDAMENTO POR ENQUANTO — de propósito. Só roda quando você mandar.
-# Depois de validar, é só descomentar o bloco schedule abaixo (9h, igual ao
-# sync_ideris.yml).
+# Roda 1x por dia, meia hora depois do sync_ideris.
 name: Base — produtos
 
 on:
   workflow_dispatch:
-  # schedule:
-  #   - cron: '30 9 * * *'   # 06h30 de Brasília, meia hora depois do sync_ideris
+  schedule:
+    - cron: '30 9 * * *'   # 06h30 de Brasília
 
 jobs:
   produtos:
