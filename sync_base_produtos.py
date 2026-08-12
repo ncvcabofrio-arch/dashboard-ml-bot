@@ -17,6 +17,10 @@ Protecoes (as mesmas dos robos do Ideris):
   - volume abaixo de MIN_PRODUTOS tambem NAO grava
   - upsert em lotes de 200
   - falha na etapa 2 NAO derruba a etapa 1: grava o que tem e reporta
+  - LIMPEZA: produto que sumiu da Base sai do espelho — mas so' se a limpeza
+    for pequena. Se de repente 30% dos produtos "desaparecessem", e' muito
+    mais provavel que a coleta veio quebrada do que a loja ter esvaziado o
+    catalogo. Nesse caso nao apaga nada e avisa no Telegram.
 """
 
 import json
@@ -33,6 +37,8 @@ SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 TG_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TG_CHAT = os.environ.get("TELEGRAM_CHAT_ID", "")
 MIN_PRODUTOS = int(os.environ.get("MIN_PRODUTOS", "100"))
+# fracao maxima do espelho que uma rodada pode apagar de uma vez
+MAX_APAGAR_PCT = float(os.environ.get("MAX_APAGAR_PCT", "10"))
 PULAR_CUSTO = os.environ.get("PULAR_CUSTO", "0") == "1"
 LOTE_DADOS = 1000
 
@@ -199,6 +205,27 @@ def main():
         sb.table("base_produtos").upsert(dados_lista[i:i + 200],
                                          on_conflict="product_id").execute()
 
+    # ------------------------------------------------------------- limpeza
+    # O upsert acima carimbou atualizado_em em TODOS os produtos que ainda
+    # existem na Base. Entao quem ficou com carimbo antigo sumiu de la.
+    apagados = 0
+    nao_apagados = 0
+    try:
+        r = sb.table("base_produtos").select("product_id", count="exact") \
+              .lt("atualizado_em", agora).execute()
+        sumidos = r.count or 0
+        limite = max(5, int(total * MAX_APAGAR_PCT / 100))
+        if 0 < sumidos <= limite:
+            sb.table("base_produtos").delete().lt("atualizado_em", agora).execute()
+            apagados = sumidos
+            print(f"Limpeza: {apagados} produto(s) apagados do espelho (sumiram da Base).")
+        elif sumidos > limite:
+            nao_apagados = sumidos
+            print(f"⚠️ {sumidos} produtos sumiram de uma vez (limite {limite}). "
+                  f"NAO apaguei nada — confira a Base antes.")
+    except Exception as e:
+        print("Aviso: limpeza nao rodou:", e)
+
     pct_ean = com_ean / total * 100
     pct_custo = com_custo / total * 100 if total else 0
     pct_foto = com_foto / total * 100 if total else 0
@@ -210,7 +237,10 @@ def main():
             f"{com_ean} com EAN ({pct_ean:.1f}%)\n"
             f"{com_custo} com custo ({pct_custo:.1f}%)\n"
             f"{com_foto} com foto ({pct_foto:.1f}%)\n"
-            f"{kits} kits")
+            f"{kits} kits"
+            + (f"\n🗑 {apagados} apagados do espelho" if apagados else "")
+            + (f"\n⚠️ {nao_apagados} sumiram de uma vez — NÃO apaguei, confira a Base"
+               if nao_apagados else ""))
 
 
 if __name__ == "__main__":
