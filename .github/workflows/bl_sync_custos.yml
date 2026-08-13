@@ -1,0 +1,50 @@
+# Custo e nome do BI a partir da BaseLinker.
+# Substitui o "Sincronizar custos Ideris", que ja esta desativado.
+# Grava custo e nome na tabela 'produtos' e roda backfill_custos().
+name: BI — custos (BaseLinker)
+
+on:
+  schedule:
+    - cron: '0 9 * * *'          # 06:00 de Brasilia (a vaga que era do Ideris)
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Simulacao? 1 = le tudo e NAO grava nada no Supabase'
+        required: false
+        default: '0'
+        type: choice
+        options: ['0', '1']
+      campo_modelo:
+        description: "Origem do modelo. Vazio = nao mexe na coluna. Ex.: feature:Modelo"
+        required: false
+        default: ''
+
+concurrency:
+  group: sync-custos
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Instalar dependencias
+        run: pip install requests supabase
+
+      - name: Sincronizar custos da BaseLinker
+        env:
+          BASELINKER_TOKEN: ${{ secrets.BASELINKER_TOKEN }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          BL_INVENTORY_ID: '58792'
+          BL_IDIOMA: br
+          BL_INCLUIR_VARIANTES: '1'
+          BL_CAMPO_CUSTO: average_landed_cost   # cai para average_cost quando nao houver
+          BL_CAMPO_MODELO: ${{ inputs.campo_modelo || '' }}
+          BL_DRY_RUN: ${{ inputs.dry_run || '0' }}
+        run: python -u bl_sync_custos.py

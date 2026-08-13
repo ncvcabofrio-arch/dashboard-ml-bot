@@ -1,0 +1,55 @@
+# Estoque do BI a partir da BaseLinker.
+# Substitui o "Sincronizar estoque (2h)" do Ideris, que ja esta desativado.
+# Grava estoque_base + estoque_sync_em na tabela 'produtos'.
+name: BI — estoque (BaseLinker)
+
+on:
+  schedule:
+    - cron: '5 */2 * * *'        # de 2 em 2 horas, no minuto 5 (a vaga que era do Ideris)
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Simulacao? 1 = le tudo e NAO grava nada no Supabase'
+        required: false
+        default: '0'
+        type: choice
+        options: ['0', '1']
+      conferir:
+        description: 'SKUs para imprimir no log e conferir no painel'
+        required: false
+        default: 'SM57,UCA222,GD20CE'
+
+# duas execucoes ao mesmo tempo gravariam carimbos diferentes no mesmo SKU
+concurrency:
+  group: sync-estoque
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Instalar dependencias
+        run: pip install requests supabase
+
+      - name: Sincronizar estoque da BaseLinker
+        env:
+          BASELINKER_TOKEN: ${{ secrets.BASELINKER_TOKEN }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          BL_INVENTORY_ID: '58792'
+          BL_IDIOMA: br
+          BL_DESCONTAR_RESERVAS: '0'     # 1 = desconta o que ja esta comprometido com pedidos
+          BL_INCLUIR_VARIANTES: '1'
+          BL_WAREHOUSES: ''              # vazio = soma os 3 depositos (decisao de 13/08)
+          BL_EMPRESAS: ''                # vazio = nao grava coluna por empresa (ainda)
+          BL_DRY_RUN: ${{ inputs.dry_run || '0' }}
+          BL_CONFERIR: ${{ inputs.conferir || 'SM57,UCA222,GD20CE' }}
+        run: python -u bl_sync_estoque.py
