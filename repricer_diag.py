@@ -14,6 +14,7 @@ Uso (inputs do workflow): ITEM_ID (obrigatório) e SELLER_ID (conta).
 import os
 import json
 import repricer_sugestoes as rec
+import repricer_promo_aplicar as apl   # o aplicador DE VERDADE — ver nota abaixo
 from datetime import datetime, timezone, timedelta
 from ml_auth import obter_access
 sb = rec.sb
@@ -42,87 +43,97 @@ def _achar(res, iid):
         if str(x.get("id")) == str(iid):
             return x
     return None
-# ---------- funções PURAS copiadas do aplicador (pra a simulação bater 100% com ele) ----------
-def achar_candidato(ofertas, alvo):
-    """Localiza, na resposta ATUAL do ML, a promoção candidata recomendada (mesma lógica do aplicador)."""
-    tipo = (alvo.get("promocao_tipo") or "").upper()
-    pid = alvo.get("promocao_id")
-    nome = alvo.get("promocao_nome")
-    cands = [o for o in ofertas if isinstance(o, dict)
-             and (o.get("status") or "").lower() == "candidate"
-             and (o.get("type") or "").upper() == tipo]
-    for o in cands:
-        if pid and o.get("id") == pid:
-            return o
-    for o in cands:
-        if nome and (o.get("name") or "") == nome:
-            return o
-    return cands[0] if len(cands) == 1 else None
-def _com_datas(corpo, cand):
-    ini = cand.get("start_date")
-    fim = cand.get("finish_date") or cand.get("end_date")
-    if ini:
-        corpo["start_date"] = ini
-    if fim:
-        corpo["finish_date"] = fim
-    return corpo
-def corpo_post(tipo, cand, preco_alvo):
-    """Monta o corpo do POST conforme o tipo (idêntico ao aplicador)."""
-    tipo = (tipo or "").upper()
-    if tipo in ("SMART", "PRICE_MATCHING", "PRICE_MATCHING_MELI_ALL"):
-        oid = cand.get("ref_id") or cand.get("offer_id") or cand.get("candidate_id") or cand.get("id")
-        return _com_datas({"promotion_id": cand.get("id"), "promotion_type": tipo, "offer_id": oid}, cand)
-    if tipo == "LIGHTNING":
-        st = cand.get("stock") or {}
-        estoque = st.get("min") or st.get("remaining_stock") or 1
-        return {"deal_price": round(preco_alvo, 2), "stock": int(estoque), "promotion_type": "LIGHTNING"}
-    if tipo == "DEAL":
-        preco = round(preco_alvo, 2)
-        try:
-            mx = cand.get("max_discounted_price")
-            mn = cand.get("min_discounted_price")
-            if mx is not None:
-                preco = min(preco, float(mx))
-            if mn is not None:
-                preco = max(preco, float(mn))
-        except (TypeError, ValueError):
-            pass
-        return _com_datas({"promotion_id": cand.get("id"), "promotion_type": "DEAL", "deal_price": round(preco, 2)}, cand)
-    return None
-def sonda_campanha(pid, tipo, iid, access):
-    """Procura o item na campanha por VÁRIAS vias. Retorna dict {via: (status, offer_id)}
-    e, se as vias com item_id não acharem 'started', PAGINA a lista inteira procurando."""
+# ---------------------------------------------------------------------------
+# NADA DE COPIAR O APLICADOR.
+#
+# Estas funções eram CÓPIAS de repricer_promo_aplicar.py, "pra a simulação bater
+# 100% com ele". Cópia não bate: ela envelhece. Enquanto o aplicador ganhava o
+# filtro de candidata avaliável, os 7 tipos de corpo_post e o preço calculado do
+# desconto individual, a cópia aqui continuou com a lógica antiga e 4 tipos — e a
+# seção 5 passou a dizer NO-GO em coisas que o aplicador faria.
+#
+# Uma simulação que diverge do simulado é pior que nenhuma: ela dá confiança errada.
+# Agora chamamos as funções DO PRÓPRIO aplicador (apl.*). Se ele mudar, isto muda junto.
+# Importar é seguro: o módulo só define constantes e funções — nada roda fora do main().
+# ---------------------------------------------------------------------------
+achar_candidato = apl.achar_candidato
+corpo_post = apl.corpo_post
+# Teto de paginação. O antigo era 15 páginas (750 itens) e a saída dizia
+# "não achou em 15 pág" — a MESMA frase para dois fatos OPOSTOS: "varri a campanha
+# inteira e o item não está lá" e "desisti no meio". Campanha grande caía sempre no
+# segundo caso e a gente lia como se fosse o primeiro. Era o diagnóstico mentindo
+# com cara de conclusão.
+TETO_PAGINAS = int(os.environ.get("TETO_PAGINAS", "200"))   # 200 x 50 = 10.000 itens
+def sonda_campanha(pid, tipo, iid, access, por_item=None):
+    """Procura o item numa campanha por VÁRIAS vias. Retorna (vias, veredito).
+
+    por_item: {(promotion_id, TIPO): oferta} montado da seção 2
+              (/seller-promotions/items/{id}). Serve de TESTEMUNHA: se ELE lista a
+              campanha e nenhuma via daqui acha o item, as duas fontes da API se
+              contradizem. Foi assim que a ARCOS BASE se denunciou — item_id=None na
+              sonda, 'candidate' no endpoint por item.
+
+    veredito:
+      achou        alguma via encontrou
+      ausente      varri a campanha ATÉ O FIM e não está
+      inconclusivo bati o teto ou a API falhou -> NÃO SEI
+      divergencia  o endpoint por item vê, a sonda não -> a API se contradiz
+    """
     out = {}
-    base = f"/seller-promotions/promotions/{pid}/items?promotion_type={tipo}&item_id={iid}&app_version=v2"
+    base = (f"/seller-promotions/promotions/{pid}/items"
+            f"?promotion_type={tipo}&item_id={iid}&app_version=v2")
     for nome, extra in (("item_id", ""), ("+started", "&status=started"),
                         ("+candidate", "&status=candidate"), ("+active", "&status_item=active")):
         st, d = rec.get(base + extra, access)
         res = (d.get("results") if isinstance(d, dict) else None) or []
         it = _achar(res, iid)
         out[nome] = (it.get("status"), it.get("offer_id")) if it else (None, None)
-    achou_started = any(v[0] == "started" for v in out.values())
-    if not achou_started:
-        sa, npag, achado = None, 0, None
-        for _ in range(15):
+    achou_filtrado = any(v[0] for v in out.values())
+    achado_pag = None
+    fim_de_verdade = None        # True = a lista acabou | False = teto/erro | None = nem varri
+    if not achou_filtrado:
+        sa, npag = None, 0
+        while npag < TETO_PAGINAS:
             npag += 1
-            url = f"/seller-promotions/promotions/{pid}/items?promotion_type={tipo}&app_version=v2&limit=50"
+            url = (f"/seller-promotions/promotions/{pid}/items"
+                   f"?promotion_type={tipo}&app_version=v2&limit=50")
             if sa:
                 url += f"&search_after={sa}"
             st, d = rec.get(url, access)
             if not isinstance(d, dict):
+                out["PAGINANDO"] = (f"⚠️ INCONCLUSIVO — erro HTTP {st} na página {npag}", None)
+                fim_de_verdade = False
                 break
             res = d.get("results") or []
             it = _achar(res, iid)
             if it:
-                achado = (it.get("status"), it.get("offer_id"), npag)
+                achado_pag = (it.get("status"), it.get("offer_id"), npag)
                 break
             pag = d.get("paging") or {}
             sa = d.get("search_after") or pag.get("search_after") or pag.get("searchAfter")
-            if not sa:
+            if not sa or not res:
+                fim_de_verdade = True                 # a lista terminou de verdade
                 break
-        out["PAGINANDO"] = (f"{achado[0]} (pág {achado[2]}, offer={achado[1]})" if achado
-                            else f"não achou em {npag} pág", None)
-    return out
+        else:
+            fim_de_verdade = False                    # saiu pelo TETO, não pelo fim
+        if achado_pag:
+            out["PAGINANDO"] = (f"{achado_pag[0]} (pág {achado_pag[2]}, offer={achado_pag[1]})", None)
+        elif fim_de_verdade is True:
+            out["PAGINANDO"] = (f"NÃO ESTÁ na campanha (varri as {npag} pág ATÉ O FIM)", None)
+        elif "PAGINANDO" not in out:
+            out["PAGINANDO"] = (f"⚠️ INCONCLUSIVO — parei no teto de {npag} páginas. "
+                                f"NÃO quer dizer que o item não está lá. Suba TETO_PAGINAS.", None)
+    achou = achou_filtrado or bool(achado_pag)
+    visto_por_item = bool(por_item and (str(pid), (tipo or "").upper()) in por_item)
+    if achou:
+        veredito = "achou"
+    elif visto_por_item:
+        veredito = "divergencia"
+    elif fim_de_verdade is True:
+        veredito = "ausente"
+    else:
+        veredito = "inconclusivo"
+    return out, veredito
 def dump(label, obj, corte=6000):
     print(f"\n===== {label} =====", flush=True)
     try:
@@ -158,7 +169,11 @@ def raio_x(item_id, it, access):
     lista = it.get("price")
     cat = it.get("category_id")
     ltid = it.get("listing_type_id")
-    sku = it.get("seller_sku") or it.get("seller_custom_field")
+    # O SKU vem dos TRÊS lugares (rec.sku_do_item), igual ao robô. Ler só dois fazia o
+    # [H] e a seção 5 dizerem "sem custo" num anúncio que TEM custo — o diagnóstico
+    # mentindo sobre o próprio sistema. O bloco [SKU] logo abaixo continua mostrando
+    # os três lados separados, que é o que serve pra ver cadastro faltando.
+    sku = rec.sku_do_item(it)
     # [SKU] ONDE ESTÁ O SKU — os 3 lugares possíveis, e o robô só olha 2.
     # Motivo: a IRMAOS_BROTHERS tem SKU nos anúncios do ML e chegou no banco
     # com ZERO. Zero exato não é "não preencheu", é campo que ninguém leu.
@@ -379,7 +394,7 @@ def simular_entrada(item_id, access, sid):
         return
     ltid = it.get("listing_type_id")
     cat = it.get("category_id")
-    sku = it.get("seller_sku") or it.get("seller_custom_field")
+    sku = rec.sku_do_item(it)          # os TRÊS lugares, igual ao aplicador
     custo = rec.custo_efetivo(item_id, sku)
     if custo is None:
         print("  >>> NO-GO: sem custo cadastrado — o aplicador não avalia margem sem custo.", flush=True)
@@ -414,8 +429,13 @@ def simular_entrada(item_id, access, sid):
         return
     print(f"  margem recalculada: {ev['margem']:.2f}%  (piso {piso:.0f}% · grupo {grupo})", flush=True)
     if ev["margem"] < piso:
-        print(f"  >>> NO-GO: margem {ev['margem']:.2f}% ABAIXO do piso {piso:.0f}% — o aplicador NÃO entraria.", flush=True)
-        return
+        # Duas verdades, e antes só contávamos uma. O piso bloqueia no disparo comum,
+        # mas o botão do Acelerar manda IGNORAR_PISO=1 de propósito — lá quem decide é
+        # você. Dizer só "NÃO entraria" era mentira pela metade.
+        print(f"  >>> margem {ev['margem']:.2f}% ABAIXO do piso {piso:.0f}%:", flush=True)
+        print(f"      · disparo comum / piloto / reator: NO-GO, não entraria", flush=True)
+        print(f"      · pelo botão do ACELERAR (IGNORAR_PISO=1): ENTRARIA, marcando "
+              f"'⚠️ ABAIXO DO PISO' no resultado", flush=True)
     # (d) START_DATE: cofinanciadas exigem data no POST; pega do detalhe da promoção (formato local, não no passado)
     if tipo in ("SMART", "PRICE_MATCHING", "PRICE_MATCHING_MELI_ALL", "DEAL") and not cand.get("start_date"):
         pd = rec._promo_detalhe(cand.get("id"), tipo, access)
@@ -488,31 +508,60 @@ def main():
     print(f"\n===== 3) CAMPANHAS DA CONTA: {len(todas)} =====", flush=True)
     for p in todas:
         print(f"  {(p.get('name') or '?')} [{p.get('type')}/{p.get('status')}/{p.get('id')}]", flush=True)
-    # 4) SONDA a participação do item em CADA campanha started/pending, por várias vias + paginação
-    print("\n===== 4) SONDA DA PARTICIPAÇÃO (item_id x status=started x candidate x active x PAGINANDO) =====", flush=True)
-    ativas_reais = []
+    # 4) SONDA a participação em CADA campanha, com veredito honesto e cruzamento
+    print(f"\n===== 4) SONDA DA PARTICIPAÇÃO (varredura até o fim, teto {TETO_PAGINAS} pág) =====", flush=True)
+    # TESTEMUNHA: o que o endpoint POR ITEM (seção 2) enxergou
+    por_item = {}
+    for o in (of if isinstance(of, list) else []):
+        if isinstance(o, dict):
+            por_item[(str(o.get("id") or ""), (o.get("type") or "").upper())] = o
+    ativas_reais, divergencias, inconclusivos = [], [], []
     for p in todas:
         if (p.get("status") or "").lower() not in ("started", "pending"):
             continue
         pid, tipo = p.get("id"), (p.get("type") or "")
-        vias = sonda_campanha(pid, tipo, ITEM, access)
-        apareceu = any(v[0] for v in vias.values())
-        if not apareceu:
-            continue
+        vias, veredito = sonda_campanha(pid, tipo, ITEM, access, por_item)
+        nome = p.get("name") or "?"
+        if veredito == "ausente":
+            continue          # resultado limpo e completo: não polui a saída
         resumo = " | ".join(f"{k}={v[0]}" for k, v in vias.items())
-        print(f"\n  >>> {(p.get('name') or '?')} [{tipo}/{pid}]", flush=True)
+        print(f"\n  >>> {nome} [{tipo}/{pid}]  ->  {veredito.upper()}", flush=True)
         print(f"      vias: {resumo}", flush=True)
+        if veredito == "divergencia":
+            o = por_item.get((str(pid), (tipo or "").upper())) or {}
+            divergencias.append((nome, tipo, pid, o.get("status")))
+            print(f"      🚨 A API SE CONTRADIZ: o endpoint POR ITEM lista esta campanha como "
+                  f"'{o.get('status')}', mas NENHUMA via da sonda acha o item nela.", flush=True)
+            print(f"         => o filtro ?item_id= NÃO é confiável aqui. Não trate "
+                  f"'item_id=None' como prova de ausência.", flush=True)
+        if veredito == "inconclusivo":
+            inconclusivos.append((nome, tipo, pid))
         started_via = next((v for v in vias.values() if v[0] == "started"), None)
         if started_via:
             oid = started_via[1]
-            ativas_reais.append((p.get("name"), tipo, pid, oid))
+            ativas_reais.append((nome, tipo, pid, oid))
             print(f"      >>> PARTICIPAÇÃO ATIVA (started). COMO SAIR: {como_sair(ITEM, tipo, pid, oid, 'started')}", flush=True)
-    print("\n----- RESUMO: participações ATIVAS (started) encontradas -----", flush=True)
-    if ativas_reais:
-        for nome, tipo, pid, oid in ativas_reais:
-            print(f"  ✓ {nome} [{tipo}/{pid}] offer={oid}", flush=True)
-    else:
-        print("  (nenhuma via encontrou o item como 'started')", flush=True)
+    # campanhas que o endpoint por item viu e que a sonda nem chegou a testar
+    testadas = {(str(p.get("id") or ""), (p.get("type") or "").upper()) for p in todas
+                if (p.get("status") or "").lower() in ("started", "pending")}
+    for chave, o in por_item.items():
+        if chave[0] and chave not in testadas:
+            print(f"\n  >>> {o.get('name') or '?'} [{chave[1]}/{chave[0]}]  ->  SÓ NO ENDPOINT POR ITEM", flush=True)
+            print(f"      🚨 aparece por item (status '{o.get('status')}') mas não está entre as "
+                  f"campanhas do vendedor testadas — a lista da conta não a cobre.", flush=True)
+            divergencias.append((o.get("name"), chave[1], chave[0], o.get("status")))
+    print("\n----- RESUMO HONESTO -----", flush=True)
+    print(f"  participações ATIVAS (started): {len(ativas_reais)}", flush=True)
+    for nome, tipo, pid, oid in ativas_reais:
+        print(f"    ✓ {nome} [{tipo}/{pid}] offer={oid}", flush=True)
+    print(f"  DIVERGÊNCIAS entre as duas fontes da API: {len(divergencias)}", flush=True)
+    for nome, tipo, pid, stt in divergencias:
+        print(f"    🚨 {nome} [{tipo}/{pid}] — por item diz '{stt}', a sonda não acha", flush=True)
+    print(f"  INCONCLUSIVOS (bati o teto — NÃO SEI): {len(inconclusivos)}", flush=True)
+    for nome, tipo, pid in inconclusivos:
+        print(f"    ？ {nome} [{tipo}/{pid}] — rode de novo com TETO_PAGINAS maior", flush=True)
+    if not divergencias and not inconclusivos:
+        print("  (nenhuma divergência e nenhum inconclusivo — a saída acima é confiável)", flush=True)
     # 5) SIMULAÇÃO DE ENTRADA (só leitura) — reproduz o aplicador e mostra o POST exato
     simular_entrada(ITEM, access, SID)
     print("\n################ FIM — nada foi alterado (só leitura) ################", flush=True)
