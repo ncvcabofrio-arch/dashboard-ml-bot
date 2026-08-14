@@ -622,7 +622,7 @@ def _oferta_dict(a, ativa_flag, recomendada_flag, acao=None, access=None):
         if isinstance(det, dict):
             ini = ini or _data_promo(det, "start_date")
             fim = fim or _data_promo(det, "finish_date", "end_date")
-    return {"nome": o.get("name"), "tipo": o.get("type"),
+    return {"nome": o.get("name"), "tipo": o.get("type"), "promocao_id": o.get("id"), "promocao_ref_id": o.get("ref_id"),
             "rebate": a.get("mp"), "desconto_vendedor": a.get("sp"),
             "preco": a.get("pb"), "inicio": ini, "fim": fim,
             "margem": a.get("margem"), "ativa": ativa_flag,
