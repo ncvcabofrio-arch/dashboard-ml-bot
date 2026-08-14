@@ -73,8 +73,10 @@ CODIGO_CATEGORIA = {
     # precisa de humano -> não retenta
     "acao_invalida": "terminal", "tipo_nao_suportado": "terminal", "sem_item": "terminal",
     "sem_custo": "terminal", "sem_avaliar": "terminal", "abaixo_piso": "terminal",
-    # desconto individual sem preço escolhido na tela: só você pode resolver -> não retenta
+    # desconto individual sem preço NEM margem-alvo: só você pode resolver -> não retenta
     "sem_preco_alvo": "terminal",
+    # nem no menor desconto possível a margem-alvo é alcançada -> decisão sua
+    "margem_inalcancavel": "terminal",
     "sem_corpo": "terminal", "bloqueada_luz_dod": "terminal",
     # FAÇA NA MÃO: o ML recusou por credibilidade do desconto / data da campanha.
     # Esperar NÃO resolve (precisa de você) -> terminal, NÃO retenta.
@@ -754,27 +756,96 @@ def processar(fila, access):
     # reais: min = 20% do original = teto de 80% de desconto; max = 5% a 10% de desconto,
     # calculado pelo ML item a item).
     # Sem preencher cand["price"], o rec.avaliar() devolvia None e o item morria em
-    # 'sem_avaliar' sem explicação. Usamos o preço que VOCÊ escolheu na tela (preco_alvo),
-    # encaixado na faixa. A margem resultante é calculada e registrada — não imposta.
+    # 'sem_avaliar' sem explicação.
+    # DE ONDE VEM O PREÇO, nesta ordem:
+    #   1. fila.preco_alvo         -> você fixou um preço na tela
+    #   2. fila.margem_alvo_manual -> você escolheu uma MARGEM-ALVO (é o que a tela guarda
+    #                                 hoje ao montar a promoção individual; o campo de preço
+    #                                 dela depende de comissao_pct, que o log não tem)
+    # NÃO existe caminho 3. Se você não escolheu preço nem margem, o aplicador PARA.
+    # Cair no piso do grupo seria aplicar uma margem que você não pediu — chute com
+    # aparência de regra. Melhor um item parado com o motivo escrito do que um desconto
+    # no ar com um número que ninguém decidiu.
+    # Preço fixado ganha da margem: é decisão explícita, não conta derivada.
     if not rec.preco_oferta(cand) and (cand.get("min_discounted_price") is not None
                                        or cand.get("max_discounted_price") is not None):
-        _alvo_tela = fila.get("preco_alvo")
-        if _alvo_tela in (None, ""):
+        _mn = float(cand.get("min_discounted_price") or 0.5)
+        _mx = float(cand.get("max_discounted_price") or cand.get("original_price") or 0)
+        _orig = float(cand.get("original_price") or 0)
+        # Calculadora de margem por preço, usando a COMISSÃO REAL da API do ML.
+        # Fica aqui em cima porque serve tanto pra escolher o preço quanto pra dizer,
+        # nos avisos, qual margem este anúncio realmente permite.
+        _base_calc = dict(cand)
+        def _marg_em(pb):
+            _base_calc["price"] = round(pb, 2)
+            _e = rec.avaliar(_base_calc, cat, ltid, access, frete, custo)
+            return _e["margem"] if _e else -999
+        def _desc_de(pb):
+            return ((1 - float(pb) / _orig) * 100) if _orig else 0
+        def _faixa_txt():
+            """A MELHOR e a PIOR margem que este anúncio permite dentro da faixa do ML.
+            Margem cresce com o preço, então o teto está no menor desconto (_mx) e o
+            piso no maior desconto (_mn)."""
+            _melhor, _pior = _marg_em(_mx), _marg_em(_mn)
+            return (f"neste anúncio a margem vai de {_pior:.1f}% (desconto máximo, preço R${_mn:.2f}) "
+                    f"até {_melhor:.1f}% (desconto mínimo de {_desc_de(_mx):.0f}%, preço R${_mx:.2f})")
+        _preco_tela = fila.get("preco_alvo")
+        _marg_tela = fila.get("margem_alvo_manual")
+        # Nenhuma escolha sua = nada feito. Sem fallback.
+        if _preco_tela in (None, "") and _marg_tela in (None, ""):
             gravar(fila["id"], {"status": "erro",
-                "resultado": (f"{tipo}: o ML não define o preço deste desconto — quem define é você, "
-                              f"e a fila veio sem preco_alvo. Faixa aceita pelo ML: "
-                              f"R${cand.get('min_discounted_price')} a R${cand.get('max_discounted_price')} "
-                              f"(preço cheio R${cand.get('original_price')}). Escolha o preço no painel.")})
-            print(f"  ! sem_preco_alvo {iid}: {tipo} sem preço escolhido | faixa "
-                  f"{cand.get('min_discounted_price')}–{cand.get('max_discounted_price')}", flush=True)
+                "resultado": (f"{tipo}: neste desconto quem define o preço é você, e a fila não trouxe "
+                              f"nem preço nem margem-alvo. NÃO apliquei nada — não vou escolher a margem "
+                              f"no seu lugar. Para você decidir: {_faixa_txt()}. Preço cheio "
+                              f"R${_orig:.2f}. Monte a promoção individual no painel escolhendo a margem.")})
+            print(f"  ! sem_preco_alvo {iid}: sem escolha sua — {_faixa_txt()}", flush=True)
             return "sem_preco_alvo"
-        _p = _clamp_preco(_alvo_tela, cand)          # respeita a faixa crível do ML
+        if _preco_tela not in (None, ""):
+            # caminho 1: você fixou um PREÇO. Ele manda; só encaixamos na faixa do ML.
+            _p = _clamp_preco(_preco_tela, cand)
+            _origem = f"preço escolhido na tela R${float(_preco_tela):.2f}"
+            if abs(float(_p) - float(_preco_tela)) > 0.005:
+                print(f"  ~ {iid}: preço R${float(_preco_tela):.2f} ajustado para R${_p:.2f} "
+                      f"(faixa do ML: {_mn}–{_mx})", flush=True)
+        else:
+            # caminho 2: você escolheu uma MARGEM-ALVO (é o que a tela guarda em
+            # margem_alvo_manual quando você monta a promoção individual). Procuramos o
+            # MENOR preço da faixa crível que ainda entrega essa margem — ou seja, o maior
+            # desconto compatível com o que você pediu.
+            # Aqui o aplicador é mais confiável que a estimativa do painel: rec.avaliar
+            # consulta a COMISSÃO REAL na API do ML, em vez de estimar.
+            _alvo_m = float(_marg_tela)      # só chega aqui se você escolheu; sem fallback
+            _fonte_m = "margem-alvo escolhida na tela"
+            _m_topo = _marg_em(_mx) if _mx > 0 else -999
+            if _m_topo < _alvo_m:
+                # A margem que você pediu não cabe na faixa do ML nem no menor desconto.
+                # PARA — inclusive com IGNORAR_PISO ligado. Ignorar o PISO é uma decisão
+                # sua sobre o piso; aplicar uma margem DIFERENTE da que você pediu é outra
+                # coisa, e essa eu não tomo. O log traz o número exato pra você reescolher.
+                gravar(fila["id"], {"status": "erro",
+                    "resultado": (f"{tipo}: a margem-alvo de {_alvo_m:.1f}% não cabe neste anúncio. "
+                                  f"A MELHOR MARGEM POSSÍVEL aqui é {_m_topo:.1f}%, no preço R${_mx:.2f} "
+                                  f"(desconto de {_desc_de(_mx):.0f}%, o menor que o ML aceita neste item; "
+                                  f"preço cheio R${_orig:.2f}). Descontar menos que isso o ML não permite, "
+                                  f"e descontar mais só derruba a margem. NÃO apliquei — se {_m_topo:.1f}% "
+                                  f"servir, escolha essa margem no painel.")})
+                print(f"  ! margem_inalcancavel {iid}: pediu {_alvo_m:.1f}% | MELHOR POSSÍVEL "
+                      f"{_m_topo:.1f}% a R${_mx:.2f} (desconto {_desc_de(_mx):.0f}%) — não apliquei",
+                      flush=True)
+                return "margem_inalcancavel"
+            else:
+                lo, hi = max(_mn, 0.5), _mx
+                for _ in range(26):
+                    mid = (lo + hi) / 2.0
+                    if _marg_em(mid) >= _alvo_m:
+                        hi = mid          # ainda segura o alvo -> pode descontar mais
+                    else:
+                        lo = mid
+                _p = _clamp_preco(round(hi, 2), cand)
+                _origem = f"{_fonte_m} {_alvo_m:.1f}% -> preço R${_p:.2f}"
+            print(f"  ~ {iid}: {tipo} por {_origem} | faixa do ML {_mn:.2f}–{_mx:.2f}", flush=True)
         cand = dict(cand)
         cand["price"] = _p
-        if abs(float(_p) - float(_alvo_tela)) > 0.005:
-            print(f"  ~ {iid}: preço escolhido R${float(_alvo_tela):.2f} ajustado para R${_p:.2f} "
-                  f"(faixa do ML: {cand.get('min_discounted_price')}–{cand.get('max_discounted_price')})",
-                  flush=True)
     ev = rec.avaliar(cand, cat, ltid, access, frete, custo)
     if not ev:
         # rec.avaliar() só devolve None em DOIS casos: falta o preço da oferta
