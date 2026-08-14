@@ -511,7 +511,13 @@ def confirmar_pos_entrada(fila, access):
     # 1) PROVA POR PREÇO: o que o cliente paga agora
     pv, ptipo = preco_venda_real(iid, access)
     preco_confirma = (pv is not None and alvo not in (None, "") and float(pv) <= float(alvo) * 1.03)
-    tipo_confirma = (ptipo is not None and ptipo == tipo)
+    # O /items/{id}/sale_price chama o desconto individual de "custom" no
+    # metadata.promotion_type — não de PRICE_DISCOUNT. Sem esse apelido, uma entrada
+    # BEM-SUCEDIDA ficava eternamente em "ativando": o cliente já pagava o preço novo,
+    # mas o nome não batia e o item voltava pra fila de reconferência pra sempre.
+    _APELIDOS_SALE_PRICE = {"PRICE_DISCOUNT": {"PRICE_DISCOUNT", "CUSTOM"}}
+    _tipos_ok = _APELIDOS_SALE_PRICE.get(tipo, {tipo})
+    tipo_confirma = (ptipo is not None and str(ptipo).upper() in _tipos_ok)
     # 2) FALLBACK: status 'started' na promoção alvo
     conf_started = confirmar_entrada(iid, pid, tipo, access)
     if preco_confirma or tipo_confirma or conf_started is True:
@@ -1068,6 +1074,9 @@ def main():
     resumo = {}
     codigo_final = {}   # id -> código do desfecho final (1ª ou 2ª passada), pra alimentar a fila de retry
     res1_mem = {}       # id -> (status, resultado) da 1ª passada (evita reler o banco na 2ª passada)
+    preco_ap_mem = {}   # id -> preço REALMENTE aplicado. Na promoção individual quem calcula
+                        # o preço é o próprio aplicador, então preco_alvo vem nulo da fila e a
+                        # 2ª passada não tinha contra o que comparar o sale_price.
     # ---- 1ª PASSADA (por item; em paralelo se WORKERS>1) ----
     def _passo1(f):
         sid = str(f["seller_id"])
@@ -1081,12 +1090,15 @@ def main():
         if isinstance(f.get("id"), str) and str(f["id"]).startswith("retry:"):
             p = _RETRY_PATCH.get(f["id"], {})
             st1, rs1 = (p.get("status") or ""), (p.get("resultado") or "")
+            preco_ap_mem[f["id"]] = p.get("preco_aplicado")
         else:
             st1, rs1 = "", ""
             try:
-                atual = sb.table("repricer_promo_fila").select("status,resultado").eq("id", f["id"]).execute().data
+                atual = (sb.table("repricer_promo_fila").select("status,resultado,preco_aplicado")
+                         .eq("id", f["id"]).execute().data)
                 if atual:
                     st1, rs1 = (atual[0].get("status") or ""), (atual[0].get("resultado") or "")
+                    preco_ap_mem[f["id"]] = atual[0].get("preco_aplicado")
             except Exception:
                 pass
         return (f["id"], r, (st1, rs1))
@@ -1103,6 +1115,10 @@ def main():
             access = acessos.get(str(f["seller_id"]))
             st1, res1 = res1_mem.get(f["id"], ("", ""))   # da 1ª passada, sem reler o banco
             f["resultado"] = res1
+            # sem preco_alvo (promoção individual), a referência é o preço que ELE aplicou
+            _pa = preco_ap_mem.get(f["id"])
+            if _pa is not None and f.get("preco_alvo") in (None, ""):
+                f["preco_alvo"] = _pa
             if st1 != "aplicada":
                 return (f["id"], None)                     # 1ª passada falhou — não sobrescreve o erro
             if "já estava ATIVA" in res1:
