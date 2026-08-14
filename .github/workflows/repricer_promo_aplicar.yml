@@ -1,5 +1,4 @@
 name: Repricer - Aplicar promocoes (Fase 2)
-
 # Lê a FILA de promoções aprovadas no painel (repricer_promo_fila, status='aprovada'),
 # RE-CHECA a margem agora e entra na promoção no ML.
 # DRY_RUN=SIM (padrão) => só SIMULA: mostra o POST e a margem, não aplica nada.
@@ -37,11 +36,17 @@ on:
         type: string
         required: false
         default: "0"
-
+      # NOVO. O padrão é NAO de propósito: disparo manual daqui, piloto e reator
+      # continuam respeitando o piso. Só a tela Acelerar manda SIM, porque lá quem
+      # decide é você, anúncio por anúncio, vendo a margem de cada campanha.
+      ignorar_piso:
+        description: "SIM = aplica MESMO abaixo do piso (só o Acelerar manda isso; a margem fica registrada)"
+        type: choice
+        options: ["NAO", "SIM"]
+        default: "NAO"
 concurrency:
   group: ml-aplicar          # pista PRÓPRIA — não espera o piloto/sonda; roda na hora
   cancel-in-progress: false
-
 jobs:
   aplicar:
     runs-on: ubuntu-latest
@@ -65,4 +70,6 @@ jobs:
           DRY_RUN:     ${{ github.event.inputs.dry_run == 'NAO' && '0' || '1' }}
           MAX_APLICAR: ${{ github.event.inputs.max_aplicar || '0' }}
           MARGEM_MIN:  ${{ github.event.inputs.margem_min || '17' }}
+          # só o literal 'SIM' liga; qualquer outra coisa (inclusive vazio) mantém o piso
+          IGNORAR_PISO: ${{ github.event.inputs.ignorar_piso == 'SIM' && '1' || '0' }}
         run: python repricer_promo_aplicar.py
