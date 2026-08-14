@@ -26,6 +26,13 @@ ITEM_FILTRO = (os.environ.get("ITEM_ID") or "").strip()        # 1 anúncio só
 ITENS_FILTRO = [x.strip() for x in (os.environ.get("ITEM_IDS") or "").split(",") if x.strip()]  # lista (o painel manda os selecionados)
 MAX_APLICAR = int(os.environ.get("MAX_APLICAR", "0"))          # 0 = sem limite
 MARGEM_MIN = (os.environ.get("MARGEM_MIN") or "").strip()      # piso dos itens "Padrão" (mesmo da simulação)
+# IGNORAR_PISO=1 -> aplica MESMO abaixo do piso do grupo. Só a tela Acelerar manda isso:
+# lá quem aperta o botão é humano, olhando anúncio por anúncio, e a tela existe pra
+# liquidar (aceitar margem magra de propósito). O piloto e o reator rodam em execuções
+# próprias, sem esta variável, e continuam barrando normalmente.
+# Sem piso NÃO é sem registro: a margem resultante vai gravada em margem_aplicada e o
+# aviso "ABAIXO DO PISO" fica no campo resultado, visível no painel.
+IGNORAR_PISO = (os.environ.get("IGNORAR_PISO", "0").strip() == "1")
 RETRY_ONLY = (os.environ.get("RETRY_ONLY", "0").strip() == "1")  # 1 = SÓ reprocessa a fila de retry (cron horário)
 WORKERS = int(os.environ.get("WORKERS", "1"))                  # >1 = processa itens em paralelo (pool controlado)
 PROPAG_SLEEP = float(os.environ.get("PROPAG_SLEEP", "4"))      # respiro entre 1ª e 2ª passada (era 8s fixo)
@@ -191,21 +198,39 @@ def post(path, access, body, tent=3):
     except Exception:
         return r.status_code, (r.text if r is not None else None)
 def achar_candidato(ofertas, fila):
-    """Localiza, na resposta ATUAL do ML, a promoção candidata que foi aprovada."""
+    """Localiza, na resposta ATUAL do ML, a promoção candidata que foi aprovada.
+
+    MESMA RÉGUA DO SUGERIDOR — foi daqui que saíram os 'sem_avaliar'.
+    O repricer_sugestoes monta as candidatas assim (processar_item):
+        cand_raw = [... and o.get("original_price") and preco_oferta(o)]
+    ou seja, ele DESCARTA candidata sem preço ou sem original_price, porque o
+    rec.avaliar() devolve None nesses dois casos e não há margem pra calcular.
+
+    Este aplicador não descartava: filtrava só por status e tipo e, se o id e o
+    nome não casassem, aceitava cands[0]. Podia então escolher uma candidata que
+    o sugeridor nunca teria olhado -> avaliar() = None -> 'sem_avaliar' sem motivo.
+
+    Agora procuramos primeiro entre as AVALIÁVEIS. Só se não houver nenhuma é que
+    caímos nas demais — e aí o diagnóstico do 'sem_avaliar' diz qual campo faltou.
+    """
     tipo = (fila.get("promocao_tipo") or "").upper()
     pid = fila.get("promocao_id")
     nome = fila.get("promocao_nome")
-    cands = [o for o in ofertas if isinstance(o, dict)
+    todas = [o for o in ofertas if isinstance(o, dict)
              and (o.get("status") or "").lower() == "candidate"
              and (o.get("type") or "").upper() == tipo]
-    # 1) casa pelo id da promoção; 2) pelo nome; 3) se só sobrou uma do tipo, usa ela
-    for o in cands:
-        if pid and o.get("id") == pid:
-            return o
-    for o in cands:
-        if nome and (o.get("name") or "") == nome:
-            return o
-    return cands[0] if len(cands) == 1 else None
+    avaliaveis = [o for o in todas if o.get("original_price") and rec.preco_oferta(o)]
+    for grupo in (avaliaveis, todas):     # 1º as avaliáveis; só depois as demais
+        # 1) casa pelo id da promoção; 2) pelo nome; 3) se só sobrou uma do tipo, usa ela
+        for o in grupo:
+            if pid and o.get("id") == pid:
+                return o
+        for o in grupo:
+            if nome and (o.get("name") or "") == nome:
+                return o
+        if len(grupo) == 1:
+            return grupo[0]
+    return None
 def _com_datas(corpo, cand):
     """Algumas campanhas exigem start_date/finish_date no POST (erro START_DATE).
     Inclui quando o candidato informa essas datas."""
@@ -719,12 +744,38 @@ def processar(fila, access):
             pass
     ev = rec.avaliar(cand, cat, ltid, access, frete, custo)
     if not ev:
-        gravar(fila["id"], {"status": "erro", "resultado": "não deu pra avaliar a oferta agora"})
+        # rec.avaliar() só devolve None em DOIS casos: falta o preço da oferta
+        # (preco_oferta) ou falta o original_price. A mensagem antiga não dizia qual —
+        # e sem isso não dá pra consertar, só adivinhar. Agora ela diz, e despeja o
+        # candidato inteiro pro caso de aparecer um terceiro motivo que não previmos.
+        falta = []
+        if not rec.preco_oferta(cand):
+            falta.append("preço da oferta (price/deal_price/…)")
+        if not cand.get("original_price"):
+            falta.append("original_price")
+        det = {"promo_id": cand.get("id"), "tipo": cand.get("type"),
+               "status": cand.get("status"), "ref_id": cand.get("ref_id"),
+               "price": cand.get("price"), "original_price": cand.get("original_price"),
+               "min": cand.get("min_discounted_price"), "max": cand.get("max_discounted_price"),
+               "ITEM_price": it.get("price")}
+        msg = "não deu pra avaliar: faltou " + (", ".join(falta) or "motivo desconhecido")
+        gravar(fila["id"], {"status": "erro",
+                            "resultado": msg + " || CAND " + json.dumps(det, ensure_ascii=False)})
+        print(f"  ! sem_avaliar {iid}: {msg} | {json.dumps(det, ensure_ascii=False)}", flush=True)
         return "sem_avaliar"
-    if ev["margem"] < piso:
+    abaixo_do_piso = ev["margem"] < piso
+    if abaixo_do_piso and not IGNORAR_PISO:
         gravar(fila["id"], {"status": "erro",
                             "resultado": f"margem caiu pra {ev['margem']:.1f}% (< piso {piso:.0f}%) — não apliquei"})
         return "abaixo_piso"
+    # IGNORAR_PISO ligado: segue em frente, mas o aviso viaja junto até o campo
+    # resultado (nos dois desfechos, simulado e real) e aparece no painel.
+    aviso_piso = ""
+    if abaixo_do_piso:
+        aviso_piso = (f"⚠️ ABAIXO DO PISO — margem {ev['margem']:.1f}% < piso {piso:.0f}% "
+                      f"(aplicado por decisão manual no Acelerar) || ")
+        print(f"  ⚠ {iid}: margem {ev['margem']:.1f}% abaixo do piso {piso:.0f}% "
+              f"— aplicando porque IGNORAR_PISO=1", flush=True)
     # cofinanciadas que exigem data no POST (ex.: "OFERTAS RELÂMPAGOS IMPERDÍVEIS" -> erro START_DATE):
     # o candidato não traz as datas; pega do DETALHE da promoção. As datas têm que ir em formato
     # LOCAL (sem 'Z') e o start NÃO pode ser no passado (regras da doc).
@@ -750,7 +801,7 @@ def processar(fila, access):
     if DRY:
         plano = (f"TROCA: entra na sugerida e SAI das ativas " if acao == "trocar" else "ENTRADA ")
         gravar(fila["id"], {"status": "aprovada",
-                            "resultado": f"[SIMULADO] {plano}| POST {json.dumps(corpo)} | margem prevista {ev['margem']:.1f}%",
+                            "resultado": f"{aviso_piso}[SIMULADO] {plano}| POST {json.dumps(corpo)} | margem prevista {ev['margem']:.1f}%",
                             "preco_aplicado": ev["pb"], "margem_aplicada": ev["margem"]})
         print(f"  [DRY] {acao} {iid} {tipo} -> {json.dumps(corpo)} (margem {ev['margem']:.1f}%)", flush=True)
         return "simulado"
@@ -791,8 +842,8 @@ def processar(fila, access):
             cod_erro = "faca_na_mao"
     gravar(fila["id"], {
         "status": "aplicada" if ok else "erro",
-        "resultado": (f"OK {sc}{aviso}: {json.dumps(resp, ensure_ascii=False)[:220]}{light_diag}" if ok
-                      else f"{motivo}{'ERRO ' + str(sc) if not aviso else 'ATENÇÃO'}{aviso} [enviei {json.dumps(corpo, ensure_ascii=False)}]: {json.dumps(resp, ensure_ascii=False)[:170]}{light_diag}"),
+        "resultado": (f"{aviso_piso}OK {sc}{aviso}: {json.dumps(resp, ensure_ascii=False)[:220]}{light_diag}" if ok
+                      else f"{aviso_piso}{motivo}{'ERRO ' + str(sc) if not aviso else 'ATENÇÃO'}{aviso} [enviei {json.dumps(corpo, ensure_ascii=False)}]: {json.dumps(resp, ensure_ascii=False)[:170]}{light_diag}"),
         "preco_aplicado": ev["pb"] if ok else None,
         "margem_aplicada": ev["margem"] if ok else None,
     })
