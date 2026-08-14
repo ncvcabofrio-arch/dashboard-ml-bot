@@ -579,7 +579,7 @@ def processar(fila, access):
     # A fila guarda a decisão do momento em que você aprovou; se a sugestão foi rerodada depois,
     # a recomendação pode ter mudado (ex.: o item entrou na promoção e virou 'manter'). Usa sempre
     # a sugestão fresca do robô. 'aplicada' (leftover congelado) é ignorada por _sugestao_atual.
-    nova = _sugestao_atual(iid, fila.get("seller_id"))
+    nova = None if fila.get("escolha_manual") else _sugestao_atual(iid, fila.get("seller_id"))
     if nova is not None:
         nacao = (nova.get("acao") or "").lower()
         if nacao == "manter":
