@@ -356,6 +356,23 @@ def gravar(fila_id, patch):
         sb.table("repricer_promo_fila").update(patch).eq("id", fila_id).execute()
     except Exception as e:
         print("  !! falha ao gravar resultado:", e, flush=True)
+def _gravar_melhor(fila_id, margem, preco):
+    """Guarda a MELHOR margem possível (e o preço dela) em colunas próprias, pro painel
+    conseguir LISTAR em massa os anúncios que não couberam na margem pedida — em vez de
+    você abrir trinta textos de 'resultado' um por um.
+
+    É um UPDATE SEPARADO e best-effort de propósito: o 'resultado' já foi gravado antes
+    desta chamada, então se as colunas ainda não existirem no banco (fase_melhor_margem.sql
+    não rodado) só esta gravação falha, e a explicação principal continua salva."""
+    if isinstance(fila_id, str) and str(fila_id).startswith("retry:"):
+        return
+    try:
+        sb.table("repricer_promo_fila").update(
+            {"melhor_margem_possivel": round(float(margem), 2),
+             "melhor_preco_possivel": round(float(preco), 2)}).eq("id", fila_id).execute()
+    except Exception as e:
+        print(f"  aviso: não gravei a melhor margem de {fila_id} "
+              f"(rode fase_melhor_margem.sql no Supabase): {e}", flush=True)
 def req_delete(path, access, tent=3):
     r = None
     for i in range(tent):
@@ -838,6 +855,7 @@ def processar(fila, access):
                 print(f"  ! margem_inalcancavel {iid}: pediu {_alvo_m:.1f}% | MELHOR POSSÍVEL "
                       f"{_m_topo:.1f}% a R${_mx:.2f} (desconto {_desc_de(_mx):.0f}%) — não apliquei",
                       flush=True)
+                _gravar_melhor(fila["id"], _m_topo, _mx)   # pro painel listar em massa
                 return "margem_inalcancavel"
             else:
                 lo, hi = max(_mn, 0.5), _mx
