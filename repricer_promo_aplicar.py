@@ -73,6 +73,8 @@ CODIGO_CATEGORIA = {
     # precisa de humano -> não retenta
     "acao_invalida": "terminal", "tipo_nao_suportado": "terminal", "sem_item": "terminal",
     "sem_custo": "terminal", "sem_avaliar": "terminal", "abaixo_piso": "terminal",
+    # desconto individual sem preço escolhido na tela: só você pode resolver -> não retenta
+    "sem_preco_alvo": "terminal",
     "sem_corpo": "terminal", "bloqueada_luz_dod": "terminal",
     # FAÇA NA MÃO: o ML recusou por credibilidade do desconto / data da campanha.
     # Esperar NÃO resolve (precisa de você) -> terminal, NÃO retenta.
@@ -284,9 +286,12 @@ def corpo_post(tipo, cand, preco_alvo):
                            "deal_price": _clamp_preco(preco_alvo, cand)}, cand)
     # (7) desconto individual do vendedor: deal_price + datas próprias (formato local, máx 14 dias)
     if tipo == "PRICE_DISCOUNT":
+        # A doc diz "prazo máximo de 14 dias" e que as datas ignoram o horário: começa
+        # 00:00 do dia inicial e termina 23:59 do final. Logo hoje+14 seriam QUINZE dias
+        # contados, um a mais que o permitido. +13 fecha exatamente em 14 dias.
         agora = datetime.now(timezone.utc) - timedelta(hours=3)   # BRT
         ini = agora.strftime("%Y-%m-%d")
-        fim = (agora + timedelta(days=14)).strftime("%Y-%m-%d")
+        fim = (agora + timedelta(days=13)).strftime("%Y-%m-%d")
         return {"deal_price": _clamp_preco(preco_alvo, cand), "promotion_type": "PRICE_DISCOUNT",
                 "start_date": ini + "T00:00:00", "finish_date": fim + "T23:59:59"}
     return None
@@ -742,6 +747,34 @@ def processar(fila, access):
                 cand["price"] = round(hi, 2)
         except (TypeError, ValueError):
             pass
+    # ---- DESCONTO INDIVIDUAL (PRICE_DISCOUNT): o preço é SEU, não do ML ----
+    # A doc do desconto individual é explícita: o vendedor informa o deal_price. Por isso
+    # o candidato chega com price=0 — não é dado faltando, é o ML dizendo "escolhe você".
+    # O que ele manda é a FAIXA CRÍVEL, em min/max_discounted_price (conferido nos itens
+    # reais: min = 20% do original = teto de 80% de desconto; max = 5% a 10% de desconto,
+    # calculado pelo ML item a item).
+    # Sem preencher cand["price"], o rec.avaliar() devolvia None e o item morria em
+    # 'sem_avaliar' sem explicação. Usamos o preço que VOCÊ escolheu na tela (preco_alvo),
+    # encaixado na faixa. A margem resultante é calculada e registrada — não imposta.
+    if not rec.preco_oferta(cand) and (cand.get("min_discounted_price") is not None
+                                       or cand.get("max_discounted_price") is not None):
+        _alvo_tela = fila.get("preco_alvo")
+        if _alvo_tela in (None, ""):
+            gravar(fila["id"], {"status": "erro",
+                "resultado": (f"{tipo}: o ML não define o preço deste desconto — quem define é você, "
+                              f"e a fila veio sem preco_alvo. Faixa aceita pelo ML: "
+                              f"R${cand.get('min_discounted_price')} a R${cand.get('max_discounted_price')} "
+                              f"(preço cheio R${cand.get('original_price')}). Escolha o preço no painel.")})
+            print(f"  ! sem_preco_alvo {iid}: {tipo} sem preço escolhido | faixa "
+                  f"{cand.get('min_discounted_price')}–{cand.get('max_discounted_price')}", flush=True)
+            return "sem_preco_alvo"
+        _p = _clamp_preco(_alvo_tela, cand)          # respeita a faixa crível do ML
+        cand = dict(cand)
+        cand["price"] = _p
+        if abs(float(_p) - float(_alvo_tela)) > 0.005:
+            print(f"  ~ {iid}: preço escolhido R${float(_alvo_tela):.2f} ajustado para R${_p:.2f} "
+                  f"(faixa do ML: {cand.get('min_discounted_price')}–{cand.get('max_discounted_price')})",
+                  flush=True)
     ev = rec.avaliar(cand, cat, ltid, access, frete, custo)
     if not ev:
         # rec.avaliar() só devolve None em DOIS casos: falta o preço da oferta
@@ -799,7 +832,10 @@ def processar(fila, access):
         return "sem_corpo"
     sair_de = [(o.get("name") or o.get("type") or "?") for o in antigas] if acao == "trocar" else []
     if DRY:
-        plano = (f"TROCA: entra na sugerida e SAI das ativas " if acao == "trocar" else "ENTRADA ")
+        if acao == "trocar" and tipo == "PRICE_DISCOUNT":
+            plano = "TROCA (desconto individual): SAI das ativas ANTES e só então entra "
+        else:
+            plano = (f"TROCA: entra na sugerida e SAI das ativas " if acao == "trocar" else "ENTRADA ")
         gravar(fila["id"], {"status": "aprovada",
                             "resultado": f"{aviso_piso}[SIMULADO] {plano}| POST {json.dumps(corpo)} | margem prevista {ev['margem']:.1f}%",
                             "preco_aplicado": ev["pb"], "margem_aplicada": ev["margem"]})
@@ -814,10 +850,33 @@ def processar(fila, access):
     # Se saíssemos das antigas já no 201, existiria uma janela em que a nova foi aceita mas ainda
     # não pegou E a antiga já saiu -> anúncio SEM desconto. Por isso a saída fica gated pelo PREÇO.
     aviso = ""
+    # ---- EXCEÇÃO DE ORDEM: desconto individual em item que já tem campanha ativa ----
+    # A regra geral deste aplicador é ENTRAR primeiro e só sair da antiga depois que o
+    # preço confirmar — assim o anúncio nunca fica descoberto. Para PRICE_DISCOUNT a
+    # ordem se INVERTE, por uma regra da própria ML (doc do desconto individual):
+    #   "Se ao iniciar o desconto o item estiver participando de um DEAL, o desconto não
+    #    será aplicado até que o DEAL associado seja finalizado."
+    # Entrando primeiro, o desconto ficaria DORMENTE: o sale_price nunca mudaria, a
+    # confirmação nunca viria e o item ficaria preso em 'aguardando' reconferindo à toa.
+    # CUSTO CONHECIDO E ACEITO: entre o DELETE e o POST o anúncio fica alguns segundos
+    # sem desconto nenhum. Se o POST for recusado nesse intervalo, ele fica SEM desconto
+    # até você agir — por isso esse caso é gritado no log e no resultado, não escondido.
+    saiu_antes = ""
+    if acao == "trocar" and tipo == "PRICE_DISCOUNT":
+        _saiu, _falhou, _rest = sair_das_outras(iid, str(fila.get("seller_id") or ""), access,
+                                                manter_tipo="PRICE_DISCOUNT")
+        saiu_antes = f" | saí de {len(_saiu)} antiga(s) ANTES de entrar (regra da ML p/ desconto individual)"
+        if _falhou:
+            saiu_antes += " | ⚠️ DELETE recusado em: " + ", ".join(_falhou)
+        print(f"  ~ {iid}: saí de {len(_saiu)} campanha(s) antes de aplicar o desconto individual"
+              + (f" | falhou em {len(_falhou)}" if _falhou else ""), flush=True)
     sc, resp = post(f"/seller-promotions/items/{iid}?app_version=v2", access, corpo)
     ok = sc in (200, 201)
     if acao == "trocar":
-        if ok:
+        if tipo == "PRICE_DISCOUNT":
+            aviso = saiu_antes + (" | entrei no desconto individual ✓" if ok else
+                    " | 🚨 ENTRADA RECUSADA DEPOIS DE SAIR — o anúncio está SEM desconto agora. Reveja no painel.")
+        elif ok:
             # NÃO saímos das antigas AINDA. A rede antiga fica de pé até o sale_price CONFIRMAR
             # (2ª passada / reconferência da fila) que a nova está no ar. Assim o anúncio NUNCA
             # fica sem desconto na janela entre "aceita (201)" e "preço realmente aplicado".
@@ -835,7 +894,11 @@ def processar(fila, access):
     if not ok:
         _t = json.dumps(resp, ensure_ascii=False).upper()
         if "CREDIBILITY" in _t:
-            motivo = "FAÇA NA MÃO — o ML só aceita a relâmpago com um desconto maior do que o seu piso de margem permite. "
+            # a doc do desconto individual chama isso de error_credibility_price:
+            # "O desconto aplicado não é suficiente para ser considerado crível."
+            motivo = ("FAÇA NA MÃO — o ML recusou por CREDIBILIDADE: o desconto escolhido é raso demais. "
+                      f"Escolha um preço mais baixo (o ML aceita de R${cand.get('min_discounted_price')} "
+                      f"a R${cand.get('max_discounted_price')} neste anúncio). ")
             cod_erro = "faca_na_mao"
         elif "START_DATE" in _t:
             motivo = "FAÇA NA MÃO — essa campanha exige data que o ML não aceitou pela API. "
