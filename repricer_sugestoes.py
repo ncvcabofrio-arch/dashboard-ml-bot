@@ -665,8 +665,19 @@ def faixa_preco_livre(o, cat, ltid, access, frete, custo):
     não vier — nunca inventa preço."""
     mn, mx = o.get("min_discounted_price"), o.get("max_discounted_price")
     sug, p0 = o.get("suggested_discounted_price"), o.get("original_price")
-    if not p0 or (mn is None and mx is None):
+    if not p0:
         return None
+    if mn is None and mx is None:
+        # O ML listou a campanha como CANDIDATA mas não informou a faixa — visto de
+        # verdade na SELLER_CAMPAIGN "ARCOS BASE - 08-26", que vem com price=0 e nada
+        # mais. Sem faixa não há margem a calcular, mas ESCONDER a campanha é pior:
+        # ela existe, você pode entrar nela, e sumir da tela é como se não existisse.
+        # Devolvemos a linha marcada como sem_faixa para a tela dizer isso na cara.
+        return {"o": o, "sem_faixa": True,
+                "preco_min": None, "margem_min": None,
+                "preco_max": None, "margem_max": None,
+                "preco_sug": None, "margem_sug": None,
+                "desconto_min_pct": None, "desconto_max_pct": None, "desconto_sug_pct": None}
     try:
         p0 = float(p0)
         mx = float(mx) if mx is not None else p0
@@ -718,6 +729,7 @@ def _oferta_preco_livre_dict(fx, access=None):
             "preco": pref, "inicio": ini, "fim": fim,
             "margem": mref, "ativa": False, "recomendada": False, "acao": None,
             "preco_livre": True, "individual": (tipo == "PRICE_DISCOUNT"),
+            "sem_faixa": bool(fx.get("sem_faixa")),
             "preco_min": fx["preco_min"], "preco_max": fx["preco_max"], "preco_sug": fx["preco_sug"],
             "margem_min": fx["margem_min"], "margem_max": fx["margem_max"], "margem_sug": fx["margem_sug"],
             "desconto_min_pct": fx["desconto_min_pct"], "desconto_max_pct": fx["desconto_max_pct"],
@@ -750,8 +762,8 @@ def processar_item(item_id, access, sid, detalhes):
         livres_raw = [o for o in ofertas if isinstance(o, dict)
                       and (o.get("status") or "").lower() == "candidate"
                       and not preco_oferta(o)
-                      and (o.get("min_discounted_price") is not None
-                           or o.get("max_discounted_price") is not None)]
+                      ]   # SEM exigir faixa: quando o ML não a informa, a campanha
+                          # aparece assim mesmo, marcada como "faixa não informada".
         if not ativas_raw and not cand_raw:
             return None
         it = detalhes.get(item_id)
