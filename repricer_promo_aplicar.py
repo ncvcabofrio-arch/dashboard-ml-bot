@@ -422,13 +422,63 @@ def remover_todas(iid, access):
         errs = body.get("errors") or []
     resumo = f"bulk {sc}: {len(ok_ids)} removida(s)" + (f", {len(errs)} erro(s)" if errs else "")
     return sc, resumo, body
+# ---------------------------------------------------------------------------
+# DUAS FONTES, UMA LISTA.
+#
+# rec.participacoes_ativas() varre as CAMPANHAS DO VENDEDOR
+# (/seller-promotions/users/{seller} cruzado com promotions/{id}/items). É o caminho
+# confiável para cofinanciadas — mas só enxerga o que TEM promotion_id.
+#
+# O desconto individual (PRICE_DISCOUNT) não é campanha: é oferta de NÍVEL DE ITEM,
+# sem promotion_id (confirmado no diagnóstico: promo_id null). Relâmpago e oferta do
+# dia moram no mesmo lugar. Nenhuma das três aparece naquela varredura — elas só
+# existem no endpoint por item.
+#
+# A consequência era silenciosa e cara: numa TROCA de desconto individual para uma
+# campanha cofinanciada, o individual não era encontrado e portanto não era removido.
+# O anúncio ficaria nas DUAS promoções e venderia pela mais barata — que costuma ser
+# a de margem pior. Exatamente o que a troca existe para evitar.
+#
+# Esta função junta as duas fontes. Todos os caminhos que removem promoção passam a
+# usar ela, então o conserto vale para trocar, para sair e para a 2ª passada de uma vez.
+# ---------------------------------------------------------------------------
+TIPOS_NIVEL_ITEM = {"PRICE_DISCOUNT", "LIGHTNING", "DOD"}
+def participacoes_completas(iid, seller_id, access, ofertas=None):
+    """Todas as promoções ATIVAS do item, das duas fontes, deduplicadas.
+    As de nível de item entram com nivel_item=True e promotion_id possivelmente None —
+    o remover_participacao já trata esses três tipos pelo promotion_type, que é a forma
+    que a doc do ML manda para eles."""
+    achadas = list(rec.participacoes_ativas(iid, seller_id, access) or [])
+    vistos = {(str(p.get("promotion_id") or ""), (p.get("type") or "").upper()) for p in achadas}
+    tipos_vistos = {(p.get("type") or "").upper() for p in achadas}
+    if ofertas is None:
+        ofertas = rec.ofertas_do_item(iid, access)
+    for o in (ofertas or []):
+        if not isinstance(o, dict) or not rec.eh_ativa(o):
+            continue
+        t = (o.get("type") or "").upper()
+        if t not in TIPOS_NIVEL_ITEM:
+            continue                       # campanha de verdade já veio da fonte 1
+        if t in tipos_vistos:
+            continue                       # não duplica o mesmo tipo
+        chave = (str(o.get("id") or ""), t)
+        if chave in vistos:
+            continue
+        vistos.add(chave); tipos_vistos.add(t)
+        achadas.append({"promotion_id": o.get("id"),
+                        "type": t,
+                        "offer_id": o.get("offer_id") or o.get("ref_id"),
+                        "name": o.get("name") or ("Desconto individual" if t == "PRICE_DISCOUNT" else t),
+                        "status": (o.get("status") or "started"),
+                        "nivel_item": True})
+    return achadas
 def sair_das_outras(iid, seller_id, access, manter_pid=None, manter_tipo=None):
     """SAI de TODAS as promoções em que o item está ATIVO, exceto a que queremos manter.
     Usa o caminho CONFIÁVEL da doc (rec.participacoes_ativas): users/{seller} cruzado com
     promotions/{id}/items?item_id=... — porque /seller-promotions/items/{id} NÃO traz as
     ativas de campanha cofinanciada/marketplace (só candidatas). Sai por TIPO, uma a uma.
     Retorna (saiu[], falhou[], restantes[])."""
-    ativas = rec.participacoes_ativas(iid, seller_id, access)
+    ativas = participacoes_completas(iid, seller_id, access)
     saiu, falhou = [], []
     for p in ativas:
         if manter_pid and p.get("promotion_id") == manter_pid:
@@ -439,7 +489,7 @@ def sair_das_outras(iid, seller_id, access, manter_pid=None, manter_tipo=None):
         rot = f"{p.get('name') or p.get('type')}({p.get('type')}:{scd})"
         (saiu if scd in (200, 201) else falhou).append(rot)
     # confere de novo: o que sobrou ativo além da que mantivemos
-    restantes = [p for p in rec.participacoes_ativas(iid, seller_id, access)
+    restantes = [p for p in participacoes_completas(iid, seller_id, access)
                  if not (manter_pid and p.get("promotion_id") == manter_pid)
                  and not (manter_pid is None and manter_tipo and (p.get("type") or "").upper() == manter_tipo)]
     return saiu, falhou, restantes
@@ -448,7 +498,7 @@ def executar_sair(fila, iid, ofertas, access):
     NÃO confere agora (o ML leva segundos pra propagar): o sucesso é o 200 do DELETE.
     A conferência de verdade acontece na 2ª passada (revarrer_sair), no fim do main()."""
     seller_id = str(fila.get("seller_id") or "")
-    ativas = rec.participacoes_ativas(iid, seller_id, access)
+    ativas = participacoes_completas(iid, seller_id, access)
     achou = " ;; ".join(f"{(p.get('name') or '?')[:16]}[{p.get('type')}]" for p in ativas) or "nenhuma"
     if DRY:
         gravar(fila["id"], {"status": "aprovada", "resultado": f"[SIMULADO] SAIR de: {achou}"})
@@ -477,14 +527,14 @@ def revarrer_sair(fila, access):
       • sobrou e algum DELETE != 200      -> 'erro' real (ex.: offer_id errado)."""
     iid = fila["item_id"]
     seller_id = str(fila.get("seller_id") or "")
-    rest = rec.participacoes_ativas(iid, seller_id, access)
+    rest = participacoes_completas(iid, seller_id, access)
     dels2 = []                          # (rótulo, status_http)
     for p in rest:
         scd, body = remover_participacao(iid, p, access)
         dels2.append((f"{(p.get('name') or '?')[:16]}[{p.get('type')}]:{scd}", scd))
     if dels2:
         remover_todas(iid, access)
-    final = rec.participacoes_ativas(iid, seller_id, access)   # conferência final
+    final = participacoes_completas(iid, seller_id, access)   # conferência final
     sobrou = " ;; ".join(f"{(p.get('name') or '?')[:16]}[{p.get('type')}]" for p in final) or "nada ✓"
     dels_txt = " ;; ".join(d[0] for d in dels2) or "nenhum"
     base = (fila.get("resultado") or "").split(" || 2ª passada")[0]
@@ -562,7 +612,7 @@ def confirmar_pos_entrada(fila, access):
             # participação de forma ASSÍNCRONA (leva segundos). Relistar AGORA ainda mostra as que
             # JÁ estão saindo -> dava falso "ainda ativas". Então NÃO relisto pra conferir na hora:
             # confio no status do DELETE (200 = pedido aceito). Só marco problema se o ML RECUSAR.
-            rest = [p for p in rec.participacoes_ativas(iid, seller_id, access) if p.get("promotion_id") != pid]
+            rest = [p for p in participacoes_completas(iid, seller_id, access) if p.get("promotion_id") != pid]
             oks, ruins = 0, []
             for p in rest:
                 scd, _b = remover_participacao(iid, p, access)
