@@ -775,7 +775,15 @@ def processar(fila, access):
         return "sem_item"
     ltid = it.get("listing_type_id")
     cat = it.get("category_id")
-    sku = it.get("seller_sku") or it.get("seller_custom_field") or fila.get("sku")
+    # O SKU mora em TRÊS lugares no ML: seller_custom_field (campo antigo), o atributo
+    # SELLER_SKU (formulário atual) e dentro das variações. Aqui liamos só os dois
+    # primeiros — e o rec.sku_do_item() já resolve os três, com a regra de não escolher
+    # nada quando as variações discordam entre si.
+    # Sem isso, um anúncio com SKU só no atributo (ex.: MLB3967924417, SKU MLPA003)
+    # chegava como "sem custo" e o aplicador desistia — de um item que TEM custo
+    # cadastrado. Só não quebrou até agora porque o painel manda o sku na fila; pelo
+    # retry ou por qualquer caminho sem esse campo, quebraria.
+    sku = rec.sku_do_item(it) or fila.get("sku")
     custo = rec.custo_efetivo(iid, sku)
     if custo is None:
         gravar(fila["id"], {"status": "erro", "resultado": "sem custo pra recalcular margem (preencha o custo do anúncio no painel)"})
