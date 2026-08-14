@@ -628,6 +628,64 @@ def _oferta_dict(a, ativa_flag, recomendada_flag, acao=None, access=None):
             "margem": a.get("margem"), "ativa": ativa_flag,
             "recomendada": recomendada_flag,
             "acao": (acao if recomendada_flag else None)}
+# ---------------------------------------------------------------------------
+# DESCONTO INDIVIDUAL (PRICE_DISCOUNT) — informar, não decidir.
+#
+# Este tipo chega do ML com price=0 e promotion_id nulo. Não é dado faltando: é o
+# ML dizendo "o preço é do vendedor". O que ele manda é a FAIXA CRÍVEL, em
+# min/max_discounted_price (conferido em itens reais: min = 20% do preço cheio, ou
+# seja 80% de desconto; max = 5% a 10% de desconto, calculado pelo ML item a item).
+#
+# Como avaliar() exige preço, o cand_raw de processar_item descartava essa oferta e
+# ela NUNCA chegava ao painel — quem montava uma promoção individual escolhia a
+# margem no escuro e só descobria se era possível depois de tentar aplicar.
+#
+# O que entra aqui é SÓ INFORMAÇÃO: a margem nos dois extremos da faixa. O desconto
+# individual continua FORA da decisão automática (não entra em 'cand' nem 'seguras')
+# — escolher desconto próprio é decisão do vendedor na tela, não do robô.
+# ---------------------------------------------------------------------------
+def faixa_individual(o, cat, ltid, access, frete, custo):
+    """Margem nos dois extremos da faixa de um desconto individual.
+    Custa 2 avaliações por anúncio; a comissão é cacheada por (categoria, tipo de
+    anúncio) em _pct_cache, então quase não gera chamada nova à API.
+    Devolve None se a faixa não vier — nunca inventa preço."""
+    mn, mx, p0 = o.get("min_discounted_price"), o.get("max_discounted_price"), o.get("original_price")
+    if mn is None or mx is None or not p0:
+        return None
+    try:
+        mn, mx, p0 = float(mn), float(mx), float(p0)
+    except (TypeError, ValueError):
+        return None
+    if mn <= 0 or mx <= 0 or mx < mn:
+        return None
+    base = dict(o)
+    def _av(pb):
+        base["price"] = round(pb, 2)
+        return avaliar(base, cat, ltid, access, frete, custo)
+    topo = _av(mx)      # menor desconto permitido -> MAIOR margem possível
+    fundo = _av(mn)     # maior desconto permitido -> MENOR margem
+    if not topo:
+        return None
+    return {"o": o,
+            "preco_max": round(mx, 2), "margem_max": topo["margem"],
+            "preco_min": round(mn, 2), "margem_min": (fundo["margem"] if fundo else None),
+            "desconto_min_pct": round((1 - mx / p0) * 100, 1),
+            "desconto_max_pct": round((1 - mn / p0) * 100, 1)}
+def _oferta_individual_dict(fx):
+    """Linha do painel para o desconto individual. Diferente das outras: não tem preço
+    nem margem única — tem uma FAIXA, porque o preço é escolha do vendedor.
+    'preco'/'margem' levam o extremo de MAIOR margem (menor desconto), que é o teto do
+    que dá pra conseguir; a faixa completa vai nos campos próprios."""
+    o = fx["o"]
+    return {"nome": "Desconto individual", "tipo": "PRICE_DISCOUNT",
+            "promocao_id": o.get("id"), "promocao_ref_id": o.get("ref_id"),
+            "rebate": None, "desconto_vendedor": None,
+            "preco": fx["preco_max"], "inicio": None, "fim": None,
+            "margem": fx["margem_max"], "ativa": False, "recomendada": False, "acao": None,
+            "individual": True,
+            "preco_min": fx["preco_min"], "preco_max": fx["preco_max"],
+            "margem_min": fx["margem_min"], "margem_max": fx["margem_max"],
+            "desconto_min_pct": fx["desconto_min_pct"], "desconto_max_pct": fx["desconto_max_pct"]}
 # NOTA: as campanhas de marketplace (SMART/PRICE_MATCHING etc.) já vêm no endpoint
 # por item (/seller-promotions/items/{id}) como candidatas — não precisa varrer as
 # campanhas do vendedor. Pro PAINEL mostramos TODAS as candidatas (inclusive as
@@ -645,6 +703,14 @@ def processar_item(item_id, access, sid, detalhes):
         cand_raw = [o for o in ofertas if isinstance(o, dict)
                     and (o.get("status") or "").lower() == "candidate"
                     and o.get("original_price") and preco_oferta(o)]
+        # desconto individual: candidato SEM preço mas COM faixa. Fica separado de
+        # cand_raw de propósito — é informação pro painel, não candidato a decisão.
+        ind_raw = [o for o in ofertas if isinstance(o, dict)
+                   and (o.get("status") or "").lower() == "candidate"
+                   and (o.get("type") or "").upper() == "PRICE_DISCOUNT"
+                   and not preco_oferta(o)
+                   and o.get("min_discounted_price") is not None
+                   and o.get("max_discounted_price") is not None]
         if not ativas_raw and not cand_raw:
             return None
         it = detalhes.get(item_id)
@@ -720,6 +786,12 @@ def processar_item(item_id, access, sid, detalhes):
             ofertas_lst.append(_oferta_dict(ativa, True, acao == "manter", acao, access))
         for _c in sorted(cand_todas, key=lambda x: (x["margem"] if x.get("margem") is not None else -999), reverse=True):
             ofertas_lst.append(_oferta_dict(_c, False, _c is alvo, acao, access))
+        # desconto individual por último: é opção do vendedor, não recomendação do robô
+        for _i in ind_raw:
+            _fx = faixa_individual(_i, cat, ltid, access, frete, custo)
+            if _fx:
+                ofertas_lst.append(_oferta_individual_dict(_fx))
+                break        # um por anúncio basta: a faixa é do item, não da oferta
         sug = {
             "seller_id": str(sid),
             "item_id": item_id,
