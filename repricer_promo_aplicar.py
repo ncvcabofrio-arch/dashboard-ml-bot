@@ -872,16 +872,23 @@ def candidato_individual_da_sugestao(iid, seller_id, preco_lista):
     (rec.avaliar, _clamp_preco, corpo_post). Nenhum valor é inventado: todos
     vieram do ML quando a sugestão rodou.
 
-    Se o ML não deu faixa (sem_faixa=True), devolve None — e o item PARA, com
-    o motivo escrito. Chutar uma faixa aqui seria aplicar desconto num intervalo
-    que ninguém mediu.
+    SEM FAIXA TAMBÉM VALE. O desconto individual é criado pelo VENDEDOR — o POST
+    é promotion_type + deal_price + datas, e o piloto faz isso sem consultar
+    candidato nenhum. A faixa do ML é uma DICA de até onde o desconto é crível,
+    não uma permissão. Tratar a falta dela como impedimento travava 305 anúncios
+    por causa de um dado opcional.
+      · com faixa  -> usamos, e o POST raramente é recusado
+      · sem faixa  -> o teto é o próprio preço de lista (desconto não pode ser
+                      acima dele: isso é fato, não estimativa) e quem julga a
+                      credibilidade é o ML, na resposta do POST
+    Em nenhum dos dois casos o PREÇO é inventado: ele sai da margem que você
+    escolheu, calculada com a comissão real da API.
     """
-    fx = _faixa_individual(iid, seller_id)
-    if not fx or fx.get("sem_faixa") is True:
-        return None
-    pmin, pmax = fx.get("preco_min"), fx.get("preco_max")
-    if pmin is None and pmax is None:
-        return None
+    fx = _faixa_individual(iid, seller_id) or {}
+    sem_faixa = (fx.get("sem_faixa") is True) or (fx.get("preco_min") is None
+                                                 and fx.get("preco_max") is None)
+    pmin = None if sem_faixa else fx.get("preco_min")
+    pmax = preco_lista if sem_faixa else fx.get("preco_max")
     return {"id": fx.get("promocao_id"), "ref_id": fx.get("promocao_ref_id"),
             "type": "PRICE_DISCOUNT", "status": "candidate",
             "name": fx.get("nome") or "Desconto individual",
@@ -892,7 +899,8 @@ def candidato_individual_da_sugestao(iid, seller_id, preco_lista):
             "suggested_discounted_price": fx.get("preco_sug"),
             "meli_percentage": fx.get("rebate"),
             "seller_percentage": fx.get("desconto_vendedor"),
-            "_via": "faixa_guardada"}
+            "_via": ("sem_faixa" if sem_faixa else "faixa_guardada"),
+            "_sem_faixa": sem_faixa}
 
 
 def _sugestao_atual(iid, seller_id):
@@ -1004,7 +1012,10 @@ def processar(fila, access):
             _plista = _itp.get("base_price") or _itp.get("price")
         if _plista:
             cand = candidato_individual_da_sugestao(iid, str(fila.get("seller_id") or ""), float(_plista))
-            if cand:
+            if cand and cand.get("_sem_faixa"):
+                print(f"  ~ {iid}: desconto individual sem faixa do ML — preço sai da sua "
+                      f"margem-alvo; o ML julga a credibilidade no envio", flush=True)
+            elif cand:
                 print(f"  ~ {iid}: sem candidato vivo de desconto individual — usando a faixa "
                       f"guardada na sugestão (R${cand.get('min_discounted_price')}"
                       f"–R${cand.get('max_discounted_price')})", flush=True)
