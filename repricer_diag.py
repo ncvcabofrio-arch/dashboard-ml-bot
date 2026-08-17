@@ -18,7 +18,9 @@ import repricer_promo_aplicar as apl   # o aplicador DE VERDADE — ver nota aba
 from datetime import datetime, timezone, timedelta
 from ml_auth import obter_access
 sb = rec.sb
-ITEM = (os.environ.get("ITEM_ID") or os.environ.get("DIAG_ITEM") or "").strip()
+# .upper() porque o ML recusa o id em minúsculas com "Invalid item id" — e aí TODAS as
+# chamadas falham em cascata. Custa nada normalizar e evita um diagnóstico inteiro perdido.
+ITEM = (os.environ.get("ITEM_ID") or os.environ.get("DIAG_ITEM") or "").strip().upper()
 SELLER = (os.environ.get("SELLER_ID") or "").strip()
 TIPOS_SO_TIPO = {"PRICE_DISCOUNT", "LIGHTNING", "DOD"}
 TIPOS_COM_OFFER = {"SMART", "PRICE_MATCHING", "PRICE_MATCHING_MELI_ALL", "MARKETPLACE_CAMPAIGN",
@@ -496,6 +498,15 @@ def main():
     # 1) o anúncio — COMPLETO (o raio-x usa vários campos: catálogo, shipping, vendidos, health...)
     st, it = rec.get(f"/items/{ITEM}", access)
     dump("1) ANÚNCIO (/items/{id})", it, 2500)
+    # PARA AQUI se o anúncio não resolveu. Sem isto o diagnóstico seguia rodando sobre o
+    # vazio e terminava imprimindo "a saída acima é confiável" — confiança declarada sobre
+    # nada, que é a pior mentira que um diagnóstico pode contar.
+    if not isinstance(it, dict) or not it.get("id"):
+        msg = (it.get("message") or it.get("error")) if isinstance(it, dict) else st
+        print(f"\n!! ABORTADO: o anúncio {ITEM} não resolveu (HTTP {st} — {msg}).", flush=True)
+        print("   Confira o ID (o ML exige MLB maiúsculo e o anúncio precisa ser desta conta).", flush=True)
+        print("   NADA abaixo seria confiável, então nem rodei o resto.", flush=True)
+        return
     # 0) RAIO-X — tudo que dá pra consultar do anúncio + MARGEM ATUAL
     raio_x(ITEM, it, access)
     # 2) mapa do item — CONTANDO quantos vêm (pra ver se está truncado/paginado)
@@ -560,8 +571,15 @@ def main():
     print(f"  INCONCLUSIVOS (bati o teto — NÃO SEI): {len(inconclusivos)}", flush=True)
     for nome, tipo, pid in inconclusivos:
         print(f"    ？ {nome} [{tipo}/{pid}] — rode de novo com TETO_PAGINAS maior", flush=True)
-    if not divergencias and not inconclusivos:
-        print("  (nenhuma divergência e nenhum inconclusivo — a saída acima é confiável)", flush=True)
+    # Só afirma confiança se REALMENTE testou alguma campanha. "Zero problemas" quando
+    # nada foi testado não é boa notícia — é ausência de notícia.
+    testou = len(testadas) > 0 and isinstance(of, list)
+    if not testou:
+        print("  ⚠️ NÃO TESTEI NADA — o endpoint por item não devolveu lista ou não há campanha "
+              "started/pending na conta. Os zeros acima não significam 'está tudo certo'.", flush=True)
+    elif not divergencias and not inconclusivos:
+        print(f"  ✓ {len(testadas)} campanha(s) testadas até o fim, sem divergência e sem "
+              f"inconclusivo — a saída acima é confiável.", flush=True)
     # 5) SIMULAÇÃO DE ENTRADA (só leitura) — reproduz o aplicador e mostra o POST exato
     simular_entrada(ITEM, access, SID)
     print("\n################ FIM — nada foi alterado (só leitura) ################", flush=True)
