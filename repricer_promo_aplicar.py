@@ -1227,7 +1227,13 @@ def processar(fila, access):
                         lo = mid
                 _p = _clamp_preco(round(hi, 2), cand)
                 _origem = f"{_fonte_m} {_alvo_m:.1f}% -> preço R${_p:.2f}"
-            print(f"  ~ {iid}: {tipo} por {_origem} | faixa do ML {_mn:.2f}–{_mx:.2f}", flush=True)
+            # A faixa só é "do ML" quando veio dele. No caminho sem faixa, _mn é o
+            # limite da busca binária e _mx é o preço de lista — atribuir isso ao
+            # Mercado Livre seria inventar uma fonte, que é exatamente o defeito
+            # que este arquivo passou o dia consertando.
+            _fx_fonte = ("faixa usada (sem faixa do ML; teto = preço de lista)"
+                         if cand.get("_sem_faixa") else "faixa do ML")
+            print(f"  ~ {iid}: {tipo} por {_origem} | {_fx_fonte} {_mn:.2f}–{_mx:.2f}", flush=True)
         cand = dict(cand)
         cand["price"] = _p
     ev = rec.avaliar(cand, cat, ltid, access, frete, custo)
