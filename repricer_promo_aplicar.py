@@ -821,6 +821,80 @@ def confirmar_pos_entrada(fila, access):
                         "resultado": f"{base} || 2ª passada — {nota}{extra}"})
     print(f"  [{ret}] {fila.get('acao')} {iid} (2ª passada) | {nota}", flush=True)
     return ret
+def _faixa_individual(iid, seller_id):
+    """A FAIXA CRÍVEL do desconto individual, lida da sugestão guardada no banco.
+
+    POR QUE ISSO EXISTE
+      O desconto individual não é candidatura de campanha: ele não aparece na
+      varredura das campanhas do vendedor, e o /seller-promotions/items/{id}
+      às vezes devolve [] (confirmado pelo diagnóstico). Sem candidato vivo, o
+      aplicador parava com 'sem_candidato' — e 18 promoções individuais que
+      você montou na tela ficaram travadas por isso.
+
+      Só que a faixa NUNCA se perdeu: o repricer_sugestoes a captura e grava na
+      coluna 'ofertas', na linha do individual, como preco_min/preco_max/preco_sug.
+      O aplicador ia buscar no ML o que já estava em casa.
+
+    POR QUE IGNORA O 'escolha_manual'
+      Aquele sinalizador protege a DECISÃO: quando você escolheu na mão, o robô
+      não troca a sua escolha pela recomendação dele. A faixa não é decisão, é
+      MEDIÇÃO — é o que o ML respondeu. Ler a medição não desfaz a sua escolha.
+
+    Devolve o dict da oferta individual, ou None.
+    """
+    try:
+        rows = (sb.table("repricer_sugestoes")
+                .select("ofertas,preco_atual,criado_em")
+                .eq("seller_id", str(seller_id)).eq("item_id", iid)
+                .order("criado_em", desc=True).limit(1).execute().data) or []
+    except Exception as e:
+        print(f"  aviso: não li a faixa guardada de {iid}: {e}", flush=True)
+        return None
+    if not rows:
+        return None
+    lista = rows[0].get("ofertas")
+    if isinstance(lista, str):
+        try:
+            lista = json.loads(lista)
+        except (ValueError, TypeError):
+            return None
+    for o in (lista or []):
+        if isinstance(o, dict) and (o.get("individual") is True
+                                    or (o.get("tipo") or "").upper() == "PRICE_DISCOUNT"):
+            return o
+    return None
+
+
+def candidato_individual_da_sugestao(iid, seller_id, preco_lista):
+    """Monta o 'candidato' do desconto individual a partir da faixa guardada.
+
+    Traduz os nomes do painel para os nomes que o resto do aplicador espera
+    (rec.avaliar, _clamp_preco, corpo_post). Nenhum valor é inventado: todos
+    vieram do ML quando a sugestão rodou.
+
+    Se o ML não deu faixa (sem_faixa=True), devolve None — e o item PARA, com
+    o motivo escrito. Chutar uma faixa aqui seria aplicar desconto num intervalo
+    que ninguém mediu.
+    """
+    fx = _faixa_individual(iid, seller_id)
+    if not fx or fx.get("sem_faixa") is True:
+        return None
+    pmin, pmax = fx.get("preco_min"), fx.get("preco_max")
+    if pmin is None and pmax is None:
+        return None
+    return {"id": fx.get("promocao_id"), "ref_id": fx.get("promocao_ref_id"),
+            "type": "PRICE_DISCOUNT", "status": "candidate",
+            "name": fx.get("nome") or "Desconto individual",
+            "price": 0,                                   # é o ML dizendo "escolhe você"
+            "original_price": preco_lista,
+            "min_discounted_price": pmin,
+            "max_discounted_price": pmax,
+            "suggested_discounted_price": fx.get("preco_sug"),
+            "meli_percentage": fx.get("rebate"),
+            "seller_percentage": fx.get("desconto_vendedor"),
+            "_via": "faixa_guardada"}
+
+
 def _sugestao_atual(iid, seller_id):
     """Lê a sugestão MAIS NOVA e VIVA do robô pra este item (status != 'aplicada', que é leftover
     congelado). Serve pra o aplicador agir na recomendação ATUAL, não numa ordem antiga da fila.
@@ -919,6 +993,21 @@ def processar(fila, access):
     # 'entrar' não mexe nas outras. Só entra em quem está 'candidate' agora (a sugerida nunca é ativa).
     antigas = [o for o in ofertas if rec.eh_ativa(o)]
     cand = achar_candidato(ofertas, fila)
+    # DESCONTO INDIVIDUAL SEM CANDIDATO VIVO: não é impedimento real. Ele não mora em
+    # campanha nenhuma (a varredura não acha) e o endpoint por item às vezes vem vazio.
+    # A faixa que o ML deu está guardada na sugestão — usamos de lá. O preço continua
+    # saindo da SUA margem; a faixa só serve pra não pedir um desconto que o ML recusaria.
+    if not cand and tipo == "PRICE_DISCOUNT":
+        _stp, _itp = rec.get(f"/items/{iid}", access)
+        _plista = None
+        if isinstance(_itp, dict):
+            _plista = _itp.get("base_price") or _itp.get("price")
+        if _plista:
+            cand = candidato_individual_da_sugestao(iid, str(fila.get("seller_id") or ""), float(_plista))
+            if cand:
+                print(f"  ~ {iid}: sem candidato vivo de desconto individual — usando a faixa "
+                      f"guardada na sugestão (R${cand.get('min_discounted_price')}"
+                      f"–R${cand.get('max_discounted_price')})", flush=True)
     if not cand:
         # NÃO achou candidato do tipo alvo. Se o item JÁ ESTÁ ATIVO nesse tipo, não é erro:
         # é um resultado BOM (o anúncio já está na promoção) — marca 'já ativa ✓', não vermelho.
@@ -941,6 +1030,11 @@ def processar(fila, access):
             gravar(fila["id"], {"status": "aplicada",
                 "resultado": f"já estava ATIVA no item ✓ (não precisou entrar){extra_troca}"})
             return "ja_ativa"
+        if tipo == "PRICE_DISCOUNT":
+            gravar(fila["id"], {"status": "expirado",
+                "resultado": "desconto individual sem faixa de preço: o ML não devolveu candidatura "
+                             "agora e a sugestão guardada não tem a faixa crível. Rode a sugestão de novo."})
+            return "sem_candidato"
         gravar(fila["id"], {"status": "expirado",
             "resultado": "a candidatura aprovada não está mais disponível — rode a sugestão de novo"})
         return "sem_candidato"
