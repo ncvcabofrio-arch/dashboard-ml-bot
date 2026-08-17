@@ -14,6 +14,7 @@ NÃO altera nenhuma função compartilhada: só importa repricer_sugestoes como 
 import os
 import time
 import json
+import threading
 import requests
 import repricer_sugestoes as rec
 from datetime import datetime, timezone, timedelta
@@ -443,12 +444,94 @@ def remover_todas(iid, access):
 # usar ela, então o conserto vale para trocar, para sair e para a 2ª passada de uma vez.
 # ---------------------------------------------------------------------------
 TIPOS_NIVEL_ITEM = {"PRICE_DISCOUNT", "LIGHTNING", "DOD"}
+# ===========================================================================
+# VARREDURA DE PARTICIPAÇÃO — a mesma do repricer_sugestoes, só que rápida.
+#
+# POR QUE EXISTE UMA CÓPIA AQUI
+#   Descobrir em que promoções um anúncio está custa 1 chamada para listar as
+#   campanhas do vendedor + 1 chamada POR CAMPANHA. Com ~40 campanhas ativas
+#   são ~41 requisições — e um item que TROCA de promoção fazia isso duas vezes.
+#   Em 52 itens, deu 10 minutos de rodada.
+#
+#   Aqui muda só o TRANSPORTE, não a regra: mesmas URLs, mesmos filtros de
+#   status, mesmo formato de retorno do rec.participacoes_ativas. O que muda:
+#     - as ~40 perguntas "esse item está nesta campanha?" saem juntas;
+#     - a lista de campanhas do vendedor é lida UMA vez por rodada.
+#
+#   É tudo GET. NENHUMA escrita foi paralelizada: entrar e sair de promoção
+#   continua acontecendo um item por vez, na mesma ordem de antes. Isso é
+#   deliberado — irmãos sincronizados compartilham preço, e mexer em dois ao
+#   mesmo tempo é exatamente como um sobrescreve o outro.
+# ===========================================================================
+LEITURA_PARALELA = int(os.environ.get("LEITURA_PARALELA", "6"))
+_CAMPANHAS_CACHE = {}                 # seller_id -> campanhas (uma leitura por rodada)
+_CAMPANHAS_LOCK = threading.Lock()
+
+
+def campanhas_do_vendedor(seller_id, access):
+    """Campanhas do vendedor, lidas UMA vez por rodada.
+    A lista não muda em dez minutos; relê-la a cada verificação era uma
+    chamada jogada fora por item."""
+    chave = str(seller_id or "")
+    with _CAMPANHAS_LOCK:
+        if chave in _CAMPANHAS_CACHE:
+            return _CAMPANHAS_CACHE[chave]
+    lista = rec.promocoes_do_vendedor(seller_id, access) or []
+    with _CAMPANHAS_LOCK:
+        _CAMPANHAS_CACHE.setdefault(chave, lista)
+        return _CAMPANHAS_CACHE[chave]
+
+
+def participacoes_ativas_rapido(item_id, seller_id, access):
+    """Idêntico ao rec.participacoes_ativas — só com as consultas por campanha
+    em paralelo. Retorna a mesma lista de dicts, na mesma ordem das campanhas."""
+    campanhas = [pr for pr in campanhas_do_vendedor(seller_id, access)
+                 if (pr.get("status") or "").lower() in ("started", "pending")
+                 and pr.get("id") and pr.get("type")]
+    if not campanhas:
+        return []
+
+    def _uma(pr):
+        pid, ptipo = pr.get("id"), (pr.get("type") or "")
+        st, d = rec.get(f"/seller-promotions/promotions/{pid}/items"
+                        f"?promotion_type={ptipo}&item_id={item_id}&app_version=v2", access)
+        res = (d.get("results") if isinstance(d, dict) else None) or []
+        for it in res:
+            if str(it.get("id")) != str(item_id):
+                continue
+            sti = (it.get("status") or "").lower()
+            if sti not in ("started", "pending"):
+                continue
+            return {"promotion_id": pid, "type": ptipo.upper(),
+                    "offer_id": it.get("offer_id") or it.get("ref_id"),
+                    "name": pr.get("name"), "status": sti}
+        return None
+
+    n = max(1, min(LEITURA_PARALELA, len(campanhas)))
+    if n == 1:
+        achados = [_uma(pr) for pr in campanhas]
+    else:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=n) as ex:
+            achados = list(ex.map(_uma, campanhas))
+    out, vistos = [], set()
+    for a in achados:
+        if not a:
+            continue
+        chave = (a["promotion_id"], a["type"])
+        if chave in vistos:
+            continue
+        vistos.add(chave)
+        out.append(a)
+    return out
+
+
 def participacoes_completas(iid, seller_id, access, ofertas=None):
     """Todas as promoções ATIVAS do item, das duas fontes, deduplicadas.
     As de nível de item entram com nivel_item=True e promotion_id possivelmente None —
     o remover_participacao já trata esses três tipos pelo promotion_type, que é a forma
     que a doc do ML manda para eles."""
-    achadas = list(rec.participacoes_ativas(iid, seller_id, access) or [])
+    achadas = list(participacoes_ativas_rapido(iid, seller_id, access) or [])
     vistos = {(str(p.get("promotion_id") or ""), (p.get("type") or "").upper()) for p in achadas}
     tipos_vistos = {(p.get("type") or "").upper() for p in achadas}
     if ofertas is None:
@@ -479,7 +562,7 @@ def sair_das_outras(iid, seller_id, access, manter_pid=None, manter_tipo=None):
     ativas de campanha cofinanciada/marketplace (só candidatas). Sai por TIPO, uma a uma.
     Retorna (saiu[], falhou[], restantes[])."""
     ativas = participacoes_completas(iid, seller_id, access)
-    saiu, falhou = [], []
+    saiu, falhou, restantes = [], [], []
     for p in ativas:
         if manter_pid and p.get("promotion_id") == manter_pid:
             continue
@@ -487,11 +570,17 @@ def sair_das_outras(iid, seller_id, access, manter_pid=None, manter_tipo=None):
             continue  # sem id da nova (ex.: relâmpago): não sai de outra do mesmo tipo
         scd, body = remover_participacao(iid, p, access)
         rot = f"{p.get('name') or p.get('type')}({p.get('type')}:{scd})"
-        (saiu if scd in (200, 201) else falhou).append(rot)
-    # confere de novo: o que sobrou ativo além da que mantivemos
-    restantes = [p for p in participacoes_completas(iid, seller_id, access)
-                 if not (manter_pid and p.get("promotion_id") == manter_pid)
-                 and not (manter_pid is None and manter_tipo and (p.get("type") or "").upper() == manter_tipo)]
+        if scd in (200, 201):
+            saiu.append(rot)
+        else:
+            falhou.append(rot)
+            restantes.append(p)      # só o que o ML RECUSOU remover
+    # ANTES havia aqui uma segunda varredura completa (~41 chamadas) só pra montar
+    # 'restantes'. Os DOIS lugares que chamam esta função descartam esse valor — e um
+    # deles explica por quê, em comentário: a remoção no ML é assíncrona, então relistar
+    # agora dá falso "ainda ativas". Quem confere de verdade é a 2ª passada do main(),
+    # depois do tempo de propagação. Então 'restantes' passa a ser o que de fato ficou
+    # para trás: as promoções cujo DELETE foi RECUSADO. Mais honesto e de graça.
     return saiu, falhou, restantes
 def executar_sair(fila, iid, ofertas, access):
     """SAIR — 1ª PASSADA: sai de cada promoção em que o item participa (status started).
