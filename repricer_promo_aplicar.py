@@ -464,6 +464,10 @@ TIPOS_NIVEL_ITEM = {"PRICE_DISCOUNT", "LIGHTNING", "DOD"}
 #   mesmo tempo é exatamente como um sobrescreve o outro.
 # ===========================================================================
 LEITURA_PARALELA = int(os.environ.get("LEITURA_PARALELA", "6"))
+# Itens que confirmaram num preço diferente do pedido. Não é erro de aplicação —
+# o desconto entrou — mas é dinheiro diferente do combinado, e antes não aparecia
+# em lugar nenhum: ia junto com os "✓ CONFIRMADO" e ninguém via.
+PRECO_DIVERGENTE = []
 _CAMPANHAS_CACHE = {}                 # seller_id -> campanhas (uma leitura por rodada)
 _CAMPANHAS_LOCK = threading.Lock()
 
@@ -524,6 +528,87 @@ def participacoes_ativas_rapido(item_id, seller_id, access):
         vistos.add(chave)
         out.append(a)
     return out
+
+
+def candidatas_por_campanha(item_id, seller_id, access):
+    """CANDIDATURAS do item varrendo as CAMPANHAS DA CONTA — a segunda fonte.
+
+    POR QUE EXISTE
+      O /seller-promotions/items/{id} devolveu [] para o MLB4120093236 enquanto a
+      varredura das 40 campanhas achava o mesmo item como 'candidate' em DUAS
+      (ARCOS BASE - 08-26 e 9.9). Confirmado pelo diagnóstico, com as 40 campanhas
+      varridas até o fim, sem inconclusivo. Ou seja: o endpoint por item não é só
+      incompleto para participações ATIVAS (isso a doc já dizia) — ele também
+      esconde CANDIDATURAS.
+
+      O aplicador olhava só por aquela porta e concluía "candidato expirou". Não
+      tinha expirado nada: ele estava cego. Era falso negativo, e ia para a tela
+      pintado de vermelho como se fosse erro.
+
+    O QUE FAZ
+      Pergunta a cada campanha 'started/pending' se este item está lá como
+      candidate, e devolve as respostas no MESMO formato do ofertas_do_item —
+      'id' é o id da PROMOÇÃO (no corpo cru desse endpoint, 'id' é o do item, e
+      trocar os dois faria o achar_candidato nunca casar).
+
+    CUSTO
+      ~40 chamadas, em paralelo (~8 de latência). Só roda quando a porta barata
+      volta vazia, então não pesa no caminho normal.
+    """
+    campanhas = [pr for pr in campanhas_do_vendedor(seller_id, access)
+                 if (pr.get("status") or "").lower() in ("started", "pending")
+                 and pr.get("id") and pr.get("type")]
+    if not campanhas:
+        return []
+
+    def _uma(pr):
+        pid, ptipo = pr.get("id"), (pr.get("type") or "")
+        st, d = rec.get(f"/seller-promotions/promotions/{pid}/items"
+                        f"?promotion_type={ptipo}&item_id={item_id}&app_version=v2", access)
+        res = (d.get("results") if isinstance(d, dict) else None) or []
+        for it in res:
+            if str(it.get("id")) != str(item_id):
+                continue
+            if (it.get("status") or "").lower() != "candidate":
+                continue
+            o = dict(it)
+            o["id"] = pid                      # id da PROMOÇÃO, não o do item
+            o["type"] = (ptipo or "").upper()
+            o["status"] = "candidate"
+            o["name"] = pr.get("name")
+            if not o.get("ref_id"):
+                o["ref_id"] = it.get("offer_id")
+            # percentuais às vezes vêm só na campanha, não no item
+            for k in ("meli_percentage", "seller_percentage"):
+                if o.get(k) is None and pr.get(k) is not None:
+                    o[k] = pr.get(k)
+            o["_via"] = "campanhas"
+            return o
+        return None
+
+    n = max(1, min(LEITURA_PARALELA, len(campanhas)))
+    if n == 1:
+        achados = [_uma(pr) for pr in campanhas]
+    else:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=n) as ex:
+            achados = list(ex.map(_uma, campanhas))
+    return [a for a in achados if a]
+
+
+def ofertas_das_duas_fontes(iid, seller_id, access):
+    """Ofertas do item pela porta barata; se vier vazia, pela varredura das campanhas.
+    Devolve (ofertas, origem) — 'origem' entra no log pra você saber por onde veio."""
+    ofertas = rec.ofertas_do_item(iid, access) or []
+    if ofertas:
+        return ofertas, "item"
+    achadas = candidatas_por_campanha(iid, seller_id, access)
+    if achadas:
+        nomes = ", ".join(f"{(o.get('name') or o.get('type'))}[{o.get('type')}]" for o in achadas)
+        print(f"  ~ {iid}: endpoint por item devolveu VAZIO; varrendo campanhas achei "
+              f"{len(achadas)} candidatura(s): {nomes}", flush=True)
+        return achadas, "campanhas"
+    return [], "nenhuma"
 
 
 def participacoes_completas(iid, seller_id, access, ofertas=None):
@@ -682,6 +767,19 @@ def confirmar_pos_entrada(fila, access):
                  + (f" (alvo R${float(alvo):.2f})" if alvo not in (None, "") else "")) if (preco_confirma or tipo_confirma) \
                 else "promoção ATIVA (started) ✓"
         nota = f"✓ CONFIRMADO — {prova}"
+        # PREÇO DIFERENTE DO ALVO: a regra aceita qualquer preço ABAIXO do alvo, por
+        # qualquer distância — foi escrita pra tolerar arredondamento. Foi assim que o
+        # MLB7393879448 fechou em R$1.722,21 (o preço do IRMÃO) com alvo R$1.809,66 e
+        # saiu carimbado com ✓. Continua sendo tratado como aplicado, porque o desconto
+        # existe de verdade; mas agora aparece, em vez de sumir no meio dos acertos.
+        try:
+            if pv is not None and alvo not in (None, "") and abs(float(pv) - float(alvo)) > float(alvo) * 0.01:
+                PRECO_DIVERGENTE.append((iid, float(alvo), float(pv)))
+                nota = (f"⚠️ APLICADO EM PREÇO DIFERENTE DO ALVO — cliente paga R${float(pv):.2f}, "
+                        f"alvo era R${float(alvo):.2f} (diferença R${float(alvo) - float(pv):.2f}). "
+                        f"Causa provável: preço propagado de anúncio irmão sincronizado.")
+        except (TypeError, ValueError):
+            pass
     elif (pv is not None) or (conf_started is False):
         # sinal NEGATIVO real: preço ainda cheio / promo não 'started' -> volta pra fila
         confirmado, ret = False, "ativando"
@@ -764,7 +862,11 @@ def processar(fila, access):
     if acao not in ("entrar", "trocar", "sair"):
         gravar(fila["id"], {"status": "erro", "resultado": f"ação '{acao}' não aplicável aqui"})
         return "acao_invalida"
-    ofertas = rec.ofertas_do_item(iid, access)
+    # DUAS FONTES: o endpoint por item mente por omissao (devolveu [] para um item
+    # que estava candidate em duas campanhas). Se ele vier vazio, varremos as
+    # campanhas antes de concluir qualquer coisa.
+    ofertas, _origem_ofertas = ofertas_das_duas_fontes(
+        iid, str(fila.get("seller_id") or ""), access)
     if not isinstance(ofertas, list):
         ofertas = []
     if acao == "sair":
@@ -805,7 +907,13 @@ def processar(fila, access):
         gravar(fila["id"], {"status": "erro", "resultado": f"tipo {tipo} ainda não suportado pelo aplicador"})
         return "tipo_nao_suportado"
     if not ofertas:
-        gravar(fila["id"], {"status": "erro", "resultado": "sem promoções no item agora (candidato expirou?)"})
+        # ANTES: status 'erro' e o texto "(candidato expirou?)" — um palpite com
+        # interrogação, escrito no banco e lido depois como se fosse diagnóstico.
+        # Ninguém tinha verificado expiração nenhuma. Agora só se escreve isto
+        # depois de as DUAS fontes voltarem vazias, e o texto diz o que foi feito.
+        gravar(fila["id"], {"status": "expirado",
+            "resultado": "nenhuma candidatura agora — nem no endpoint por item, "
+                         "nem varrendo as campanhas da conta"})
         return "sem_oferta"
     # snapshot das ATIVAS de agora. 'trocar' vai sair de todas elas e ficar só na sugerida.
     # 'entrar' não mexe nas outras. Só entra em quem está 'candidate' agora (a sugerida nunca é ativa).
@@ -833,8 +941,8 @@ def processar(fila, access):
             gravar(fila["id"], {"status": "aplicada",
                 "resultado": f"já estava ATIVA no item ✓ (não precisou entrar){extra_troca}"})
             return "ja_ativa"
-        gravar(fila["id"], {"status": "erro",
-            "resultado": "candidato aprovado não está mais disponível — rode a sugestão de novo"})
+        gravar(fila["id"], {"status": "expirado",
+            "resultado": "a candidatura aprovada não está mais disponível — rode a sugestão de novo"})
         return "sem_candidato"
     # trava de vigência (consulta o detalhe da promoção): nunca entrar em promo programada/futura.
     # Fica ANTES da remoção das outras, pra nunca deixar o item sem promoção por causa disso.
@@ -1306,6 +1414,13 @@ def main():
             else:
                 txt = (res1_mem.get(f["id"], ("", ""))[1]) or f.get("resultado")
             registrar_retry(f, code, txt)
+    if PRECO_DIVERGENTE:
+        print(f"\n⚠️  {len(PRECO_DIVERGENTE)} item(ns) confirmaram em preço DIFERENTE do alvo:", flush=True)
+        for _iid, _alvo, _pv in PRECO_DIVERGENTE:
+            print(f"      {_iid}: alvo R${_alvo:.2f} -> cliente paga R${_pv:.2f} "
+                  f"(diferença R${_alvo - _pv:.2f})", flush=True)
+        print("      Causa provável: preço propagado de anúncio irmão sincronizado.", flush=True)
+        resumo["preco_divergente"] = len(PRECO_DIVERGENTE)
     print("resumo:", json.dumps(resumo, ensure_ascii=False), flush=True)
     grava_status("concluido", json.dumps(resumo, ensure_ascii=False))
 if __name__ == "__main__":
