@@ -147,9 +147,62 @@ def telegram(msg):
                       json={"chat_id": chat, "text": msg}, timeout=15)
     except Exception:
         pass
+# Antes desta mudança, TODA avaliação virava linha no repricer_log: 38.347 por
+# dia para 2.156 anúncios, das quais 130 por SEMANA registravam alguma ação —
+# 0,05%. Eram 18,4 MB/dia e 54% do banco só para guardar "olhei e não fiz nada".
+# Foi isso que estourou a cota do Supabase.
+#
+# A separação agora é explícita:
+#   repricer_log_atual -> ESTADO. Uma linha por anúncio, sempre a mais recente.
+#                         É o que o painel lê. Recebe TODA rodada.
+#   repricer_log       -> HISTÓRICO. Só o que aconteceu de fato.
+#
+# Não dava para simplesmente parar de inserir no repricer_log: o
+# repricer_log_atual era alimentado pelo TRIGGER de insert dele. Por isso o
+# estado passa a ser gravado aqui, direto. O trigger continua no banco e vira
+# redundância inofensiva — nas linhas de ação ele reescreve o mesmo conteúdo.
+ACOES_HISTORICO = {
+    "pulado_salto",     # quis descontar e o anti-salto segurou: isso é evento
+    "fila_teto",        # bateu no teto de alterações da rodada
+    "pede_aprovacao",   # pediu o botão no Telegram
+}
+
+
+def _linha_completa(row):
+    """A linha veio do base_log(), com todas as colunas de estado?
+
+    Importa porque o upsert do PostgREST substitui a LINHA INTEIRA: gravar um
+    dict parcial no repricer_log_atual apagaria preco_venda, margem_venda,
+    frete e o resto. As chamadas parciais (aplicar_aprovacoes) entram só no
+    histórico e não encostam no estado.
+    """
+    return "preco_cheio" in row and "margem_venda" in row
+
+
+def _vale_historico(row):
+    """Vale guardar para sempre? Só o que aconteceu, ou quase aconteceu."""
+    return bool(row.get("aplicado")) or (row.get("acao") in ACOES_HISTORICO)
+
+
 def logar(row):
+    linha = dict(row)
+    # O repricer_log_atual nasceu de um CREATE TABLE AS, então não herdou o
+    # default de 'ts'. Mandamos explícito — e assim as duas tabelas gravam
+    # exatamente o mesmo instante. O 'id' fica nulo de propósito: conferi que
+    # o painel não usa essa coluna.
+    linha.setdefault("ts", _agora_iso())
+    # 1) ESTADO — toda rodada, um upsert por anúncio.
+    if _linha_completa(linha) and linha.get("item_id") and linha.get("seller_id"):
+        try:
+            rec.sb.table("repricer_log_atual").upsert(
+                linha, on_conflict="seller_id,item_id").execute()
+        except Exception as e:
+            print(f"   (estado falhou: {e})", flush=True)
+    # 2) HISTÓRICO — só quando aconteceu alguma coisa.
+    if not _vale_historico(linha):
+        return
     try:
-        rec.sb.table("repricer_log").insert(row).execute()
+        rec.sb.table("repricer_log").insert(linha).execute()
     except Exception as e:
         print(f"   (log falhou: {e})", flush=True)
 def _estoque_int(v):
