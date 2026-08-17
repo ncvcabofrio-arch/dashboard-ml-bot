@@ -82,6 +82,8 @@ CODIGO_CATEGORIA = {
     # FAÇA NA MÃO: o ML recusou por credibilidade do desconto / data da campanha.
     # Esperar NÃO resolve (precisa de você) -> terminal, NÃO retenta.
     "faca_na_mao": "terminal",
+    # o ML disse que o anúncio não é elegível -> retentar é insistir no não
+    "sem_candidatura_ml": "terminal",
     # a sugestão mudou de promoção
     "divergencia": "divergencia",
 }
@@ -1354,7 +1356,20 @@ def processar(fila, access):
     cod_erro = "erro_post"
     if not ok:
         _t = json.dumps(resp, ensure_ascii=False).upper()
-        if "CREDIBILITY" in _t:
+        if "NO CANDIDATES FOUND" in _t:
+            # O ML respondeu, com todas as letras: este anúncio NÃO é elegível a
+            # desconto individual. Não adianta retentar — não é rede, não é 429,
+            # não é propagação. É elegibilidade, e ela não muda sozinha em uma hora.
+            #
+            # E é a resposta que fecha a dúvida do dia: a candidatura EXISTE do lado
+            # do ML (35 itens desta mesma rodada entraram sem que o endpoint por item
+            # mostrasse nada). Ele só não conta direito quem tem. Tentar é o único
+            # jeito de saber — e quando ele recusa, recusa claro.
+            motivo = ("O ML recusou: este anúncio não tem candidatura para desconto individual "
+                      "(\"No candidates found for item\"). Não é falha de rede nem de propagação — "
+                      "é elegibilidade, e retentar não resolve.")
+            cod_erro = "sem_candidatura_ml"
+        elif "CREDIBILITY" in _t:
             # a doc do desconto individual chama isso de error_credibility_price:
             # "O desconto aplicado não é suficiente para ser considerado crível."
             motivo = ("FAÇA NA MÃO — o ML recusou por CREDIBILIDADE: o desconto escolhido é raso demais. "
