@@ -1357,17 +1357,42 @@ def processar(fila, access):
     if not ok:
         _t = json.dumps(resp, ensure_ascii=False).upper()
         if "NO CANDIDATES FOUND" in _t:
-            # O ML respondeu, com todas as letras: este anúncio NÃO é elegível a
-            # desconto individual. Não adianta retentar — não é rede, não é 429,
-            # não é propagação. É elegibilidade, e ela não muda sozinha em uma hora.
+            # "No candidates found for item" NÃO quer dizer "não é elegível".
             #
-            # E é a resposta que fecha a dúvida do dia: a candidatura EXISTE do lado
-            # do ML (35 itens desta mesma rodada entraram sem que o endpoint por item
-            # mostrasse nada). Ele só não conta direito quem tem. Tentar é o único
-            # jeito de saber — e quando ele recusa, recusa claro.
-            motivo = ("O ML recusou: este anúncio não tem candidatura para desconto individual "
-                      "(\"No candidates found for item\"). Não é falha de rede nem de propagação — "
-                      "é elegibilidade, e retentar não resolve.")
+            # VERIFICADO no navegador, em 3 dos 12 recusados de uma rodada real: os três
+            # JÁ ESTAVAM com o preço-alvo na página do anúncio. Em todas as 12 recusas,
+            # um IRMÃO sincronizado tinha aplicado o mesmo preço na mesma rodada. O ML
+            # propaga o desconto pela família e, feito isso, não sobra candidatura para
+            # pedir de novo — então ele responde "sem candidatos".
+            #
+            # Ou seja: o trabalho FOI feito, só não por este POST. Marcar como recusa
+            # pintava 12 vermelhos por rodada em anúncios que estavam certos.
+            #
+            # Antes de concluir qualquer coisa, perguntamos ao ML quanto o cliente paga.
+            # (Cuidado ao conferir na página: a campanha "Desconto no Pix" tira mais uns
+            # R$10 por baixo. O sale_price devolve o preço sem esse desconto.)
+            _alvo_ok = None
+            try:
+                _pv, _pt = preco_venda_real(iid, access)
+                _ref = fila.get("preco_alvo")
+                if _ref in (None, ""):
+                    _ref = preco
+                if _pv is not None and _ref not in (None, ""):
+                    _alvo_ok = abs(float(_pv) - float(_ref)) <= max(0.02, float(_ref) * 0.01)
+            except (TypeError, ValueError):
+                _alvo_ok = None
+            if _alvo_ok:
+                gravar(fila["id"], {
+                    "status": "aplicada",
+                    "preco_aplicado": round(float(_pv), 2),
+                    "resultado": (f"já aplicado via IRMÃO sincronizado ✓ — cliente paga R${float(_pv):.2f}, "
+                                  f"que é o alvo. O ML respondeu \"No candidates found\" porque o desconto "
+                                  f"já vale para este produto e não sobra candidatura.")})
+                print(f"  = {iid}: já estava no preço-alvo (R${float(_pv):.2f}) — aplicado pelo irmão ✓", flush=True)
+                return "ja_ativa"
+            motivo = ("O ML respondeu \"No candidates found for item\" e o preço atual "
+                      + (f"(R${float(_pv):.2f}) " if _pv is not None else "(não consegui ler) ")
+                      + "NÃO é o alvo. Aí é elegibilidade mesmo: retentar não resolve.")
             cod_erro = "sem_candidatura_ml"
         elif "CREDIBILITY" in _t:
             # a doc do desconto individual chama isso de error_credibility_price:
