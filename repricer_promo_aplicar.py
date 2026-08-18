@@ -1376,7 +1376,7 @@ def processar(fila, access):
                 _pv, _pt = preco_venda_real(iid, access)
                 _ref = fila.get("preco_alvo")
                 if _ref in (None, ""):
-                    _ref = preco
+                    _ref = (ev.get("pb") if isinstance(ev, dict) else None)
                 if _pv is not None and _ref not in (None, ""):
                     _alvo_ok = abs(float(_pv) - float(_ref)) <= max(0.02, float(_ref) * 0.01)
             except (TypeError, ValueError):
