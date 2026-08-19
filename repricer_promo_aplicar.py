@@ -84,6 +84,9 @@ CODIGO_CATEGORIA = {
     "faca_na_mao": "terminal",
     # o ML disse que o anúncio não é elegível -> retentar é insistir no não
     "sem_candidatura_ml": "terminal",
+    # decisão sua, não falha transitória: retentar igual dá o mesmo resultado
+    "fora_da_faixa_doc": "terminal",
+    "so_reduz": "terminal",
     # a sugestão mudou de promoção
     "divergencia": "divergencia",
 }
@@ -196,6 +199,14 @@ def post(path, access, body, tent=3):
                           headers={"Authorization": "Bearer " + access,
                                    "Content-Type": "application/json"},
                           json=body, timeout=25)
+        # 423_ENTITY_LOCKED entra aqui por instrução explícita da doc:
+        #   "o item está temporariamente bloqueado para realizar requisições.
+        #    A solicitação pode ser tentada novamente após alguns segundos."
+        # Ele saía como falha definitiva e virava 'erro_post' sem motivo visível.
+        # A espera é maior que a dos outros: a doc fala em segundos, não em ms.
+        if r.status_code == 423:
+            time.sleep(2.0 * (i + 1))
+            continue
         if r.status_code == 429 or r.status_code >= 500:
             time.sleep(0.6 * (i + 1))
             continue
@@ -248,6 +259,54 @@ def _com_datas(corpo, cand):
     if fim:
         corpo["finish_date"] = fim
     return corpo
+# ===========================================================================
+# LIMITES DE DESCONTO — copiados da documentação, não estimados.
+#
+# PRICE_DISCOUNT (/pt_br/desconto-individua):
+#   "O desconto máximo deve ser menor que 80% e o desconto mínimo a oferecer deve
+#    ser maior ou igual a 5%."  -> erro buyer_discount_not_in_range (5, 80)
+#
+# SELLER_CAMPAIGN (/pt_br/campanhas-do-vendedor):
+#   "the minimum percentage allowed is 10.000000"
+#   A página se contradiz no teto (o texto diz 80%, a mensagem de erro diz 70%).
+#   Quem desempatou foi o PRÓPRIO ML, na rodada de 19/ago. Para o MLB4264653013
+#   (preço de lista R$199,00) ele devolveu a faixa real:
+#       "de -41.5% (desconto máximo, preço R$39,80) até 58.4% (desconto mínimo
+#        de 10%, preço R$179,10)"
+#   R$179,10 = 10% de desconto -> confirma o mínimo de 10% ao centavo.
+#   R$ 39,80 = 80% de desconto -> o máximo que a API aceita é 80%, não 70%.
+#   Então vale 10%–80%: medido na conta dele, não lido numa tabela ambígua.
+#
+# DEAL: a página não publica limites. Herda os da campanha do vendedor. ISSO NÃO É
+#   MEDIÇÃO — é a escolha conservadora, e está escrito aqui para ninguém confundir.
+#
+# Isto só vale quando o ML NÃO devolve min/max. Quando ele devolve, a faixa dele
+# manda: é a medição do próprio anúncio.
+# ===========================================================================
+DESC_MIN_PCT = {"PRICE_DISCOUNT": 5.0,  "SELLER_CAMPAIGN": 10.0, "DEAL": 10.0}
+DESC_MAX_PCT = {"PRICE_DISCOUNT": 80.0, "SELLER_CAMPAIGN": 80.0, "DEAL": 80.0}
+
+
+def faixa_da_doc(tipo, preco_lista):
+    """(preco_min, preco_max) permitidos pela DOC quando o ML não devolve faixa.
+
+    preco_max = maior preço aceito = MENOR desconto permitido.
+    preco_min = menor preço aceito = MAIOR desconto permitido.
+    Devolve (None, None) quando não há preço de lista ou o tipo não tem regra."""
+    tipo = (tipo or "").upper()
+    if tipo not in DESC_MIN_PCT:
+        return None, None
+    try:
+        base = float(preco_lista or 0)
+    except (TypeError, ValueError):
+        return None, None
+    if base <= 0:
+        return None, None
+    pmax = round(base * (1 - DESC_MIN_PCT[tipo] / 100.0), 2)
+    pmin = round(base * (1 - DESC_MAX_PCT[tipo] / 100.0), 2)
+    return pmin, pmax
+
+
 def _clamp_preco(preco, cand):
     """Mantém o deal_price dentro da faixa crível [min,max] do candidato (evita 400 CREDIBILITY)."""
     preco = round(float(preco or 0), 2)
@@ -376,10 +435,41 @@ def _gravar_melhor(fila_id, margem, preco):
     except Exception as e:
         print(f"  aviso: não gravei a melhor margem de {fila_id} "
               f"(rode fase_melhor_margem.sql no Supabase): {e}", flush=True)
+def req_put(path, access, body, tent=3):
+    """PUT com a mesma política de retry do post(), inclusive o 423 da doc.
+    Existe por causa do 'Modificar itens' da campanha do vendedor, que é a
+    única forma de trocar o preço sem excluir a participação."""
+    r = None
+    for i in range(tent):
+        r = requests.put(API + path,
+                         headers={"Authorization": "Bearer " + access,
+                                  "Content-Type": "application/json"},
+                         json=body, timeout=25)
+        if r.status_code == 423:
+            time.sleep(2.0 * (i + 1))
+            continue
+        if r.status_code == 429 or r.status_code >= 500:
+            time.sleep(0.6 * (i + 1))
+            continue
+        break
+    try:
+        return r.status_code, r.json()
+    except Exception:
+        return r.status_code, (r.text if r is not None else None)
+
+
 def req_delete(path, access, tent=3):
     r = None
     for i in range(tent):
         r = requests.delete(API + path, headers={"Authorization": "Bearer " + access}, timeout=25)
+        # 423_ENTITY_LOCKED entra aqui por instrução explícita da doc:
+        #   "o item está temporariamente bloqueado para realizar requisições.
+        #    A solicitação pode ser tentada novamente após alguns segundos."
+        # Ele saía como falha definitiva e virava 'erro_post' sem motivo visível.
+        # A espera é maior que a dos outros: a doc fala em segundos, não em ms.
+        if r.status_code == 423:
+            time.sleep(2.0 * (i + 1))
+            continue
         if r.status_code == 429 or r.status_code >= 500:
             time.sleep(0.6 * (i + 1))
             continue
@@ -693,6 +783,22 @@ def sair_das_outras(iid, seller_id, access, manter_pid=None, manter_tipo=None,
 # existiam no momento em que a promoção foi montada.
 TIPOS_SEM_REENTRADA = {"LIGHTNING", "DOD"}
 
+# REMOVER O DESCONTO INDIVIDUAL EM VIGOR PARA CRIAR OUTRO: DESLIGADO.
+#
+# A ideia era que o desconto ativo ocupava o lugar e bloqueava a candidatura do
+# novo. A rodada de 19/ago derrubou isso: o MLB4160427809 teve o desconto ativo
+# removido e o ML recusou o novo IGUAL. E as seis tentativas de restaurar o
+# antigo voltaram 400 — um desconto individual removido não volta pelo mesmo
+# endpoint na mesma rodada.
+#
+# Saldo: 6 anúncios perderam o desconto que tinham e não ganharam nada. Com esta
+# chave desligada eles teriam terminado em 'sem_candidatura_ml' com tudo intacto.
+#
+# Fica aqui, atrás da variável, porque a hipótese pode estar certa e o problema
+# ser outro (janela de propagação, tipo de campanha, vigência). Quando houver
+# medição — e não palpite — é só ligar TROCAR_INDIVIDUAL=1.
+TROCAR_INDIVIDUAL = (os.environ.get("TROCAR_INDIVIDUAL", "0").strip() == "1")
+
 
 def individual_em_vigor(ofertas):
     """O desconto individual que JÁ ESTÁ VALENDO no anúncio, ou None.
@@ -712,6 +818,40 @@ def individual_em_vigor(ofertas):
             continue
         return o
     return None
+
+
+def esperar_saida_individual(iid, access, tentativas=6, espera=2.0):
+    """Espera o DELETE do desconto individual TERMINAR de verdade.
+
+    A doc lista 'restore_requested' como um status do item: "processo pendente de
+    remoção do desconto". O 200 do DELETE só quer dizer que o pedido foi aceito.
+    Postar o desconto novo antes desse processo fechar foi o que produziu seis
+    "No candidates found" seguidos em 19/ago.
+
+    Considera terminado quando, no /seller-promotions/items/{id}, não sobra
+    nenhum PRICE_DISCOUNT em started/pending/sync_requested/restore_requested —
+    ou quando aparece um PRICE_DISCOUNT 'candidate', que é o lugar vago.
+
+    Devolve (pronto: bool, quantas_esperas: int, motivo: str). Nunca levanta:
+    se a consulta falhar, devolve pronto=False e o robô decide sem chutar.
+    """
+    _OCUPADO = {"started", "pending", "sync_requested", "restore_requested"}
+    for n in range(tentativas):
+        time.sleep(espera)
+        try:
+            st, d = rec.get(f"/seller-promotions/items/{iid}?app_version=v2", access)
+        except Exception as e:
+            return False, n + 1, f"não consegui consultar o item ({e})"
+        if not isinstance(d, list):
+            return False, n + 1, f"resposta inesperada do ML (HTTP {st})"
+        pds = [o for o in d if isinstance(o, dict)
+               and (o.get("type") or "").upper() == "PRICE_DISCOUNT"]
+        if any((o.get("status") or "").lower() == "candidate" for o in pds):
+            return True, n + 1, "candidatura de desconto individual disponível"
+        if not any((o.get("status") or "").lower() in _OCUPADO for o in pds):
+            return True, n + 1, "nenhum desconto individual ocupando o item"
+    return False, tentativas, ("o desconto antigo ainda aparece ocupando o item depois de "
+                              f"{tentativas * espera:.0f}s")
 
 
 def restaurar_individual(iid, access, oferta):
@@ -752,7 +892,10 @@ def restaurar_individual(iid, access, oferta):
             return False, f"erro de rede na 2ª tentativa: {e}"
         if scd in (200, 201):
             return True, f"R${float(preco):.2f} (início refeito para hoje, fim mantido)"
-    return False, f"ML recusou a restauração ({scd}) — preço antigo era R${float(preco):.2f}"
+    # O corpo do 400 é a única pista de POR QUE o ML recusa recriar um desconto que
+    # ele mesmo tinha. Sem ele sobra "(400)", que não permite consertar nada.
+    return False, (f"ML recusou a restauração ({scd}) — preço antigo era R${float(preco):.2f} "
+                   f"|| ML disse: {json.dumps(resp, ensure_ascii=False)[:220]}")
 
 
 def reentrar_nas_campanhas(iid, seller_id, access, perdidas):
@@ -803,15 +946,25 @@ def reentrar_nas_campanhas(iid, seller_id, access, perdidas):
             continue
         _preco, _fonte = None, ""
         if t in ("DEAL", "SELLER_CAMPAIGN"):
-            _sug = alvo.get("suggested_discounted_price")
-            _max = alvo.get("max_discounted_price")
-            if _sug not in (None, ""):
-                _preco, _fonte = _sug, "preço sugerido pelo ML"
-            elif _max not in (None, ""):
-                _preco, _fonte = _max, "teto da faixa (menor desconto)"
-            else:
-                nao_voltou.append(f"{rot}({t}: sem preço sugerido nem faixa — refaça no ML)")
-                continue
+            # NÃO REPÕE. Duas razões, as duas escritas:
+            #
+            # 1. O preço anterior não existe em lugar nenhum — participacoes_completas
+            #    guarda id, tipo, offer_id e nome, nunca preço. Qualquer número que eu
+            #    puser aqui é um preço que VOCÊ não escolheu, na sua conta.
+            #
+            # 2. A doc da campanha do vendedor diz que, com a oferta ativa,
+            #    "os preços só podem ser reduzidos"
+            #    ("New deal_price must be lower than current deal_price"). Repor pelo
+            #    sugerido ou pelo teto tem boa chance de ser recusado — e, se for
+            #    aceito, é porque ficou MAIS BARATO que estava. Nas duas saídas eu
+            #    mexo no seu preço sem ordem sua.
+            #
+            # Era isso que a versão anterior fazia. Nunca chegou a acontecer porque
+            # o ML não devolvia sugestão nessas campanhas — dei sorte, não acertei.
+            nao_voltou.append(f"{rot}({t}: quem define o preço aqui é você e eu não guardei "
+                              f"o anterior — refaça no ML para não trocar seu preço por um "
+                              f"que você não escolheu)")
+            continue
         corpo = corpo_post(t, alvo, _preco)
         if not corpo:
             nao_voltou.append(f"{rot}({t}: não sei montar o corpo desse tipo)")
@@ -825,7 +978,8 @@ def reentrar_nas_campanhas(iid, seller_id, access, perdidas):
             det = f" a R${float(_preco):.2f} ({_fonte})" if _preco not in (None, "") else ""
             voltou.append(f"{rot}({t}){det}")
         else:
-            nao_voltou.append(f"{rot}({t}: ML recusou a volta, {scd})")
+            nao_voltou.append(f"{rot}({t}: ML recusou a volta, {scd} — "
+                              f"{json.dumps(resp, ensure_ascii=False)[:160]})")
     return voltou, nao_voltou
 
 
@@ -1059,8 +1213,18 @@ def candidato_individual_da_sugestao(iid, seller_id, preco_lista):
     fx = _faixa_individual(iid, seller_id) or {}
     sem_faixa = (fx.get("sem_faixa") is True) or (fx.get("preco_min") is None
                                                  and fx.get("preco_max") is None)
-    pmin = None if sem_faixa else fx.get("preco_min")
-    pmax = preco_lista if sem_faixa else fx.get("preco_max")
+    if sem_faixa:
+        # ANTES: teto = preço de lista, piso = None (virava R$0,50 lá na frente).
+        # Os dois são impossíveis pela doc: teto no preço de lista significa 0% de
+        # desconto, e a doc exige no mínimo 5%; piso em R$0,50 significa ~99%, e o
+        # máximo é 80%. O log mostrava as duas coisas — "desconto 0%" numa ponta e
+        # margem de -7400% na outra. Agora a faixa sintética obedece a regra escrita.
+        pmin, pmax = faixa_da_doc("PRICE_DISCOUNT", preco_lista)
+        if pmax is None:
+            pmax = preco_lista
+    else:
+        pmin = fx.get("preco_min")
+        pmax = fx.get("preco_max")
     return {"id": fx.get("promocao_id"), "ref_id": fx.get("promocao_ref_id"),
             "type": "PRICE_DISCOUNT", "status": "candidate",
             "name": fx.get("nome") or "Desconto individual",
@@ -1345,14 +1509,18 @@ def processar(fila, access):
             _teto_lista = float(_teto_lista or 0)
         except (TypeError, ValueError):
             _teto_lista = 0
-        if _teto_lista > 0:
+        _pmin_doc, _pmax_doc = faixa_da_doc(tipo, _teto_lista)
+        if _pmax_doc is not None:
             cand = dict(cand)
-            cand["max_discounted_price"] = _teto_lista
+            cand["max_discounted_price"] = _pmax_doc
+            cand["min_discounted_price"] = _pmin_doc
             cand["original_price"] = cand.get("original_price") or _teto_lista
             cand["_sem_faixa"] = True
-            print(f"  ~ {iid}: {tipo} de preço livre e o ML não devolveu faixa — preço sai da "
-                  f"sua margem-alvo; teto = preço de lista R${_teto_lista:.2f}; "
-                  f"a credibilidade quem julga é o ML no envio", flush=True)
+            print(f"  ~ {iid}: {tipo} de preço livre e o ML não devolveu faixa — usando os "
+                  f"limites da DOC ({DESC_MIN_PCT[tipo.upper()]:.0f}% a "
+                  f"{DESC_MAX_PCT[tipo.upper()]:.0f}% de desconto sobre R${_teto_lista:.2f}) "
+                  f"= R${_pmin_doc:.2f}–R${_pmax_doc:.2f}; o preço sai da sua margem-alvo",
+                  flush=True)
     # Preço fixado ganha da margem: é decisão explícita, não conta derivada.
     if not rec.preco_oferta(cand) and (cand.get("min_discounted_price") is not None
                                        or cand.get("max_discounted_price") is not None):
@@ -1543,14 +1711,66 @@ def processar(fila, access):
             saiu_antes += " | ⚠️ DELETE recusado em: " + ", ".join(_falhou)
         print(f"  ~ {iid}: saí de {len(_saiu)} campanha(s) antes de aplicar o desconto individual"
               + (f" | falhou em {len(_falhou)}" if _falhou else ""), flush=True)
-        # O ML não abre candidatura de desconto individual para um anúncio que JÁ TEM
-        # um em vigor — e sair_das_outras, por manter_tipo, protege justamente esse.
-        # Era esta a causa do "No candidates found" do MLB4482673195: o lugar estava
-        # ocupado pelo desconto que nós mesmos preservamos. Para TROCAR o preço, o
-        # antigo tem que sair. Sai agora, imediatamente antes do POST, pra janela sem
-        # desconto ser a menor possível.
+        # HIPÓTESE TESTADA E REPROVADA (19/ago).
+        #
+        # Eu supus que o "No candidates found" acontecia porque o anúncio já tinha um
+        # desconto individual em vigor ocupando o lugar, e que remover o antigo abriria
+        # a candidatura do novo. O teste real diz o contrário: o MLB4160427809 teve o
+        # desconto ativo removido e o ML recusou o novo IGUAL. E as 6 tentativas de
+        # restaurar o antigo voltaram 400 — removido, ele não volta pelo mesmo endpoint.
+        # Seis anúncios ficaram sem o desconto que tinham.
+        #
+        # A causa do "No candidates found" segue DESCONHECIDA. Por isso o padrão é NÃO
+        # tocar no desconto em vigor: relatar que ele existe é tudo que dá pra afirmar.
+        # TROCAR_INDIVIDUAL=1 religa a remoção quando houver medição que a justifique.
         _ind_antigo = individual_em_vigor(ofertas)
-        if _ind_antigo is not None:
+        if _ind_antigo is not None and not TROCAR_INDIVIDUAL:
+            # NÃO destrói o que já existe. Relata, que é o que dá pra afirmar.
+            _pv_ant = None
+            try:
+                _pv_ant = rec.preco_oferta(_ind_antigo)
+            except Exception:
+                _pv_ant = None
+            _txt = (f"R${float(_pv_ant):.2f}" if _pv_ant else "preço não lido")
+            _fim = _ind_antigo.get("finish_date") or "sem fim declarado"
+            saiu_antes += (f" | ⚠️ este anúncio JÁ TEM desconto individual em vigor ({_txt}, até "
+                           f"{_fim}) e eu NÃO mexi nele. Se o ML recusar o novo, é provável que "
+                           f"seja por isso — mas remover o antigo já foi tentado em 19/ago e não "
+                           f"resolveu, só destruiu o desconto. Para trocar o preço, faça no ML.")
+            print(f"  ~ {iid}: já tem desconto individual em vigor ({_txt}, até {_fim}) — "
+                  f"NÃO removi (TROCAR_INDIVIDUAL=0)", flush=True)
+            _ind_antigo = None
+        elif _ind_antigo is not None:
+            # ---- PRÉ-VOO: o preço que vamos pedir CABE na regra? ----
+            # A doc exige desconto entre 5% e 80% no PRICE_DISCOUNT. Se o alvo
+            # estiver fora, o POST é recusa garantida — e destruir o desconto que
+            # existe para tentar algo que já sabemos que falha é o erro de ontem
+            # (MLB4214321589: alvo a 0% de desconto, apagamos o que tinha).
+            _lista_pv = None
+            try:
+                _lista_pv = float(cand.get("original_price") or it.get("price") or 0)
+            except (TypeError, ValueError):
+                _lista_pv = 0
+            _dmin, _dmax = faixa_da_doc("PRICE_DISCOUNT", _lista_pv)
+            _alvo_pv = None
+            try:
+                _alvo_pv = float(ev["pb"])
+            except (TypeError, ValueError, KeyError):
+                _alvo_pv = None
+            if _dmax is not None and _alvo_pv is not None and not (_dmin <= _alvo_pv <= _dmax):
+                _pct = (1 - _alvo_pv / _lista_pv) * 100 if _lista_pv else 0
+                gravar(fila["id"], {"status": "erro", "resultado": (
+                    f"NÃO MEXI EM NADA. O preço-alvo R${_alvo_pv:.2f} dá {_pct:.1f}% de "
+                    f"desconto sobre R${_lista_pv:.2f}, e a doc do ML só aceita entre "
+                    f"{DESC_MIN_PCT['PRICE_DISCOUNT']:.0f}% e {DESC_MAX_PCT['PRICE_DISCOUNT']:.0f}% "
+                    f"(erro buyer_discount_not_in_range). O ML recusaria, e este anúncio JÁ TEM "
+                    f"desconto individual em vigor — não vale destruí-lo para tentar. "
+                    f"Escolha uma margem que caia entre R${_dmin:.2f} e R${_dmax:.2f}.")})
+                print(f"  ! fora_da_faixa_doc {iid}: alvo R${_alvo_pv:.2f} = {_pct:.1f}% de "
+                      f"desconto, fora de {DESC_MIN_PCT['PRICE_DISCOUNT']:.0f}–"
+                      f"{DESC_MAX_PCT['PRICE_DISCOUNT']:.0f}% — NÃO removi o desconto atual",
+                      flush=True)
+                return "fora_da_faixa_doc"
             _pa_ant = None
             try:
                 _pa_ant = rec.preco_oferta(_ind_antigo)
@@ -1568,6 +1788,16 @@ def processar(fila, access):
                                f"{_fim_ant}) pra poder criar o novo")
                 print(f"  ~ {iid}: removi o desconto individual em vigor ({_txt_ant}, até "
                       f"{_fim_ant}) — é o que libera a candidatura do novo", flush=True)
+                # O 200 do DELETE é só o aceite do pedido: a doc lista
+                # 'restore_requested' como "processo pendente de remoção do desconto".
+                # Postar antes disso fechar foi o que deu 6 recusas em 19/ago.
+                _pronto, _voltas, _motivo = esperar_saida_individual(iid, access)
+                saiu_antes += f" | esperei a remoção fechar ({_voltas} consulta(s)): {_motivo}"
+                print(f"  ⏳ {iid}: esperei a remoção fechar — {_voltas} consulta(s), {_motivo}",
+                      flush=True)
+                if not _pronto:
+                    print(f"  ⚠ {iid}: a remoção NÃO fechou a tempo — o POST a seguir tem "
+                          f"chance alta de ser recusado", flush=True)
             else:
                 # Não saiu: não há o que restaurar, e o POST provavelmente será recusado.
                 # Dizer isso agora é melhor que descobrir no erro genérico do ML.
@@ -1575,9 +1805,52 @@ def processar(fila, access):
                       f"(HTTP {_scd_ant}) — o ML deve recusar a criação do novo", flush=True)
                 saiu_antes += f" | ⚠️ não removi o individual em vigor (HTTP {_scd_ant})"
                 _ind_antigo = None
-    sc, resp = post(f"/seller-promotions/items/{iid}?app_version=v2", access, corpo)
+    # ---- CAMPANHA DO VENDEDOR JÁ ATIVA: MODIFICA, não recria ----
+    # Doc /pt_br/campanhas-do-vendedor, "Modificar itens":
+    #     PUT /seller-promotions/items/$ITEM_ID  { promotion_id, promotion_type, deal_price }
+    #     "só é possível modificar itens que pertencem a campanhas com sub_type
+    #      FLEXIBLE_PERCENTAGE"
+    #     oferta ativa: "Os preços só podem ser reduzidos"
+    # É o caminho seguro: não sai de nada, não abre janela sem desconto, não gasta
+    # candidatura. Só serve quando o item JÁ ESTÁ ativo nesta campanha — se ainda é
+    # candidato, entrar é POST mesmo.
+    _put_feito = False
+    if acao == "trocar" and tipo == "SELLER_CAMPAIGN":
+        _ativa_aqui = next((o for o in ofertas if isinstance(o, dict)
+                            and (o.get("type") or "").upper() == "SELLER_CAMPAIGN"
+                            and str(o.get("id") or "") == str(cand.get("id") or "")
+                            and (o.get("status") or "").lower() == "started"), None)
+        if _ativa_aqui is not None:
+            _atual = rec.preco_oferta(_ativa_aqui)
+            _novo = ev["pb"]
+            if _atual is not None and float(_novo) >= float(_atual):
+                # A doc é explícita: "New deal_price must be lower than current deal_price".
+                # Tentar assim é recusa certa; dizer isso é mais útil que gastar a chamada.
+                gravar(fila["id"], {"status": "erro", "resultado": (
+                    f"{aviso_piso}NÃO MEXI. Nesta campanha do vendedor o item já está ativo a "
+                    f"R${float(_atual):.2f} e você pediu R${float(_novo):.2f}. Com a oferta ativa "
+                    f"o ML só aceita REDUZIR o preço (\"New deal_price must be lower than current "
+                    f"deal_price\"). Para subir, é preciso sair da campanha — e isso eu não faço "
+                    f"sozinho.")})
+                print(f"  ! so_reduz {iid}: ativo a R${float(_atual):.2f}, pedido R${float(_novo):.2f} "
+                      f"— a campanha do vendedor só aceita reduzir", flush=True)
+                return "so_reduz"
+            _corpo_put = {"promotion_id": cand.get("id"), "promotion_type": "SELLER_CAMPAIGN",
+                          "deal_price": _clamp_preco(_novo, cand)}
+            sc, resp = req_put(f"/seller-promotions/items/{iid}?app_version=v2", access, _corpo_put)
+            _put_feito = True
+            corpo = _corpo_put
+            print(f"  ~ {iid}: campanha do vendedor JÁ ATIVA — modifiquei por PUT "
+                  f"(R${float(_atual):.2f} -> R${_corpo_put['deal_price']:.2f}), sem sair de nada",
+                  flush=True)
+    if not _put_feito:
+        sc, resp = post(f"/seller-promotions/items/{iid}?app_version=v2", access, corpo)
     ok = sc in (200, 201)
-    if acao == "trocar":
+    if acao == "trocar" and _put_feito:
+        # O PUT não removeu nada e não tem antiga pra sair: o desfecho é só o do PUT.
+        aviso = (" | modifiquei o preço na campanha do vendedor por PUT ✓" if ok
+                 else " | ⚠️ o ML recusou o PUT — nada foi alterado, o anúncio segue como estava")
+    elif acao == "trocar":
         if tipo == "PRICE_DISCOUNT":
             aviso = saiu_antes + (" | entrei no desconto individual ✓" if ok else
                     " | 🚨 ENTRADA RECUSADA DEPOIS DE SAIR — o anúncio está SEM desconto agora. Reveja no painel.")
@@ -1862,15 +2135,19 @@ def main():
               flush=True)
         resumo["reentradas"] = len(REENTRADAS)
     if SEM_DESCONTO_AGORA:
-        print(f"\n🚨 {len(SEM_DESCONTO_AGORA)} anúncio(s) PERDERAM promoção e o robô NÃO conseguiu "
-              f"devolver.", flush=True)
+        # Um anúncio pode entrar aqui DUAS vezes (perdeu o individual E as campanhas).
+        # Contar as linhas dizia "10 anúncios" quando eram 6 — inflar o próprio estrago
+        # não é mais honesto que escondê-lo.
+        _quantos = len({_i for _i, _ in SEM_DESCONTO_AGORA})
+        print(f"\n🚨 {_quantos} anúncio(s) PERDERAM promoção e o robô NÃO conseguiu "
+              f"devolver ({len(SEM_DESCONTO_AGORA)} registro(s)).", flush=True)
         print("   Saíram das campanhas (regra da ML p/ desconto individual), o ML recusou a "
               "entrada, e a volta também não deu.", flush=True)
         for _iid, _campanhas in SEM_DESCONTO_AGORA:
             print(f"      {_iid}: " + ", ".join(_campanhas), flush=True)
         print("   AÇÃO SUA: refaça essas participações no ML. O robô NÃO vai retentar sozinho "
               "(o desfecho é terminal).", flush=True)
-        resumo["sem_desconto_agora"] = len(SEM_DESCONTO_AGORA)
+        resumo["sem_desconto_agora"] = len({_i for _i, _ in SEM_DESCONTO_AGORA})
     if TETO_DO_ML:
         print(f"\n📏 {len(TETO_DO_ML)} item(ns): o ML limita o desconto e enviei o teto dele:", flush=True)
         for _iid, _ped, _ap in TETO_DO_ML:
