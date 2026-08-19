@@ -1321,6 +1321,38 @@ def processar(fila, access):
     # Cair no piso do grupo seria aplicar uma margem que você não pediu — chute com
     # aparência de regra. Melhor um item parado com o motivo escrito do que um desconto
     # no ar com um número que ninguém decidiu.
+    # ---- CAMPANHA DE PREÇO LIVRE SEM FAIXA: mesmo tratamento do desconto individual ----
+    # DEAL e SELLER_CAMPAIGN são as campanhas em que o VENDEDOR define o preço (é o que
+    # o corpo_post já documenta no caso (6): "vendedor define o preço, dentro da faixa
+    # crível"). Quando o ML não devolve faixa NEM preço — como na ARCOS BASE-08-26, que
+    # chegou com price:0, min:null, max:null — o candidato ficava inavaliável e o robô
+    # desistia com 'sem_avaliar'. Mas a falta de faixa é um dado OPCIONAL ausente, não um
+    # impedimento: o mesmo argumento que já vale para o desconto individual.
+    #
+    # O teto vira o preço de lista porque desconto acima do preço cheio não existe — isso
+    # é fato, não estimativa. O piso fica livre e quem julga a credibilidade é o ML, na
+    # resposta do POST. Nenhuma margem é inventada aqui: o preço continua saindo da margem
+    # que VOCÊ escolheu na tela, e sem escolha sua o robô ainda para em 'sem_preco_alvo'.
+    #
+    # LIGHTNING/DOD ficam fora: o relâmpago tem bloco próprio acima e depende da faixa do
+    # ML para a credibilidade.
+    if (tipo in ("DEAL", "SELLER_CAMPAIGN")
+            and not rec.preco_oferta(cand)
+            and cand.get("min_discounted_price") is None
+            and cand.get("max_discounted_price") is None):
+        _teto_lista = cand.get("original_price") or it.get("price")
+        try:
+            _teto_lista = float(_teto_lista or 0)
+        except (TypeError, ValueError):
+            _teto_lista = 0
+        if _teto_lista > 0:
+            cand = dict(cand)
+            cand["max_discounted_price"] = _teto_lista
+            cand["original_price"] = cand.get("original_price") or _teto_lista
+            cand["_sem_faixa"] = True
+            print(f"  ~ {iid}: {tipo} de preço livre e o ML não devolveu faixa — preço sai da "
+                  f"sua margem-alvo; teto = preço de lista R${_teto_lista:.2f}; "
+                  f"a credibilidade quem julga é o ML no envio", flush=True)
     # Preço fixado ganha da margem: é decisão explícita, não conta derivada.
     if not rec.preco_oferta(cand) and (cand.get("min_discounted_price") is not None
                                        or cand.get("max_discounted_price") is not None):
@@ -1438,9 +1470,12 @@ def processar(fila, access):
     # resultado (nos dois desfechos, simulado e real) e aparece no painel.
     aviso_piso = ""
     if abaixo_do_piso:
-        aviso_piso = (f"⚠️ ABAIXO DO PISO — margem {ev['margem']:.1f}% < piso {piso:.0f}% "
+        # DUAS casas, não uma. A comparação usa a margem cheia (17,96) e a impressão
+        # arredondava para 18,0 — saía "margem 18.0% abaixo do piso 18%", que lido em voz
+        # alta é uma contradição. A decisão sempre esteve certa; era o texto que mentia.
+        aviso_piso = (f"⚠️ ABAIXO DO PISO — margem {ev['margem']:.2f}% < piso {piso:.0f}% "
                       f"(aplicado por decisão manual no Acelerar) || ")
-        print(f"  ⚠ {iid}: margem {ev['margem']:.1f}% abaixo do piso {piso:.0f}% "
+        print(f"  ⚠ {iid}: margem {ev['margem']:.2f}% abaixo do piso {piso:.0f}% "
               f"— aplicando porque IGNORAR_PISO=1", flush=True)
     # cofinanciadas que exigem data no POST (ex.: "OFERTAS RELÂMPAGOS IMPERDÍVEIS" -> erro START_DATE):
     # o candidato não traz as datas; pega do DETALHE da promoção. As datas têm que ir em formato
