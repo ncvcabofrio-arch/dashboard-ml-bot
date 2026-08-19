@@ -20,7 +20,7 @@ on:
         description: "Piso (%) dos itens 'Padrão' — o MESMO usado na simulação"
         type: string
         required: false
-        default: "17"
+        default: "18"
       item_id:
         description: "Aplicar só ESTE anúncio (vazio = todos os aprovados da conta)"
         type: string
@@ -41,6 +41,16 @@ on:
       # decide é você, anúncio por anúncio, vendo a margem de cada campanha.
       ignorar_piso:
         description: "SIM = aplica MESMO abaixo do piso (só o Acelerar manda isso; a margem fica registrada)"
+        type: choice
+        options: ["NAO", "SIM"]
+        default: "NAO"
+      # DESLIGADO POR PADRAO, e nao e excesso de cuidado: em 19/ago esta rotina
+      # removeu o desconto individual de 6 anuncios, o ML recusou os novos e a
+      # restauracao falhou 6/6. O codigo agora ESPERA a remocao assincrona fechar
+      # (status restore_requested da doc) e faz pre-voo da faixa 5-80%, mas isso
+      # ainda NAO foi testado contra o ML de verdade. Ligue com item_id preenchido.
+      trocar_individual:
+        description: "SIM = remove o desconto individual em vigor pra criar o novo (TESTE: use com item_id!)"
         type: choice
         options: ["NAO", "SIM"]
         default: "NAO"
@@ -72,4 +82,6 @@ jobs:
           MARGEM_MIN:  ${{ github.event.inputs.margem_min || '17' }}
           # só o literal 'SIM' liga; qualquer outra coisa (inclusive vazio) mantém o piso
           IGNORAR_PISO: ${{ github.event.inputs.ignorar_piso == 'SIM' && '1' || '0' }}
+          # mesma regra do IGNORAR_PISO: so o literal 'SIM' liga
+          TROCAR_INDIVIDUAL: ${{ github.event.inputs.trocar_individual == 'SIM' && '1' || '0' }}
         run: python repricer_promo_aplicar.py
