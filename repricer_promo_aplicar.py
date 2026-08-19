@@ -470,6 +470,19 @@ LEITURA_PARALELA = int(os.environ.get("LEITURA_PARALELA", "6"))
 # o desconto entrou — mas é dinheiro diferente do combinado, e antes não aparecia
 # em lugar nenhum: ia junto com os "✓ CONFIRMADO" e ninguém via.
 PRECO_DIVERGENTE = []
+# Anúncios que saíram das campanhas e tiveram a entrada RECUSADA logo depois:
+# ficaram SEM DESCONTO NENHUM. É o pior desfecho possível de uma rodada e até
+# agora não aparecia no log — só num campo de texto no banco.
+SEM_DESCONTO_AGORA = []
+# Participações refeitas com sucesso depois de uma entrada recusada. Ficam num
+# relatório à parte porque são o oposto de um problema — mas o dono precisa saber
+# que o robô mexeu duas vezes no mesmo anúncio na mesma rodada.
+REENTRADAS = []
+# Itens em que o ML NÃO permite o preço pedido: max_discounted_price do anúncio é
+# menor que o alvo da tela, e _clamp_preco cortou antes do envio. A causa aqui é
+# MEDIDA (veio do próprio candidato), então fica numa lista separada — misturar
+# isso com divergência de verdade era o que produzia diagnóstico inventado.
+TETO_DO_ML = []
 _CAMPANHAS_CACHE = {}                 # seller_id -> campanhas (uma leitura por rodada)
 _CAMPANHAS_LOCK = threading.Lock()
 
@@ -642,12 +655,17 @@ def participacoes_completas(iid, seller_id, access, ofertas=None):
                         "status": (o.get("status") or "started"),
                         "nivel_item": True})
     return achadas
-def sair_das_outras(iid, seller_id, access, manter_pid=None, manter_tipo=None):
+def sair_das_outras(iid, seller_id, access, manter_pid=None, manter_tipo=None,
+                    saiu_dicts=None):
     """SAI de TODAS as promoções em que o item está ATIVO, exceto a que queremos manter.
     Usa o caminho CONFIÁVEL da doc (rec.participacoes_ativas): users/{seller} cruzado com
     promotions/{id}/items?item_id=... — porque /seller-promotions/items/{id} NÃO traz as
     ativas de campanha cofinanciada/marketplace (só candidatas). Sai por TIPO, uma a uma.
-    Retorna (saiu[], falhou[], restantes[])."""
+    Retorna (saiu[], falhou[], restantes[]).
+
+    saiu_dicts: se você passar uma lista, ela recebe os DICIONÁRIOS das participações
+    removidas (não só os rótulos). É o que torna possível desfazer a saída quando a
+    entrada seguinte é recusada — sem isso, o que foi removido vira texto e some."""
     ativas = participacoes_completas(iid, seller_id, access)
     saiu, falhou, restantes = [], [], []
     for p in ativas:
@@ -659,6 +677,8 @@ def sair_das_outras(iid, seller_id, access, manter_pid=None, manter_tipo=None):
         rot = f"{p.get('name') or p.get('type')}({p.get('type')}:{scd})"
         if scd in (200, 201):
             saiu.append(rot)
+            if saiu_dicts is not None:
+                saiu_dicts.append(p)
         else:
             falhou.append(rot)
             restantes.append(p)      # só o que o ML RECUSOU remover
@@ -669,6 +689,146 @@ def sair_das_outras(iid, seller_id, access, manter_pid=None, manter_tipo=None):
     # depois do tempo de propagação. Então 'restantes' passa a ser o que de fato ficou
     # para trás: as promoções cujo DELETE foi RECUSADO. Mais honesto e de graça.
     return saiu, falhou, restantes
+# Tipos cuja reentrada NÃO dá para reconstituir: exigem estoque/datas que só
+# existiam no momento em que a promoção foi montada.
+TIPOS_SEM_REENTRADA = {"LIGHTNING", "DOD"}
+
+
+def individual_em_vigor(ofertas):
+    """O desconto individual que JÁ ESTÁ VALENDO no anúncio, ou None.
+
+    Usa exatamente o mesmo critério de 'ativa' que participacoes_completas
+    (rec.eh_ativa) — de propósito. Um segundo critério aqui significaria que o
+    robô considera o mesmo desconto ativo num lugar e inativo no outro."""
+    for o in (ofertas or []):
+        if not isinstance(o, dict):
+            continue
+        if (o.get("type") or "").upper() != "PRICE_DISCOUNT":
+            continue
+        try:
+            if not rec.eh_ativa(o):
+                continue
+        except Exception:
+            continue
+        return o
+    return None
+
+
+def restaurar_individual(iid, access, oferta):
+    """Recria o desconto individual removido, com o MESMO preço e as MESMAS datas.
+
+    Só é chamada quando o DELETE do antigo devolveu 200/201: existe prova de que
+    havia algo ali. Sem essa prova o robô não recria nada — inventar um desconto
+    que não existia seria pior que o problema que estamos consertando.
+
+    Se o ML recusar por causa da data de início (que ficou no passado), tenta uma
+    segunda vez com início hoje e o MESMO fim. Retorna (ok, descricao)."""
+    preco = None
+    try:
+        preco = rec.preco_oferta(oferta)
+    except Exception:
+        preco = None
+    if preco in (None, "") or float(preco) <= 0:
+        return False, "não sei o preço que o desconto antigo tinha"
+    corpo = {"deal_price": round(float(preco), 2), "promotion_type": "PRICE_DISCOUNT"}
+    ini, fim = oferta.get("start_date"), oferta.get("finish_date")
+    if ini:
+        corpo["start_date"] = ini
+    if fim:
+        corpo["finish_date"] = fim
+    try:
+        scd, resp = post(f"/seller-promotions/items/{iid}?app_version=v2", access, corpo)
+    except Exception as e:
+        return False, f"erro de rede ao restaurar: {e}"
+    if scd in (200, 201):
+        return True, f"R${float(preco):.2f} (datas originais)"
+    # 2ª tentativa: a data de início já passou. Recomeça hoje, mantendo o fim.
+    if ini:
+        hoje = (datetime.now(timezone.utc) - timedelta(hours=3)).strftime("%Y-%m-%d")
+        corpo["start_date"] = hoje + "T00:00:00"
+        try:
+            scd, resp = post(f"/seller-promotions/items/{iid}?app_version=v2", access, corpo)
+        except Exception as e:
+            return False, f"erro de rede na 2ª tentativa: {e}"
+        if scd in (200, 201):
+            return True, f"R${float(preco):.2f} (início refeito para hoje, fim mantido)"
+    return False, f"ML recusou a restauração ({scd}) — preço antigo era R${float(preco):.2f}"
+
+
+def reentrar_nas_campanhas(iid, seller_id, access, perdidas):
+    """DESFAZ a saída: refaz as participações removidas quando a entrada no desconto
+    individual foi recusada logo depois. Objetivo é devolver o anúncio ao estado
+    anterior — não melhorá-lo.
+
+    'perdidas' são os dicionários que sair_das_outras removeu com 200/201.
+    Retorna (voltou[], nao_voltou[]) com rótulos legíveis.
+
+    O preço não vem de lugar nenhum guardado: participacoes_completas não registra
+    preço. Para os tipos em que o preço é do ML isso não importa (o corpo é só
+    id+tipo). Para DEAL/SELLER_CAMPAIGN o robô usa o SUGERIDO do ML e, na falta
+    dele, o TETO da faixa — o menor desconto possível, que é a escolha de menor
+    risco de margem. Qual número foi usado sai escrito no log."""
+    voltou, nao_voltou = [], []
+    if not perdidas:
+        return voltou, nao_voltou
+    # relê as candidaturas AGORA: depois do DELETE o ML costuma reabrir a candidatura
+    # da campanha de onde o item saiu, e é dela que sai a faixa de preço válida.
+    try:
+        ofertas, _org = ofertas_das_duas_fontes(iid, seller_id, access)
+    except Exception as e:
+        for p in perdidas:
+            nao_voltou.append(f"{p.get('name') or p.get('type')}(não consegui reler as ofertas: {e})")
+        return voltou, nao_voltou
+    ofertas = ofertas or []
+    for p in perdidas:
+        t = (p.get("type") or "").upper()
+        rot = p.get("name") or t
+        if t in TIPOS_SEM_REENTRADA:
+            nao_voltou.append(f"{rot}({t}: exige estoque/data — refaça no ML)")
+            continue
+        # acha a candidatura correspondente: por id quando existe, por tipo nos
+        # casos de nível de item (onde promotion_id costuma vir nulo).
+        alvo = None
+        for o in ofertas:
+            if not isinstance(o, dict):
+                continue
+            if (o.get("type") or "").upper() != t:
+                continue
+            if p.get("promotion_id") and str(o.get("id") or "") != str(p.get("promotion_id")):
+                continue
+            alvo = o
+            break
+        if alvo is None:
+            nao_voltou.append(f"{rot}({t}: o ML não oferece mais candidatura)")
+            continue
+        _preco, _fonte = None, ""
+        if t in ("DEAL", "SELLER_CAMPAIGN"):
+            _sug = alvo.get("suggested_discounted_price")
+            _max = alvo.get("max_discounted_price")
+            if _sug not in (None, ""):
+                _preco, _fonte = _sug, "preço sugerido pelo ML"
+            elif _max not in (None, ""):
+                _preco, _fonte = _max, "teto da faixa (menor desconto)"
+            else:
+                nao_voltou.append(f"{rot}({t}: sem preço sugerido nem faixa — refaça no ML)")
+                continue
+        corpo = corpo_post(t, alvo, _preco)
+        if not corpo:
+            nao_voltou.append(f"{rot}({t}: não sei montar o corpo desse tipo)")
+            continue
+        try:
+            scd, resp = post(f"/seller-promotions/items/{iid}?app_version=v2", access, corpo)
+        except Exception as e:
+            nao_voltou.append(f"{rot}({t}: erro de rede {e})")
+            continue
+        if scd in (200, 201):
+            det = f" a R${float(_preco):.2f} ({_fonte})" if _preco not in (None, "") else ""
+            voltou.append(f"{rot}({t}){det}")
+        else:
+            nao_voltou.append(f"{rot}({t}: ML recusou a volta, {scd})")
+    return voltou, nao_voltou
+
+
 def executar_sair(fila, iid, ofertas, access):
     """SAIR — 1ª PASSADA: sai de cada promoção em que o item participa (status started).
     NÃO confere agora (o ML leva segundos pra propagar): o sucesso é o 200 do DELETE.
@@ -775,11 +935,21 @@ def confirmar_pos_entrada(fila, access):
         # saiu carimbado com ✓. Continua sendo tratado como aplicado, porque o desconto
         # existe de verdade; mas agora aparece, em vez de sumir no meio dos acertos.
         try:
+            _pedido = fila.get("_preco_pedido")
             if pv is not None and alvo not in (None, "") and abs(float(pv) - float(alvo)) > float(alvo) * 0.01:
+                # O ML entregou preço diferente do que ENVIAMOS. Isto sim é inexplicado.
                 PRECO_DIVERGENTE.append((iid, float(alvo), float(pv)))
-                nota = (f"⚠️ APLICADO EM PREÇO DIFERENTE DO ALVO — cliente paga R${float(pv):.2f}, "
-                        f"alvo era R${float(alvo):.2f} (diferença R${float(alvo) - float(pv):.2f}). "
-                        f"Causa provável: preço propagado de anúncio irmão sincronizado.")
+                nota = (f"⚠️ O ML APLICOU PREÇO DIFERENTE DO QUE ENVIEI — cliente paga "
+                        f"R${float(pv):.2f}, enviei R${float(alvo):.2f} "
+                        f"(diferença R${float(alvo) - float(pv):.2f}). NÃO MEDI A CAUSA. "
+                        f"Hipótese a conferir: preço propagado de anúncio irmão sincronizado.")
+            elif _pedido is not None:
+                # Preço obedecido. A diferença está entre o PEDIDO da tela e o teto do
+                # anúncio, e essa causa foi medida no envio — não é erro de aplicação.
+                TETO_DO_ML.append((iid, float(_pedido), float(alvo)))
+                nota += (f" || TETO DO ML: você pediu R${float(_pedido):.2f}, mas o ML só "
+                         f"aceita desconto até R${float(alvo):.2f} neste anúncio "
+                         f"(max_discounted_price) — enviei o teto")
         except (TypeError, ValueError):
             pass
     elif (pv is not None) or (conf_started is False):
@@ -1325,20 +1495,88 @@ def processar(fila, access):
     # sem desconto nenhum. Se o POST for recusado nesse intervalo, ele fica SEM desconto
     # até você agir — por isso esse caso é gritado no log e no resultado, não escondido.
     saiu_antes = ""
+    _saiu_nomes = []          # nomes das campanhas de onde ele REALMENTE saiu (DELETE 200)
+    _saiu_dicts = []          # as participações inteiras, pra poder desfazer a saída
+    _ind_antigo = None        # o desconto individual que estava em vigor e foi removido
     if acao == "trocar" and tipo == "PRICE_DISCOUNT":
         _saiu, _falhou, _rest = sair_das_outras(iid, str(fila.get("seller_id") or ""), access,
-                                                manter_tipo="PRICE_DISCOUNT")
+                                                manter_tipo="PRICE_DISCOUNT",
+                                                saiu_dicts=_saiu_dicts)
+        _saiu_nomes = list(_saiu)
         saiu_antes = f" | saí de {len(_saiu)} antiga(s) ANTES de entrar (regra da ML p/ desconto individual)"
         if _falhou:
             saiu_antes += " | ⚠️ DELETE recusado em: " + ", ".join(_falhou)
         print(f"  ~ {iid}: saí de {len(_saiu)} campanha(s) antes de aplicar o desconto individual"
               + (f" | falhou em {len(_falhou)}" if _falhou else ""), flush=True)
+        # O ML não abre candidatura de desconto individual para um anúncio que JÁ TEM
+        # um em vigor — e sair_das_outras, por manter_tipo, protege justamente esse.
+        # Era esta a causa do "No candidates found" do MLB4482673195: o lugar estava
+        # ocupado pelo desconto que nós mesmos preservamos. Para TROCAR o preço, o
+        # antigo tem que sair. Sai agora, imediatamente antes do POST, pra janela sem
+        # desconto ser a menor possível.
+        _ind_antigo = individual_em_vigor(ofertas)
+        if _ind_antigo is not None:
+            _pa_ant = None
+            try:
+                _pa_ant = rec.preco_oferta(_ind_antigo)
+            except Exception:
+                _pa_ant = None
+            _scd_ant, _b_ant = remover_participacao(
+                iid, {"type": "PRICE_DISCOUNT",
+                      "promotion_id": _ind_antigo.get("id"),
+                      "offer_id": _ind_antigo.get("offer_id") or _ind_antigo.get("ref_id")},
+                access)
+            if _scd_ant in (200, 201):
+                _txt_ant = (f"R${float(_pa_ant):.2f}" if _pa_ant else "preço não lido")
+                _fim_ant = _ind_antigo.get("finish_date") or "sem fim declarado"
+                saiu_antes += (f" | removi o desconto individual em vigor ({_txt_ant}, até "
+                               f"{_fim_ant}) pra poder criar o novo")
+                print(f"  ~ {iid}: removi o desconto individual em vigor ({_txt_ant}, até "
+                      f"{_fim_ant}) — é o que libera a candidatura do novo", flush=True)
+            else:
+                # Não saiu: não há o que restaurar, e o POST provavelmente será recusado.
+                # Dizer isso agora é melhor que descobrir no erro genérico do ML.
+                print(f"  ⚠ {iid}: NÃO consegui remover o desconto individual em vigor "
+                      f"(HTTP {_scd_ant}) — o ML deve recusar a criação do novo", flush=True)
+                saiu_antes += f" | ⚠️ não removi o individual em vigor (HTTP {_scd_ant})"
+                _ind_antigo = None
     sc, resp = post(f"/seller-promotions/items/{iid}?app_version=v2", access, corpo)
     ok = sc in (200, 201)
     if acao == "trocar":
         if tipo == "PRICE_DISCOUNT":
             aviso = saiu_antes + (" | entrei no desconto individual ✓" if ok else
                     " | 🚨 ENTRADA RECUSADA DEPOIS DE SAIR — o anúncio está SEM desconto agora. Reveja no painel.")
+            # Este aviso existia, mas viajava só até o campo 'resultado' no banco. Quem
+            # lia o log da rodada não tinha como distinguir o anúncio que perdeu 3
+            # campanhas do que não perdeu nenhuma: os dois imprimiam a mesma linha de
+            # desfecho. Agora o caso grave grita na hora e com nome das perdas.
+            if (not ok) and _ind_antigo is not None:
+                # Primeiro devolve o desconto individual: é o que o cliente estava
+                # pagando até segundos atrás, e é o de maior impacto no preço.
+                _rok, _rtxt = restaurar_individual(iid, access, _ind_antigo)
+                if _rok:
+                    aviso += f" | ↩️ RESTAUREI o desconto individual anterior: {_rtxt}"
+                    print(f"  ↩️ {iid}: restaurei o desconto individual anterior — {_rtxt}",
+                          flush=True)
+                else:
+                    SEM_DESCONTO_AGORA.append((iid, [f"desconto individual anterior ({_rtxt})"]))
+                    aviso += f" | 🚨 NÃO RESTAUREI o desconto individual anterior: {_rtxt}"
+                    print(f"  🚨 {iid}: NÃO consegui restaurar o desconto individual anterior "
+                          f"— {_rtxt}", flush=True)
+            if (not ok) and _saiu_nomes:
+                print(f"  🚨 {iid}: SAÍ de {len(_saiu_nomes)} campanha(s) e a entrada foi RECUSADA "
+                      f"— desfazendo a saída agora. Tinha: " + ", ".join(_saiu_nomes), flush=True)
+                _voltou, _nvoltou = reentrar_nas_campanhas(
+                    iid, str(fila.get("seller_id") or ""), access, _saiu_dicts)
+                if _voltou:
+                    REENTRADAS.append((iid, list(_voltou)))
+                    aviso += " | ↩️ DESFIZ A SAÍDA: " + ", ".join(_voltou)
+                    print(f"  ↩️ {iid}: reentrou em {len(_voltou)} — " + ", ".join(_voltou), flush=True)
+                if _nvoltou:
+                    SEM_DESCONTO_AGORA.append((iid, list(_nvoltou)))
+                    aviso += " | 🚨 NÃO CONSEGUI DEVOLVER: " + ", ".join(_nvoltou)
+                    print(f"  🚨 {iid}: NÃO consegui devolver {len(_nvoltou)} — "
+                          + ", ".join(_nvoltou) + " — esse anúncio precisa de você.", flush=True)
         elif ok:
             # NÃO saímos das antigas AINDA. A rede antiga fica de pé até o sale_price CONFIRMAR
             # (2ª passada / reconferência da fila) que a nova está no ar. Assim o anúncio NUNCA
@@ -1392,7 +1630,10 @@ def processar(fila, access):
                 return "ja_ativa"
             motivo = ("O ML respondeu \"No candidates found for item\" e o preço atual "
                       + (f"(R${float(_pv):.2f}) " if _pv is not None else "(não consegui ler) ")
-                      + "NÃO é o alvo. Aí é elegibilidade mesmo: retentar não resolve.")
+                      + "NÃO é o alvo. NÃO é conclusão de inelegibilidade: essa resposta "
+                        "também aparece quando o lugar já está ocupado. Se o anúncio tinha "
+                        "desconto individual em vigor, o robô removeu antes de pedir — veja "
+                        "acima neste mesmo texto se isso aconteceu. Retentar igual não resolve.")
             cod_erro = "sem_candidatura_ml"
         elif "CREDIBILITY" in _t:
             # a doc do desconto individual chama isso de error_credibility_price:
@@ -1539,9 +1780,20 @@ def main():
             access = acessos.get(str(f["seller_id"]))
             st1, res1 = res1_mem.get(f["id"], ("", ""))   # da 1ª passada, sem reler o banco
             f["resultado"] = res1
-            # sem preco_alvo (promoção individual), a referência é o preço que ELE aplicou
+            # A referência da 2ª passada é o preço que o aplicador REALMENTE ENVIOU ao
+            # ML — não o que a tela pediu. Os dois divergem sempre que _clamp_preco
+            # encaixou o pedido na faixa do anúncio. Comparar contra o pedido fazia um
+            # item obediente sair marcado como divergente, com uma causa inventada.
+            # O pedido original fica guardado à parte pra o corte do teto ser relatado
+            # como o que ele é: limite do ML, medido no envio.
             _pa = preco_ap_mem.get(f["id"])
-            if _pa is not None and f.get("preco_alvo") in (None, ""):
+            if _pa is not None:
+                _pedido = f.get("preco_alvo")
+                try:
+                    if _pedido not in (None, "") and abs(float(_pedido) - float(_pa)) > 0.005:
+                        f["_preco_pedido"] = float(_pedido)
+                except (TypeError, ValueError):
+                    pass
                 f["preco_alvo"] = _pa
             if st1 != "aplicada":
                 return (f["id"], None)                     # 1ª passada falhou — não sobrescreve o erro
@@ -1565,12 +1817,40 @@ def main():
             else:
                 txt = (res1_mem.get(f["id"], ("", ""))[1]) or f.get("resultado")
             registrar_retry(f, code, txt)
+    if REENTRADAS:
+        print(f"\n↩️  {len(REENTRADAS)} anúncio(s) tiveram a saída DESFEITA: o ML recusou o "
+              f"desconto individual e o robô refez as participações.", flush=True)
+        for _iid, _campanhas in REENTRADAS:
+            print(f"      {_iid}: voltou para {len(_campanhas)} — " + ", ".join(_campanhas), flush=True)
+        print("      Onde aparece um preço, ele NÃO é o preço anterior (esse não fica guardado "
+              "em lugar nenhum): é o sugerido pelo ML ou o teto da faixa. Confira se importa.",
+              flush=True)
+        resumo["reentradas"] = len(REENTRADAS)
+    if SEM_DESCONTO_AGORA:
+        print(f"\n🚨 {len(SEM_DESCONTO_AGORA)} anúncio(s) PERDERAM promoção e o robô NÃO conseguiu "
+              f"devolver.", flush=True)
+        print("   Saíram das campanhas (regra da ML p/ desconto individual), o ML recusou a "
+              "entrada, e a volta também não deu.", flush=True)
+        for _iid, _campanhas in SEM_DESCONTO_AGORA:
+            print(f"      {_iid}: " + ", ".join(_campanhas), flush=True)
+        print("   AÇÃO SUA: refaça essas participações no ML. O robô NÃO vai retentar sozinho "
+              "(o desfecho é terminal).", flush=True)
+        resumo["sem_desconto_agora"] = len(SEM_DESCONTO_AGORA)
+    if TETO_DO_ML:
+        print(f"\n📏 {len(TETO_DO_ML)} item(ns): o ML limita o desconto e enviei o teto dele:", flush=True)
+        for _iid, _ped, _ap in TETO_DO_ML:
+            print(f"      {_iid}: você pediu R${_ped:.2f} | teto do ML R${_ap:.2f} "
+                  f"(R${_ped - _ap:.2f} a menos do que você queria cobrar)", flush=True)
+        print("      Causa MEDIDA no envio (max_discounted_price do anúncio). "
+              "Não é erro: é o limite do ML. Pra cobrar mais, o caminho é o preço cheio.", flush=True)
+        resumo["teto_do_ml"] = len(TETO_DO_ML)
     if PRECO_DIVERGENTE:
-        print(f"\n⚠️  {len(PRECO_DIVERGENTE)} item(ns) confirmaram em preço DIFERENTE do alvo:", flush=True)
+        print(f"\n⚠️  {len(PRECO_DIVERGENTE)} item(ns): o ML aplicou preço DIFERENTE do que enviei:", flush=True)
         for _iid, _alvo, _pv in PRECO_DIVERGENTE:
-            print(f"      {_iid}: alvo R${_alvo:.2f} -> cliente paga R${_pv:.2f} "
+            print(f"      {_iid}: enviei R${_alvo:.2f} -> cliente paga R${_pv:.2f} "
                   f"(diferença R${_alvo - _pv:.2f})", flush=True)
-        print("      Causa provável: preço propagado de anúncio irmão sincronizado.", flush=True)
+        print("      NÃO MEDI A CAUSA. Hipótese a conferir: preço propagado de irmão sincronizado.",
+              flush=True)
         resumo["preco_divergente"] = len(PRECO_DIVERGENTE)
     print("resumo:", json.dumps(resumo, ensure_ascii=False), flush=True)
     grava_status("concluido", json.dumps(resumo, ensure_ascii=False))
