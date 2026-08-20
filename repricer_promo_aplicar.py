@@ -807,7 +807,7 @@ def individual_em_vigor(ofertas):
     return None
 
 
-def esperar_saida_individual(iid, access, tentativas=6, espera=2.0):
+def esperar_saida_individual(iid, access, tentativas=9, espera=2.0):
     """Espera o DELETE do desconto individual TERMINAR de verdade.
 
     A doc lista 'restore_requested' como um status do item: "processo pendente de
@@ -822,7 +822,16 @@ def esperar_saida_individual(iid, access, tentativas=6, espera=2.0):
     Devolve (pronto: bool, quantas_esperas: int, motivo: str). Nunca levanta:
     se a consulta falhar, devolve pronto=False e o robô decide sem chutar.
     """
+    # SO A CANDIDATURA E PROVA. Medido em 20/ago, tres trocas:
+    #   MLB4674410371  5 consultas, "nenhum ocupando"        -> aplicou
+    #   MLB6762178464  5 consultas, "candidatura disponivel" -> aplicou
+    #   MLB6762374998  3 consultas, "nenhum ocupando"        -> RECUSADO
+    # "Nenhum ocupando" e ambiguo: pode ser "terminou" ou "ainda nao apareceu
+    # nada na lista". O terceiro saiu da espera em 6 segundos por causa dessa
+    # leitura fraca e levou "No candidates found" no POST e na restauracao.
+    # Agora so a presenca de um PRICE_DISCOUNT 'candidate' encerra a espera.
     _OCUPADO = {"started", "pending", "sync_requested", "restore_requested"}
+    _vazio_desde = None
     for n in range(tentativas):
         time.sleep(espera)
         try:
@@ -836,7 +845,13 @@ def esperar_saida_individual(iid, access, tentativas=6, espera=2.0):
         if any((o.get("status") or "").lower() == "candidate" for o in pds):
             return True, n + 1, "candidatura de desconto individual disponível"
         if not any((o.get("status") or "").lower() in _OCUPADO for o in pds):
-            return True, n + 1, "nenhum desconto individual ocupando o item"
+            # lugar vago, mas o ML ainda nao reabriu a candidatura. Isso NAO
+            # basta: espera mais, e so aceita se persistir ate o fim.
+            if _vazio_desde is None:
+                _vazio_desde = n + 1
+    if _vazio_desde is not None:
+        return True, tentativas, (f"nenhum desconto individual ocupando o item (vago desde a "
+                                  f"{_vazio_desde}ª consulta, mas o ML não reabriu candidatura)")
     return False, tentativas, ("o desconto antigo ainda aparece ocupando o item depois de "
                               f"{tentativas * espera:.0f}s")
 
@@ -857,6 +872,9 @@ def restaurar_individual(iid, access, oferta):
         preco = None
     if preco in (None, "") or float(preco) <= 0:
         return False, "não sei o preço que o desconto antigo tinha"
+    # A restauracao levava "No candidates found" pelo mesmo motivo do POST novo:
+    # recriar antes de o ML reabrir a candidatura. Espera primeiro.
+    esperar_saida_individual(iid, access)
     corpo = {"deal_price": round(float(preco), 2), "promotion_type": "PRICE_DISCOUNT"}
     ini, fim = oferta.get("start_date"), oferta.get("finish_date")
     if ini:
