@@ -2,10 +2,23 @@
 # Substitui o "Sincronizar custos Ideris", que ja esta desativado.
 # Grava custo e nome na tabela 'produtos' e roda backfill_custos().
 name: BI — custos (BaseLinker)
-
 on:
   schedule:
-    - cron: '0 9 * * *'          # 06:00 de Brasilia (a vaga que era do Ideris)
+    # DE UMA VEZ POR DIA PARA DE HORA EM HORA (20/ago).
+    #
+    # POR QUE MUDOU
+    #   O custo do CX380 passou de R$434,93 para R$1.217,55 numa rodada. O
+    #   desconto daquele anuncio tinha sido aplicado com o custo antigo e ficou
+    #   no ar com margem negativa sem ninguem perceber. Com atualizacao diaria,
+    #   a janela em que o robo de promocoes usa um custo velho chega a 24h.
+    #   De hora em hora, a janela cai para 1h.
+    #
+    # O QUE ISTO NAO RESOLVE
+    #   Desconto JA APLICADO nao e recalculado quando o custo muda — nem a cada
+    #   hora. Isto encurta a janela de erro novo; nao conserta o erro antigo.
+    #   Para isso e preciso uma conferencia dos descontos ativos contra o custo
+    #   atual, que e outra rotina.
+    - cron: '0 * * * *'          # toda hora cheia (UTC)
   workflow_dispatch:
     inputs:
       dry_run:
@@ -18,24 +31,27 @@ on:
         description: "Origem do modelo. Vazio = nao mexe na coluna. Ex.: feature:Modelo"
         required: false
         default: ''
-
 concurrency:
+  # MANTIDO cancel-in-progress: false DE PROPOSITO.
+  # O GitHub ja limita a fila a UMA execucao pendente (as anteriores sao
+  # descartadas), entao nao ha empilhamento. E cancelar no meio deixaria a
+  # tabela 'produtos' com parte dos SKUs atualizados e parte nao — pior que
+  # esperar. Se uma rodada passar de 60 min, ela simplesmente atrasa a
+  # seguinte; nada quebra.
   group: sync-custos
   cancel-in-progress: false
-
 jobs:
   sync:
     runs-on: ubuntu-latest
+    # Corta uma rodada travada antes que ela atrapalhe a proxima hora.
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
       - name: Instalar dependencias
         run: pip install requests supabase
-
       - name: Sincronizar custos da BaseLinker
         env:
           BASELINKER_TOKEN: ${{ secrets.BASELINKER_TOKEN }}
