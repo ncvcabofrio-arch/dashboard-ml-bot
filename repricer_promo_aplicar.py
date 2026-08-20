@@ -86,6 +86,8 @@ CODIGO_CATEGORIA = {
     "sem_candidatura_ml": "terminal",
     # ja tem desconto individual em vigor: retentar da o mesmo nao
     "ja_tem_individual": "terminal",
+    # o ML recusou tirar o individual atual: nada foi tocado, retentar nao muda
+    "nao_removi_individual": "terminal",
     # decisão sua, não falha transitória: retentar igual dá o mesmo resultado
     "fora_da_faixa_doc": "terminal",
     "so_reduz": "terminal",
@@ -1697,30 +1699,98 @@ def processar(fila, access):
     # So vale quando a escolha e sua. Piloto e reator seguem a ordem antiga
     # (entra primeiro, sai depois), que nunca deixa o anuncio descoberto.
     # ===================================================================
-    _sai_de_todas = (acao == "trocar" and bool(fila.get("escolha_manual"))
-                     and tipo != "PRICE_DISCOUNT")
+    # SEM EXCECAO: vale para qualquer alvo, inclusive um novo desconto individual.
+    # Antes eu excluia PRICE_DISCOUNT daqui, e com isso trocar o preco de um
+    # desconto individual continuava impossivel pelo robo — que nao era o pedido.
+    _sai_de_todas = (acao == "trocar" and bool(fila.get("escolha_manual")))
     if _sai_de_todas:
+        # PRE-VOO DA FAIXA — so quando o alvo e o desconto individual.
+        # A doc do ML exige desconto entre 5% e 80%. Se o preco escolhido nao
+        # couber, o POST e recusa garantida: nao vale destruir o que existe.
+        if tipo == "PRICE_DISCOUNT":
+            _lista_sd = None
+            try:
+                _lista_sd = float(cand.get("original_price") or it.get("price") or 0)
+            except (TypeError, ValueError):
+                _lista_sd = 0
+            _dmin_sd, _dmax_sd = faixa_da_doc("PRICE_DISCOUNT", _lista_sd)
+            _alvo_sd = None
+            try:
+                _alvo_sd = float(ev["pb"])
+            except (TypeError, ValueError, KeyError):
+                _alvo_sd = None
+            if (_dmax_sd is not None and _alvo_sd is not None
+                    and not (_dmin_sd <= _alvo_sd <= _dmax_sd)):
+                _pct_sd = (1 - _alvo_sd / _lista_sd) * 100 if _lista_sd else 0
+                gravar(fila["id"], {"status": "erro", "resultado": (
+                    f"NÃO MEXI EM NADA. O preço R${_alvo_sd:.2f} dá {_pct_sd:.1f}% de desconto "
+                    f"sobre R${_lista_sd:.2f}, e o ML só aceita entre "
+                    f"{DESC_MIN_PCT['PRICE_DISCOUNT']:.0f}% e {DESC_MAX_PCT['PRICE_DISCOUNT']:.0f}%. "
+                    f"Escolha uma margem que caia entre R${_dmin_sd:.2f} e R${_dmax_sd:.2f}.")})
+                print(f"  ! fora_da_faixa_doc {iid}: {_pct_sd:.1f}% de desconto, fora de "
+                      f"{DESC_MIN_PCT['PRICE_DISCOUNT']:.0f}–{DESC_MAX_PCT['PRICE_DISCOUNT']:.0f}% "
+                      f"— NÃO saí de nada", flush=True)
+                return "fora_da_faixa_doc"
         _ind_ativo = individual_em_vigor(ofertas)
-        _saiu, _falhou, _rest = sair_das_outras(
-            iid, str(fila.get("seller_id") or ""), access,
-            manter_pid=cand.get("id"),          # mantem SO a que vamos entrar
-            saiu_dicts=_saiu_dicts)
-        _saiu_nomes = list(_saiu)
-        saiu_antes = (f" | ESCOLHA SUA: saí de {len(_saiu)} promoção(ões) antes de entrar "
-                      f"na que você pediu")
-        if _falhou:
-            saiu_antes += " | ⚠️ DELETE recusado em: " + ", ".join(_falhou)
-        print(f"  ~ {iid}: escolha sua — saí de {len(_saiu)} promoção(ões) antes de entrar"
-              + (f" | falhou em {len(_falhou)}" if _falhou else ""), flush=True)
-        if _ind_ativo is not None:
-            # O individual era o que mandava no preco. Sem esperar a remocao
-            # fechar, o POST seguinte entra num item ainda em restore_requested.
-            _ind_antigo = _ind_ativo
-            _pronto, _voltas, _motivo = esperar_saida_individual(iid, access)
-            saiu_antes += f" | esperei a remoção do individual ({_voltas}x): {_motivo}"
-            print(f"  ⏳ {iid}: esperei o desconto individual sair — {_voltas} consulta(s), "
-                  f"{_motivo}", flush=True)
-    if acao == "trocar" and tipo == "PRICE_DISCOUNT":
+        # INDIVIDUAL -> INDIVIDUAL: troca so o preco, nao toca em campanha.
+        # Se o individual atual esta EM VIGOR, nenhuma campanha esta bloqueando
+        # ele (a doc do ML diz que DEAL ativo impede o individual de valer). Logo
+        # o substituto tambem nao sera bloqueado, e remover campanha aqui seria
+        # risco puro: DEAL e SELLER_CAMPAIGN o robo nao repoe.
+        _so_o_preco = (tipo == "PRICE_DISCOUNT" and _ind_ativo is not None)
+        if _so_o_preco:
+            _pv_sd = None
+            try:
+                _pv_sd = rec.preco_oferta(_ind_ativo)
+            except Exception:
+                _pv_sd = None
+            _scd_sd, _b_sd = remover_participacao(
+                iid, {"type": "PRICE_DISCOUNT",
+                      "promotion_id": _ind_ativo.get("id"),
+                      "offer_id": _ind_ativo.get("offer_id") or _ind_ativo.get("ref_id")},
+                access)
+            _txt_sd = (f"R${float(_pv_sd):.2f}" if _pv_sd else "preço não lido")
+            if _scd_sd in (200, 201):
+                _ind_antigo = _ind_ativo
+                saiu_antes = (f" | ESCOLHA SUA (individual→individual): removi só o desconto "
+                              f"individual ({_txt_sd}) e mantive as campanhas")
+                print(f"  ~ {iid}: troca de individual — removi só o desconto atual "
+                      f"({_txt_sd}), campanhas intactas", flush=True)
+                _pronto, _voltas, _motivo = esperar_saida_individual(iid, access)
+                saiu_antes += f" | esperei a remoção fechar ({_voltas}x): {_motivo}"
+                print(f"  ⏳ {iid}: esperei a remoção fechar — {_voltas} consulta(s), {_motivo}",
+                      flush=True)
+            else:
+                gravar(fila["id"], {"status": "erro", "resultado": (
+                    f"NÃO MEXI EM NADA. Tentei remover o desconto individual atual "
+                    f"({_txt_sd}) para pôr o novo e o ML recusou (HTTP {_scd_sd}). "
+                    f"Nenhuma campanha foi tocada.")})
+                print(f"  ! nao_removi_individual {iid}: ML recusou o DELETE (HTTP {_scd_sd}) "
+                      f"— campanhas intactas", flush=True)
+                return "nao_removi_individual"
+        else:
+            _saiu, _falhou, _rest = sair_das_outras(
+                iid, str(fila.get("seller_id") or ""), access,
+                manter_pid=cand.get("id"),          # mantem SO a que vamos entrar
+                saiu_dicts=_saiu_dicts)
+            _saiu_nomes = list(_saiu)
+            saiu_antes = (f" | ESCOLHA SUA: saí de {len(_saiu)} promoção(ões) antes de entrar "
+                          f"na que você pediu")
+            if _falhou:
+                saiu_antes += " | ⚠️ DELETE recusado em: " + ", ".join(_falhou)
+            print(f"  ~ {iid}: escolha sua — saí de {len(_saiu)} promoção(ões) antes de entrar"
+                  + (f" | falhou em {len(_falhou)}" if _falhou else ""), flush=True)
+            if _ind_ativo is not None:
+                # O individual era o que mandava no preco. Sem esperar a remocao
+                # fechar, o POST seguinte entra num item ainda em restore_requested.
+                _ind_antigo = _ind_ativo
+                _pronto, _voltas, _motivo = esperar_saida_individual(iid, access)
+                saiu_antes += f" | esperei a remoção do individual ({_voltas}x): {_motivo}"
+                print(f"  ⏳ {iid}: esperei o desconto individual sair — {_voltas} consulta(s), "
+                      f"{_motivo}", flush=True)
+    if acao == "trocar" and tipo == "PRICE_DISCOUNT" and not _sai_de_todas:
+        # Caminho do piloto/reator (escolha automatica). Quando a escolha e SUA,
+        # o bloco acima ja saiu de tudo e entrou — este nao roda.
         # ---- PRE-VOO: decidir ANTES de tocar em qualquer campanha ----
         # A ordem anterior saia das campanhas primeiro e so depois via que havia
         # um desconto individual em vigor — quando o POST ja estava condenado.
