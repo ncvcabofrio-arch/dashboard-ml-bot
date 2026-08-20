@@ -84,6 +84,8 @@ CODIGO_CATEGORIA = {
     "faca_na_mao": "terminal",
     # o ML disse que o anúncio não é elegível -> retentar é insistir no não
     "sem_candidatura_ml": "terminal",
+    # ja tem desconto individual em vigor: retentar da o mesmo nao
+    "ja_tem_individual": "terminal",
     # decisão sua, não falha transitória: retentar igual dá o mesmo resultado
     "fora_da_faixa_doc": "terminal",
     "so_reduz": "terminal",
@@ -1702,6 +1704,47 @@ def processar(fila, access):
     _saiu_dicts = []          # as participações inteiras, pra poder desfazer a saída
     _ind_antigo = None        # o desconto individual que estava em vigor e foi removido
     if acao == "trocar" and tipo == "PRICE_DISCOUNT":
+        # ---- PRE-VOO: decidir ANTES de tocar em qualquer campanha ----
+        # A ordem anterior saia das campanhas primeiro e so depois via que havia
+        # um desconto individual em vigor — quando o POST ja estava condenado.
+        # Em 20/ago isso custou as participacoes de 7 anuncios de uma vez.
+        #
+        # Que o ML recusa candidatura nova quando ja existe individual ativo
+        # esta MEDIDO: 17 anuncios naquela rodada, 17 recusas.
+        _ind_atual = individual_em_vigor(ofertas)
+        if _ind_atual is not None and not TROCAR_INDIVIDUAL:
+            _pv_at = None
+            try:
+                _pv_at = rec.preco_oferta(_ind_atual)
+            except Exception:
+                _pv_at = None
+            # Se o preco em vigor JA e o alvo, o irmao sincronizado aplicou por
+            # nos: nao ha o que trocar e o desfecho e sucesso, nao bloqueio.
+            try:
+                if (_pv_at is not None and ev.get("pb") is not None
+                        and abs(float(_pv_at) - float(ev["pb"])) <= max(0.02, float(ev["pb"]) * 0.01)):
+                    gravar(fila["id"], {
+                        "status": "aplicada",
+                        "preco_aplicado": round(float(_pv_at), 2),
+                        "margem_aplicada": ev.get("margem"),
+                        "resultado": (f"já estava no preço-alvo (R${float(_pv_at):.2f}) por desconto "
+                                      f"individual em vigor — nada a trocar.")})
+                    print(f"  = {iid}: já estava no preço-alvo (R${float(_pv_at):.2f}) — "
+                          f"desconto individual em vigor ✓", flush=True)
+                    return "ja_ativa"
+            except (TypeError, ValueError):
+                pass
+            _txt_at = (f"R${float(_pv_at):.2f}" if _pv_at else "preço não lido")
+            _fim_at = _ind_atual.get("finish_date") or "sem fim declarado"
+            gravar(fila["id"], {"status": "erro", "resultado": (
+                f"NÃO MEXI EM NADA. Este anúncio já tem desconto individual em vigor "
+                f"({_txt_at}, até {_fim_at}) e o ML não abre candidatura para um segundo — "
+                f"medido em 17 de 17 casos. Para trocar o preço é preciso remover o atual, "
+                f"e isso está desligado (TROCAR_INDIVIDUAL=0) porque a remoção falhou em "
+                f"19/ago. Faça a troca no ML, ou espere o desconto atual terminar.")})
+            print(f"  ! ja_tem_individual {iid}: em vigor {_txt_at} até {_fim_at} — "
+                  f"NÃO saí de campanha nenhuma", flush=True)
+            return "ja_tem_individual"
         _saiu, _falhou, _rest = sair_das_outras(iid, str(fila.get("seller_id") or ""), access,
                                                 manter_tipo="PRICE_DISCOUNT",
                                                 saiu_dicts=_saiu_dicts)
@@ -1723,8 +1766,8 @@ def processar(fila, access):
         # A causa do "No candidates found" segue DESCONHECIDA. Por isso o padrão é NÃO
         # tocar no desconto em vigor: relatar que ele existe é tudo que dá pra afirmar.
         # TROCAR_INDIVIDUAL=1 religa a remoção quando houver medição que a justifique.
-        _ind_antigo = individual_em_vigor(ofertas)
-        if _ind_antigo is not None and not TROCAR_INDIVIDUAL:
+        _ind_antigo = _ind_atual        # ja lido no pré-voo, nao consulta de novo
+        if False:                       # caminho morto: o pré-voo ja tratou
             # NÃO destrói o que já existe. Relata, que é o que dá pra afirmar.
             _pv_ant = None
             try:
