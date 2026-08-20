@@ -390,23 +390,6 @@ def confirmar_entrada(iid, pid, tipo, access):
         if str(it.get("id")) == str(iid) and (it.get("status") or "").lower() == "started":
             return True
     return False
-def detalhe_relampago(iid, promotion_id, access):
-    """Preço SUGERIDO e faixa crível da relâmpago só vêm na consulta POR PROMOÇÃO.
-    IMPORTANTE: sem filtro de status o ML devolve só os ATIVOS — como o item é CANDIDATO,
-    precisa de status=candidate. Retorna {price(sugerido), min/max_discounted_price, stock, datas}."""
-    if not promotion_id:
-        return None
-    base = (f"/seller-promotions/promotions/{promotion_id}/items"
-            f"?promotion_type=LIGHTNING&item_id={iid}&app_version=v2")
-    for extra in ("&status=candidate", "&status=pending", "", "&status=started"):
-        st, d = rec.get(base + extra, access)
-        res = (d.get("results") if isinstance(d, dict) else None) or []
-        for r in res:
-            if r.get("id") == iid:
-                return r
-        if res:
-            return res[0]
-    return None
 _RETRY_PATCH = {}   # guarda o último patch de itens vindos da fila de retry (id "retry:...")
 def gravar(fila_id, patch):
     patch["aplicado_em"] = datetime.now(timezone.utc).isoformat()
@@ -1668,7 +1651,6 @@ def processar(fila, access):
     if not corpo:
         gravar(fila["id"], {"status": "erro", "resultado": f"não montei corpo pro tipo {tipo}"})
         return "sem_corpo"
-    sair_de = [(o.get("name") or o.get("type") or "?") for o in antigas] if acao == "trocar" else []
     if DRY:
         if acao == "trocar" and tipo == "PRICE_DISCOUNT":
             plano = "TROCA (desconto individual): SAI das ativas ANTES e só então entra "
@@ -1703,6 +1685,41 @@ def processar(fila, access):
     _saiu_nomes = []          # nomes das campanhas de onde ele REALMENTE saiu (DELETE 200)
     _saiu_dicts = []          # as participações inteiras, pra poder desfazer a saída
     _ind_antigo = None        # o desconto individual que estava em vigor e foi removido
+    # ===================================================================
+    # ESCOLHA SUA = SAI DE TODAS E ENTRA NA QUE VOCE PEDIU
+    #
+    # E o que voce faria no painel do ML: tira o que esta la e poe a nova.
+    # Sem isto, entrar numa campanha com desconto individual ativo cria uma
+    # oferta DORMENTE — aceita pelo ML (201) e sem efeito nenhum no preco.
+    # Foi o caso do MLB2977506201: SMART a R$1.400 aceita, cliente pagando
+    # R$1.617,08 pelo individual, item preso na fila de retry para sempre.
+    #
+    # So vale quando a escolha e sua. Piloto e reator seguem a ordem antiga
+    # (entra primeiro, sai depois), que nunca deixa o anuncio descoberto.
+    # ===================================================================
+    _sai_de_todas = (acao == "trocar" and bool(fila.get("escolha_manual"))
+                     and tipo != "PRICE_DISCOUNT")
+    if _sai_de_todas:
+        _ind_ativo = individual_em_vigor(ofertas)
+        _saiu, _falhou, _rest = sair_das_outras(
+            iid, str(fila.get("seller_id") or ""), access,
+            manter_pid=cand.get("id"),          # mantem SO a que vamos entrar
+            saiu_dicts=_saiu_dicts)
+        _saiu_nomes = list(_saiu)
+        saiu_antes = (f" | ESCOLHA SUA: saí de {len(_saiu)} promoção(ões) antes de entrar "
+                      f"na que você pediu")
+        if _falhou:
+            saiu_antes += " | ⚠️ DELETE recusado em: " + ", ".join(_falhou)
+        print(f"  ~ {iid}: escolha sua — saí de {len(_saiu)} promoção(ões) antes de entrar"
+              + (f" | falhou em {len(_falhou)}" if _falhou else ""), flush=True)
+        if _ind_ativo is not None:
+            # O individual era o que mandava no preco. Sem esperar a remocao
+            # fechar, o POST seguinte entra num item ainda em restore_requested.
+            _ind_antigo = _ind_ativo
+            _pronto, _voltas, _motivo = esperar_saida_individual(iid, access)
+            saiu_antes += f" | esperei a remoção do individual ({_voltas}x): {_motivo}"
+            print(f"  ⏳ {iid}: esperei o desconto individual sair — {_voltas} consulta(s), "
+                  f"{_motivo}", flush=True)
     if acao == "trocar" and tipo == "PRICE_DISCOUNT":
         # ---- PRE-VOO: decidir ANTES de tocar em qualquer campanha ----
         # A ordem anterior saia das campanhas primeiro e so depois via que havia
@@ -1767,23 +1784,7 @@ def processar(fila, access):
         # tocar no desconto em vigor: relatar que ele existe é tudo que dá pra afirmar.
         # TROCAR_INDIVIDUAL=1 religa a remoção quando houver medição que a justifique.
         _ind_antigo = _ind_atual        # ja lido no pré-voo, nao consulta de novo
-        if False:                       # caminho morto: o pré-voo ja tratou
-            # NÃO destrói o que já existe. Relata, que é o que dá pra afirmar.
-            _pv_ant = None
-            try:
-                _pv_ant = rec.preco_oferta(_ind_antigo)
-            except Exception:
-                _pv_ant = None
-            _txt = (f"R${float(_pv_ant):.2f}" if _pv_ant else "preço não lido")
-            _fim = _ind_antigo.get("finish_date") or "sem fim declarado"
-            saiu_antes += (f" | ⚠️ este anúncio JÁ TEM desconto individual em vigor ({_txt}, até "
-                           f"{_fim}) e eu NÃO mexi nele. Se o ML recusar o novo, é provável que "
-                           f"seja por isso — mas remover o antigo já foi tentado em 19/ago e não "
-                           f"resolveu, só destruiu o desconto. Para trocar o preço, faça no ML.")
-            print(f"  ~ {iid}: já tem desconto individual em vigor ({_txt}, até {_fim}) — "
-                  f"NÃO removi (TROCAR_INDIVIDUAL=0)", flush=True)
-            _ind_antigo = None
-        elif _ind_antigo is not None:
+        if _ind_antigo is not None:
             # ---- PRÉ-VOO: o preço que vamos pedir CABE na regra? ----
             # A doc exige desconto entre 5% e 80% no PRICE_DISCOUNT. Se o alvo
             # estiver fora, o POST é recusa garantida — e destruir o desconto que
@@ -1889,7 +1890,30 @@ def processar(fila, access):
     if not _put_feito:
         sc, resp = post(f"/seller-promotions/items/{iid}?app_version=v2", access, corpo)
     ok = sc in (200, 201)
-    if acao == "trocar" and _put_feito:
+    if acao == "trocar" and _sai_de_todas:
+        # Ja saimos de tudo antes de entrar: nao ha antiga para sair depois.
+        aviso = saiu_antes + (" | entrei na que você escolheu ✓" if ok else
+                " | 🚨 ENTRADA RECUSADA DEPOIS DE SAIR — o anúncio está SEM promoção agora.")
+        if (not ok) and _ind_antigo is not None:
+            _rok, _rtxt = restaurar_individual(iid, access, _ind_antigo)
+            aviso += (f" | ↩️ restaurei o desconto individual: {_rtxt}" if _rok
+                      else f" | 🚨 NÃO restaurei o individual: {_rtxt}")
+            print(("  ↩️ " if _rok else "  🚨 ") + f"{iid}: individual — {_rtxt}", flush=True)
+            if not _rok:
+                SEM_DESCONTO_AGORA.append((iid, [f"desconto individual ({_rtxt})"]))
+        if (not ok) and _saiu_nomes:
+            _voltou, _nvoltou = reentrar_nas_campanhas(
+                iid, str(fila.get("seller_id") or ""), access, _saiu_dicts)
+            if _voltou:
+                REENTRADAS.append((iid, list(_voltou)))
+                aviso += " | ↩️ devolvi: " + ", ".join(_voltou)
+                print(f"  ↩️ {iid}: devolvi {len(_voltou)} — " + ", ".join(_voltou), flush=True)
+            if _nvoltou:
+                SEM_DESCONTO_AGORA.append((iid, list(_nvoltou)))
+                aviso += " | 🚨 NÃO devolvi: " + ", ".join(_nvoltou)
+                print(f"  🚨 {iid}: NÃO devolvi {len(_nvoltou)} — " + ", ".join(_nvoltou),
+                      flush=True)
+    elif acao == "trocar" and _put_feito:
         # O PUT não removeu nada e não tem antiga pra sair: o desfecho é só o do PUT.
         aviso = (" | modifiquei o preço na campanha do vendedor por PUT ✓" if ok
                  else " | ⚠️ o ML recusou o PUT — nada foi alterado, o anúncio segue como estava")
@@ -2058,7 +2082,6 @@ def main():
             fila = fila[:MAX_APLICAR]
     # ---- FILA DE REPROCESSAMENTO: puxa os que erraram/aguardam e já estão na hora ----
     # Só se as SUGESTÕES não estiverem rodando agora (pra não agir em cima de sugestão meio-escrita).
-    ids_fila = {f["id"] for f in fila}
     if not DRY:
         if _sugestoes_rodando():
             print("sugestões RODANDO agora — pulo a fila de retry nesta rodada (evito agir em sugestão meio-escrita)", flush=True)
