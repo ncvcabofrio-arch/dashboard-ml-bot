@@ -1,0 +1,48 @@
+# Quem está elegível numa campanha — SÓ LEITURA, não altera nada no ML.
+# Sem PROMO_ID ele lista as campanhas da conta e para; com PROMO_ID mostra os
+# anúncios candidatos, com margem no preço da campanha.
+name: Elegíveis da campanha (leitura)
+on:
+  workflow_dispatch:
+    inputs:
+      seller_id:
+        description: 'Conta (seller_id). Vazio = todas as contas cadastradas.'
+        required: false
+        default: ''
+      promo_id:
+        description: 'ID da campanha (ex.: P-MLB17883094). VAZIO = só lista as campanhas.'
+        required: false
+        default: ''
+      promo_tipo:
+        description: 'Tipo (ex.: PRE_NEGOTIATED). Vazio = descobre pelo id.'
+        required: false
+        default: ''
+      so_elegiveis:
+        description: '1 = só os candidatos (elegíveis). 0 = todos os status.'
+        required: false
+        default: '1'
+        type: choice
+        options: ['1', '0']
+jobs:
+  ler:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Instalar dependencias
+        run: pip install requests supabase
+      - name: Listar elegiveis
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          ML_CLIENT_ID: ${{ secrets.ML_CLIENT_ID }}
+          ML_CLIENT_SECRET: ${{ secrets.ML_CLIENT_SECRET }}
+          ML_REFRESH_TOKEN: ${{ secrets.ML_REFRESH_TOKEN }}
+          SELLER_ID: ${{ inputs.seller_id }}
+          PROMO_ID: ${{ inputs.promo_id }}
+          PROMO_TIPO: ${{ inputs.promo_tipo }}
+          SO_ELEGIVEIS: ${{ inputs.so_elegiveis }}
+        run: python -u elegiveis_da_campanha.py
