@@ -161,11 +161,74 @@ def telegram(msg):
 # repricer_log_atual era alimentado pelo TRIGGER de insert dele. Por isso o
 # estado passa a ser gravado aqui, direto. O trigger continua no banco e vira
 # redundância inofensiva — nas linhas de ação ele reescreve o mesmo conteúdo.
+#
+# ---------------------------------------------------------------------------
+# EGRESS (ago/2026): por que o logar() virou buffer em vez de upsert direto.
+#
+# A separação estado/histórico acima resolveu o TAMANHO do banco, mas não o
+# egress — e o egress foi o que estourou a cota do Supabase (5,9 GB / 5 GB).
+# O motivo é que ela trocou "um INSERT por avaliação" por "um UPSERT por
+# avaliação": o número de VIAGENS HTTP continuou exatamente o mesmo. E o
+# Supabase cobra por viagem (cabeçalho + corpo de resposta), não por linha
+# guardada. Com 2.156 anúncios e três workflows rodando este arquivo de hora
+# em hora, eram ~52 mil viagens por dia só desta função.
+#
+# Agora o estado se acumula em memória e sobe em lotes. Duas consequências
+# que valem entender antes de mexer aqui:
+#
+#   1. DEDUPE OBRIGATÓRIO. Alguns caminhos logam o MESMO anúncio duas vezes na
+#      mesma rodada (o mais claro: 'sem_match' e, logo abaixo, o passo_semc).
+#      Mandar a mesma chave duas vezes no MESMO upsert faz o Postgres recusar
+#      o lote inteiro: "ON CONFLICT DO UPDATE command cannot affect row a
+#      second time". O dict por (seller_id, item_id) resolve isso e ainda dá a
+#      semântica certa — estado é a ÚLTIMA palavra sobre o anúncio.
+#
+#   2. FLUSH ANTES DE LER. Quem grava e depois lê a mesma tabela na mesma
+#      rodada precisa de um flush_logs() no meio. Hoje isso acontece em um
+#      lugar só: aplicar_aprovacoes() grava 'subir_lista' e o ultimo_dia_acoes()
+#      logo abaixo vai procurar por ela. Está marcado lá no main().
+#
+# O returning="minimal" faz o PostgREST responder 204 sem corpo. Sem ele, cada
+# lote de 500 linhas era devolvido INTEIRO de volta — pagávamos egress para
+# receber de volta o que tínhamos acabado de mandar.
+# ---------------------------------------------------------------------------
 ACOES_HISTORICO = {
     "pulado_salto",     # quis descontar e o anti-salto segurou: isso é evento
     "fila_teto",        # bateu no teto de alterações da rodada
     "pede_aprovacao",   # pediu o botão no Telegram
 }
+
+LOTE_LOG = 500          # linhas por viagem
+_BUF_ESTADO = {}        # (seller_id, item_id) -> linha   (dedupe: a última vence)
+_BUF_HIST = []          # append-only: duplicata aqui é evento legítimo
+
+
+def flush_logs():
+    """Sobe o que estiver represado. Idempotente — pode chamar à vontade.
+
+    O estado vai primeiro, na mesma ordem que o logar() usava linha a linha:
+    o trigger de insert do repricer_log reescreve o repricer_log_atual, e
+    manter a ordem preserva a redundância inofensiva descrita acima.
+    """
+    if _BUF_ESTADO:
+        linhas = list(_BUF_ESTADO.values())
+        _BUF_ESTADO.clear()
+        for i in range(0, len(linhas), LOTE_LOG):
+            try:
+                rec.sb.table("repricer_log_atual").upsert(
+                    linhas[i:i + LOTE_LOG], on_conflict="seller_id,item_id",
+                    returning="minimal").execute()
+            except Exception as e:
+                print(f"   (estado falhou: {e})", flush=True)
+    if _BUF_HIST:
+        linhas = list(_BUF_HIST)
+        del _BUF_HIST[:]
+        for i in range(0, len(linhas), LOTE_LOG):
+            try:
+                rec.sb.table("repricer_log").insert(
+                    linhas[i:i + LOTE_LOG], returning="minimal").execute()
+            except Exception as e:
+                print(f"   (log falhou: {e})", flush=True)
 
 
 def _linha_completa(row):
@@ -191,20 +254,16 @@ def logar(row):
     # exatamente o mesmo instante. O 'id' fica nulo de propósito: conferi que
     # o painel não usa essa coluna.
     linha.setdefault("ts", _agora_iso())
-    # 1) ESTADO — toda rodada, um upsert por anúncio.
+    # 1) ESTADO — toda rodada, uma linha por anúncio (a última vence).
     if _linha_completa(linha) and linha.get("item_id") and linha.get("seller_id"):
-        try:
-            rec.sb.table("repricer_log_atual").upsert(
-                linha, on_conflict="seller_id,item_id").execute()
-        except Exception as e:
-            print(f"   (estado falhou: {e})", flush=True)
+        _BUF_ESTADO[(str(linha["seller_id"]), linha["item_id"])] = linha
     # 2) HISTÓRICO — só quando aconteceu alguma coisa.
-    if not _vale_historico(linha):
-        return
-    try:
-        rec.sb.table("repricer_log").insert(linha).execute()
-    except Exception as e:
-        print(f"   (log falhou: {e})", flush=True)
+    if _vale_historico(linha):
+        _BUF_HIST.append(linha)
+    # Teto de memória. Os 2.156 anúncios de hoje cabem folgado num lote só,
+    # mas o buffer não pode crescer sem limite se a conta um dia tiver 50 mil.
+    if len(_BUF_ESTADO) >= LOTE_LOG or len(_BUF_HIST) >= LOTE_LOG:
+        flush_logs()
 def _estoque_int(v):
     try:
         return int(v)
@@ -276,30 +335,98 @@ def unidades(a, por_item, por_sku):
     return u
 def _dia(s):
     return str(s)[:10] if s else ""   # 'YYYY-MM-DD' (compara por dia, sem dor de cabeça de fuso)
+# EGRESS: leitura também é egress, e esta tabela era varrida DUAS vezes por
+# rodada — 90 dias para ultima_venda_dia() e 120 dias para
+# vendas_pedidos_por_item(), de hora em hora, nas três contas. É a mesma
+# tabela, com as mesmas colunas: agora sai numa varredura só.
+#
+# O cache guarda a janela MAIOR já lida; quem precisa de janela menor filtra
+# em memória. Por isso o main() aquece com a maior janela ANTES das duas
+# chamadas — senão a de 90 dias vem primeiro, não serve a de 120, e a
+# economia se perde. Leitura parcial (erro de rede no meio da paginação) não
+# entra no cache, para a próxima chamada tentar de novo.
+_VENDAS_CRU = {}
+
+
+def _vendas_cru(sid, dias):
+    """repricer_vendas crua dos últimos `dias`, uma viagem por rodada."""
+    k = str(sid)
+    cache = _VENDAS_CRU.get(k)
+    if cache and cache[0] >= dias:
+        return cache[1]
+    corte = (date.today() - timedelta(days=dias)).isoformat()
+    out, ini = [], 0
+    while True:
+        try:
+            lote = (rec.sb.table("repricer_vendas")
+                    .select("item_id,order_id,status,data_aprovacao")
+                    .eq("seller_id", k).gte("data_aprovacao", corte)
+                    .range(ini, ini + 999).execute().data) or []
+        except Exception as e:
+            print(f"(aviso: não li repricer_vendas: {e})", flush=True)
+            return out
+        out.extend(lote)
+        if len(lote) < 1000:
+            break
+        ini += 1000
+    _VENDAS_CRU[k] = (dias, out)
+    return out
+
+
 def ultima_venda_dia(sid, dias=90):
     """Dia da venda mais recente (não cancelada) por item_id, nos últimos `dias`. Pra saber
     se houve venda DEPOIS da última subida de preço (só aí vale subir mais um degrau)."""
     corte = (date.today() - timedelta(days=dias)).isoformat()
-    it, ini = {}, 0
+    it = {}
+    for r in _vendas_cru(sid, dias):
+        if any(x in str(r.get("status") or "").lower() for x in _CANCEL):
+            continue
+        iid, d = r.get("item_id"), _dia(r.get("data_aprovacao"))
+        # o >= corte antes vinha do servidor; agora filtra aqui, porque o cache
+        # pode estar guardando uma janela maior que a pedida.
+        if iid and d and d >= corte and d > it.get(iid, ""):
+            it[iid] = d
+    return it
+# Mesma história do cache de vendas: as três chamadas de ultimo_dia_acoes()
+# de uma rodada (subir_preco / subir_semc+subir_lista / passo_atras) eram três
+# varreduras do repricer_log. Agora sai uma só, trazendo as quatro ações de
+# uma vez e separando em memória. Ação fora desta lista, ou janela diferente
+# de 90 dias, cai no caminho antigo — assim um caller futuro nunca recebe
+# resposta vazia por engano.
+ACOES_LIDAS = ("subir_preco", "subir_semc", "subir_lista", "passo_atras")
+_LOG_ACOES_CRU = {}
+
+
+def _log_acoes_cru(sid, dias):
+    """{acao: {item_id: dia}} das ACOES_LIDAS, numa viagem por rodada."""
+    k = (str(sid), dias)
+    if k in _LOG_ACOES_CRU:
+        return _LOG_ACOES_CRU[k]
+    corte = (date.today() - timedelta(days=dias)).isoformat()
+    por_acao, ini = {}, 0
     while True:
         try:
-            lote = (rec.sb.table("repricer_vendas").select("item_id,status,data_aprovacao")
-                    .eq("seller_id", str(sid)).gte("data_aprovacao", corte)
+            lote = (rec.sb.table("repricer_log").select("item_id,acao,ts")
+                    .eq("seller_id", str(sid)).in_("acao", list(ACOES_LIDAS))
+                    .eq("aplicado", True).gte("ts", corte)
                     .range(ini, ini + 999).execute().data) or []
-        except Exception as e:
-            print(f"(aviso: não li datas de venda: {e})", flush=True); return it
+        except Exception:
+            return por_acao          # parcial e sem cachear: a próxima tenta de novo
         for r in lote:
-            if any(x in str(r.get("status") or "").lower() for x in _CANCEL):
-                continue
-            iid, d = r.get("item_id"), _dia(r.get("data_aprovacao"))
-            if iid and d and d > it.get(iid, ""):
-                it[iid] = d
+            iid, d = r.get("item_id"), _dia(r.get("ts"))
+            if iid and d:
+                m = por_acao.setdefault(r.get("acao"), {})
+                if d > m.get(iid, ""):
+                    m[iid] = d
         if len(lote) < 1000:
             break
         ini += 1000
-    return it
-def ultimo_dia_acoes(sid, acoes, dias=90):
-    """Dia da última vez (por item_id) que o robô APLICOU uma das `acoes` (repricer_log)."""
+    _LOG_ACOES_CRU[k] = por_acao
+    return por_acao
+
+
+def _ultimo_dia_acoes_direto(sid, acoes, dias):
+    """Caminho antigo, uma viagem por chamada. Só para ações fora das ACOES_LIDAS."""
     corte = (date.today() - timedelta(days=dias)).isoformat()
     it, ini = {}, 0
     while True:
@@ -317,29 +444,31 @@ def ultimo_dia_acoes(sid, acoes, dias=90):
             break
         ini += 1000
     return it
+
+
+def ultimo_dia_acoes(sid, acoes, dias=90):
+    """Dia da última vez (por item_id) que o robô APLICOU uma das `acoes` (repricer_log)."""
+    if dias != 90 or any(a not in ACOES_LIDAS for a in acoes):
+        return _ultimo_dia_acoes_direto(sid, acoes, dias)
+    por_acao, it = _log_acoes_cru(sid, dias), {}
+    for a in acoes:
+        for iid, d in (por_acao.get(a) or {}).items():
+            if d > it.get(iid, ""):
+                it[iid] = d
+    return it
 def ultima_subida_dia(sid, dias=90):
     return ultimo_dia_acoes(sid, ("subir_preco",), dias)
 def vendas_pedidos_por_item(sid, dias=120):
     """Por item_id: lista de dias (ISO) dos PEDIDOS distintos (order_id, não cancelados) nos
     últimos `dias`. Usada na regra dos itens sem concorrente (a cada N pedidos, sobe)."""
     corte = (date.today() - timedelta(days=dias)).isoformat()
-    tmp, ini = {}, 0   # tmp[iid] = {order_id: dia}
-    while True:
-        try:
-            lote = (rec.sb.table("repricer_vendas").select("item_id,order_id,status,data_aprovacao")
-                    .eq("seller_id", str(sid)).gte("data_aprovacao", corte)
-                    .range(ini, ini + 999).execute().data) or []
-        except Exception as e:
-            print(f"(aviso: não li pedidos p/ sem-concorrente: {e})", flush=True); break
-        for r in lote:
-            if any(x in str(r.get("status") or "").lower() for x in _CANCEL):
-                continue
-            iid, oid, d = r.get("item_id"), r.get("order_id"), _dia(r.get("data_aprovacao"))
-            if iid and d:
-                tmp.setdefault(iid, {})[oid or d] = d
-        if len(lote) < 1000:
-            break
-        ini += 1000
+    tmp = {}   # tmp[iid] = {order_id: dia}
+    for r in _vendas_cru(sid, dias):
+        if any(x in str(r.get("status") or "").lower() for x in _CANCEL):
+            continue
+        iid, oid, d = r.get("item_id"), r.get("order_id"), _dia(r.get("data_aprovacao"))
+        if iid and d and d >= corte:
+            tmp.setdefault(iid, {})[oid or d] = d
     return {iid: sorted(od.values()) for iid, od in tmp.items()}
 def estado_promo(item_id, access):
     """(tem_pd, tem_outra): tem PRICE_DISCOUNT NOSSO ativo? tem OUTRA promoção ativa
@@ -425,7 +554,9 @@ def criar_aprovacao(sid, a, pv, novo):
     if mid:
         try:
             chat = os.environ.get("TELEGRAM_CHAT_ID")
-            rec.sb.table("repricer_aprovacoes").update({"message_id": str(mid), "chat_id": str(chat)}).eq("id", aprov_id).execute()
+            rec.sb.table("repricer_aprovacoes").update(
+                {"message_id": str(mid), "chat_id": str(chat)},
+                returning="minimal").eq("id", aprov_id).execute()
         except Exception:
             pass
 def aplicar_aprovacoes(sid, access):
@@ -446,7 +577,8 @@ def aplicar_aprovacoes(sid, access):
         try:
             rec.sb.table("repricer_aprovacoes").update({
                 "status": "aplicada" if ok else "erro", "http_status": st,
-                "aplicado_em": _agora_iso()}).eq("id", row["id"]).execute()
+                "aplicado_em": _agora_iso()},
+                returning="minimal").eq("id", row["id"]).execute()
         except Exception:
             pass
         if ok:
@@ -616,13 +748,17 @@ def snapshot_pausados(sid, access):
             continue                        # sem estoque NÃO entra na fila Pausados
         reais.append((iid, b))
     try:
-        rec.sb.table("repricer_status_ml").delete().eq("seller_id", str(sid)).execute()
+        # o delete sem returning="minimal" devolvia TODAS as linhas apagadas —
+        # um snapshot inteiro de volta pela rede, a cada rodada, para nada.
+        rec.sb.table("repricer_status_ml").delete(
+            returning="minimal").eq("seller_id", str(sid)).execute()
         for i in range(0, len(reais), 300):
             lote = [{"seller_id": str(sid), "item_id": iid,
                      "sku": _sku_do(b),
                      "titulo": b.get("title")} for iid, b in reais[i:i + 300]]
             if lote:
-                rec.sb.table("repricer_status_ml").insert(lote).execute()
+                rec.sb.table("repricer_status_ml").insert(
+                    lote, returning="minimal").execute()
         print(f"   ({len(reais)} pausado(s) de verdade / {len(ids)} paused no ML → fila Pausados)", flush=True)
         return len(reais)
     except Exception as e:
@@ -690,9 +826,11 @@ def gravar_sugestoes(sid, analises):
                        "titulo": a.get("titulo"), "sku_sugerido": s,
                        "origem": origem, "atualizado_em": _agora_iso()})
     try:
-        rec.sb.table("repricer_sku_sugerido").delete().eq("seller_id", str(sid)).execute()
+        rec.sb.table("repricer_sku_sugerido").delete(
+            returning="minimal").eq("seller_id", str(sid)).execute()
         for i in range(0, len(linhas), 300):
-            rec.sb.table("repricer_sku_sugerido").insert(linhas[i:i + 300]).execute()
+            rec.sb.table("repricer_sku_sugerido").insert(
+                linhas[i:i + 300], returning="minimal").execute()
     except Exception as e:
         # tabela ainda não criada (PROMO_B1) ou erro de rede: avisa e segue.
         # Isto NÃO pode derrubar a rodada - o trabalho principal do piloto é
@@ -750,11 +888,21 @@ def main():
         n_apr = aplicar_aprovacoes(sid, access)
         if n_apr:
             print(f"   ({n_apr} subida(s) de lista aprovada(s) aplicada(s))", flush=True)
+        # ÚNICO ponto do arquivo que grava e lê a mesma tabela na mesma rodada:
+        # as 'subir_lista' que acabaram de ser logadas precisam estar NO BANCO
+        # antes do ultimo_dia_acoes() lá embaixo ir procurar por elas. Sem este
+        # flush o anti-gangorra não enxergaria a subida de agora há pouco.
+        flush_logs()
     todos, _ = rec.todos_ativos(sid, access)
     if MAX_ITENS:
         todos = todos[:MAX_ITENS]
     snapshot_pausados(sid, access)   # fila 'Pausados' do painel (status PAUSED no ML)
     por_item, por_sku = carregar_vendas(sid, VENDAS_DIAS)
+    # Aquece o cache de vendas com a MAIOR janela que esta rodada vai usar (120,
+    # do vendas_pedidos_por_item). Sem isto, a leitura de 90 dias viria primeiro,
+    # não serviria a de 120, e voltariam as duas varreduras.
+    if (SUBIR_ATIVO and SUBIR_EXIGE_VENDA) or SEMC_ATIVO:
+        _vendas_cru(sid, 120)
     venda_dia = ultima_venda_dia(sid) if SUBIR_ATIVO and SUBIR_EXIGE_VENDA else {}
     subida_dia = ultima_subida_dia(sid) if SUBIR_ATIVO and SUBIR_EXIGE_VENDA else {}
     corte_recente = (date.today() - timedelta(days=VENDAS_DIAS)).isoformat()
@@ -992,6 +1140,7 @@ def main():
             if ok:
                 cont["removido"] += 1
             time.sleep(0.3)
+    flush_logs()   # tudo o que sobrou no buffer sobe antes de fechar a rodada
     resumo = (f"Piloto {modo} · conta {sid}: {cont['criado']} desconto(s) "
               f"{'criados' if CONFIRMA else 'a criar'}"
               + (f" (+{cont['fila']} na fila além do teto)" if cont['fila'] else "")
@@ -1008,4 +1157,10 @@ def main():
     if not CONFIRMA:
         print("SIMULAÇÃO: nada escrito. CONFIRMA=SIM (e ATIVO=SIM) pra valer.", flush=True)
 if __name__ == "__main__":
-    main()
+    # O finally é a rede de segurança do buffer: se a rodada morrer no meio
+    # (token expirado, timeout do ML), o que já foi avaliado ainda chega ao
+    # painel em vez de evaporar junto com o processo.
+    try:
+        main()
+    finally:
+        flush_logs()
