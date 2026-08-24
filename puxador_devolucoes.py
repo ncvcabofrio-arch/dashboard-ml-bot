@@ -322,10 +322,12 @@ def gravar_devolucoes(linhas):
             hist.append({"claim_id": l["claim_id"], "campo": "status_ml",
                          "de_valor": old, "para_valor": new, "por": "puxador"})
     for i in range(0, len(linhas), 200):
-        sb.table("devolucoes").upsert(linhas[i:i + 200], on_conflict="claim_id").execute()
+        sb.table("devolucoes").upsert(linhas[i:i + 200], on_conflict="claim_id",
+                                      returning="minimal").execute()
     if hist:
         for i in range(0, len(hist), 200):
-            sb.table("devolucoes_historico").insert(hist[i:i + 200]).execute()
+            sb.table("devolucoes_historico").insert(hist[i:i + 200],
+                                                    returning="minimal").execute()
     return len(linhas)
 
 
@@ -335,7 +337,8 @@ def gravar_retornos(retornos):
         return 0
     for i in range(0, len(retornos), 200):
         sb.table("devolucoes_retornos").upsert(
-            retornos[i:i + 200], on_conflict="claim_id").execute()
+            retornos[i:i + 200], on_conflict="claim_id",
+            returning="minimal").execute()
     return len(retornos)
 
 
@@ -365,7 +368,7 @@ def notificar_novas():
                     f"Status ML: {d.get('status_ml') or '-'}")
     ids = [d["claim_id"] for d in novas]
     for i in range(0, len(ids), 200):
-        sb.table("devolucoes").update({"notificado": True}) \
+        sb.table("devolucoes").update({"notificado": True}, returning="minimal") \
             .in_("claim_id", ids[i:i + 200]).execute()
 
 
@@ -679,7 +682,8 @@ def rodar_backfill():
     if grava:
         for i in range(0, len(grava), 200):
             try:
-                sb.table("envios_problema").upsert(grava[i:i + 200], on_conflict="order_id").execute()
+                sb.table("envios_problema").upsert(grava[i:i + 200], on_conflict="order_id",
+                                                   returning="minimal").execute()
             except Exception as e:
                 print("Aviso: falha ao gravar envios_problema:", str(e)[:150])
         print(f"\nGravados {len(grava)} envios com problema em 'envios_problema'.", flush=True)
@@ -753,7 +757,8 @@ def rodar_monitor():
     if novos:
         for i in range(0, len(novos), 200):
             try:
-                sb.table("envios_problema").upsert(novos[i:i+200], on_conflict="order_id").execute()
+                sb.table("envios_problema").upsert(novos[i:i+200], on_conflict="order_id",
+                                                   returning="minimal").execute()
             except Exception as e:
                 print("Aviso: falha ao gravar novos:", str(e)[:150])
     print(f"Monitor: {len(novos)} envios-problema nos cancelados dos ultimos {dias} dias.", flush=True)
@@ -763,7 +768,26 @@ def rodar_monitor():
         "order_id, seller_id, titulo, valor, shipping_id, substatus, notificado")
         .neq("fechado", True).execute().data) or []
     print(f"Monitor: {len(abertos)} casos abertos pra atualizar.", flush=True)
+    # EGRESS: este laço era um PATCH por caso aberto — 663 viagens HTTP por hora
+    # medidas no log, cada uma devolvendo a linha inteira. Agora as alterações
+    # se acumulam e sobem em lotes de 200, com resposta vazia.
+    #
+    # A ARMADILHA, que custa caro se passar batido: o PostgREST monta o upsert
+    # de uma LISTA com a UNIÃO das chaves de todas as linhas, e preenche com
+    # NULL onde a chave falta. Como só as confiscadas ganhavam 'notificado',
+    # um lote misto zeraria o 'notificado' de todo mundo — e o alerta de envio
+    # confiscado voltaria a disparar no Telegram a cada 30 minutos, para
+    # sempre, nos mesmos pedidos.
+    #
+    # Por isso TODA linha carrega 'notificado' explícito: True quando o alerta
+    # é novo, senão o valor que já estava no banco (veio no select acima).
+    # Com as chaves uniformes o lote é seguro.
+    #
+    # O time.sleep(0.15) continua onde estava: ele protege a API do Mercado
+    # Livre, que segue sendo consultada um pedido por vez. Esta mudança não
+    # deixa a rodada mais rápida — só para de conversar com o Supabase à toa.
     alertas = []
+    mudancas = []
     for c in abertos:
         sid = str(c.get("seller_id"))
         access = access_por_conta.get(sid)
@@ -777,17 +801,25 @@ def rodar_monitor():
         sj = ml_get(f"/shipments/{shp}", access)
         st = sj.get("status") if isinstance(sj, dict) else None
         sub = sj.get("substatus") if isinstance(sj, dict) else None
-        upd = {"status_envio": st, "substatus": sub, "shipping_id": str(shp),
-               "atualizado_em": datetime.now(timezone.utc).isoformat()}
+        upd = {"order_id": c["order_id"],
+               "status_envio": st, "substatus": sub, "shipping_id": str(shp),
+               "atualizado_em": datetime.now(timezone.utc).isoformat(),
+               "notificado": bool(c.get("notificado"))}
         # alerta: virou confiscado agora e ainda nao avisamos
         if (sub or "").lower() == "confiscated" and not c.get("notificado"):
             alertas.append(c)
             upd["notificado"] = True
-        try:
-            sb.table("envios_problema").update(upd).eq("order_id", c["order_id"]).execute()
-        except Exception as e:
-            print("Aviso: falha ao atualizar", c["order_id"], str(e)[:100])
+        mudancas.append(upd)
         time.sleep(0.15)
+    for i in range(0, len(mudancas), 200):
+        try:
+            sb.table("envios_problema").upsert(
+                mudancas[i:i + 200], on_conflict="order_id",
+                returning="minimal").execute()
+        except Exception as e:
+            print("Aviso: falha ao atualizar lote de envios:", str(e)[:150])
+    if mudancas:
+        print(f"Monitor: {len(mudancas)} caso(s) atualizado(s).", flush=True)
 
     # (3) alertas de confiscado (gatilho ANTES do ML devolver o dinheiro)
     if NOTIFICAR and alertas:
@@ -870,7 +902,7 @@ def rodar_limpar_coleta():
     for i in range(0, len(ids), 100):
         lote = ids[i:i + 100]
         try:
-            sb.table("devolucoes").update({"etapa_interna": "cancelada"}) \
+            sb.table("devolucoes").update({"etapa_interna": "cancelada"}, returning="minimal") \
                 .in_("claim_id", lote).execute()
             movidos += len(lote)
         except Exception as e:
@@ -878,7 +910,8 @@ def rodar_limpar_coleta():
         try:
             sb.table("devolucoes_historico").insert(
                 [{"claim_id": cid, "campo": "etapa_interna", "de_valor": "coleta",
-                  "para_valor": "cancelada", "por": "limpar_coleta"} for cid in lote]).execute()
+                  "para_valor": "cancelada", "por": "limpar_coleta"} for cid in lote],
+                returning="minimal").execute()
         except Exception:
             pass
         print(f"   movidos {movidos}/{len(ids)}", flush=True)
@@ -1018,7 +1051,7 @@ def rodar_mediacoes():
             else:
                 upd = {"acao_pendente": acao, "acao_obrigatoria": obrig}
             try:
-                sb.table("devolucoes").update(upd).eq("claim_id", cid).execute()
+                sb.table("devolucoes").update(upd, returning="minimal").eq("claim_id", cid).execute()
             except Exception as e:
                 print("  falha update", cid, str(e)[:80])
             time.sleep(0.2)
@@ -1035,7 +1068,8 @@ def rodar_mediacoes():
                 sb.table("devolucoes").update(
                     {"acao_prazo": None, "acao_pendente": None, "acao_obrigatoria": False,
                      "acao_notificada": None, "acao_resultado": res,
-                     "acao_resolvida_em": agora.isoformat()}).eq("claim_id", f["claim_id"]).execute()
+                     "acao_resolvida_em": agora.isoformat()},
+                    returning="minimal").eq("claim_id", f["claim_id"]).execute()
             except Exception:
                 pass
 
@@ -1307,11 +1341,12 @@ def rodar_classificar_coleta():
             try:
                 sb.table("devolucoes_historico").insert({
                     "claim_id": cid, "campo": "etapa_interna",
-                    "de_valor": et, "para_valor": novo, "por": "classificar_coleta"}).execute()
+                    "de_valor": et, "para_valor": novo, "por": "classificar_coleta"},
+                    returning="minimal").execute()
             except Exception:
                 pass
         try:
-            sb.table("devolucoes").update(upd).eq("claim_id", cid).execute()
+            sb.table("devolucoes").update(upd, returning="minimal").eq("claim_id", cid).execute()
         except Exception as e:
             print("  upd falha", cid, str(e)[:80])
         resumo["COLETA" if eh_coleta else (rstatus or "sem_retorno")] += 1
@@ -1383,11 +1418,12 @@ def main():
         # aplica o auto-avanco um a um (update individual, nao sobrescreve nada)
         for cid, cur, ml_et in avancos:
             try:
-                sb.table("devolucoes").update({"etapa_interna": ml_et}) \
+                sb.table("devolucoes").update({"etapa_interna": ml_et}, returning="minimal") \
                     .eq("claim_id", cid).execute()
                 sb.table("devolucoes_historico").insert({
                     "claim_id": cid, "campo": "etapa_interna",
-                    "de_valor": cur, "para_valor": ml_et, "por": "ml"}).execute()
+                    "de_valor": cur, "para_valor": ml_et, "por": "ml"},
+                    returning="minimal").execute()
             except Exception:
                 pass
         total += n
