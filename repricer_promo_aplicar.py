@@ -21,6 +21,39 @@ from datetime import datetime, timezone, timedelta
 from ml_auth import obter_access
 API = rec.API
 sb = rec.sb
+# ===========================================================================
+# REDE: retentar leitura do ML, sem tocar no arquivo compartilhado.
+#
+# Em 20/ago a rodada dos 16 morreu inteira num "Connection reset by peer"
+# durante /items/{id}/shipping_options. O post() e o req_delete() daqui
+# retentam 429, 5xx e 423; o rec.get() do repricer_sugestoes nao retenta
+# nada, e uma conexao derrubada mata o processo.
+#
+# O repricer_sugestoes e compartilhado com piloto e reator, entao NAO altero
+# o arquivo. Troco a funcao so DENTRO deste processo: as funcoes de la que
+# chamam get() resolvem o nome no modulo em tempo de execucao, entao passam
+# a usar esta versao. Piloto e reator, em processos proprios, seguem iguais.
+#
+# So erro de REDE e retentado. Resposta do ML (400, 404, o que for) passa
+# direto, como antes — retentar um "nao" nao muda o "nao".
+# ===========================================================================
+_REC_GET_ORIGINAL = rec.get
+
+
+def _rec_get_com_retry(*args, **kwargs):
+    _ultimo = None
+    for _i in range(3):
+        try:
+            return _REC_GET_ORIGINAL(*args, **kwargs)
+        except requests.exceptions.RequestException as e:
+            _ultimo = e
+            print(f"  aviso: rede caiu lendo o ML ({type(e).__name__}), "
+                  f"tentativa {_i + 1}/3", flush=True)
+            time.sleep(1.0 * (_i + 1))
+    raise _ultimo
+
+
+rec.get = _rec_get_com_retry
 DRY = (os.environ.get("DRY_RUN", "1").strip() != "0")          # padrão: simula
 SELLER_FILTRO = (os.environ.get("SELLER_ID") or "").strip()    # vazio = todas as contas
 ITEM_FILTRO = (os.environ.get("ITEM_ID") or "").strip()        # 1 anúncio só
@@ -86,6 +119,8 @@ CODIGO_CATEGORIA = {
     "sem_candidatura_ml": "terminal",
     # ja tem desconto individual em vigor: retentar da o mesmo nao
     "ja_tem_individual": "terminal",
+    # o ML só aceita um preço que entrega menos margem que a sua: retentar dá o mesmo
+    "margem_menor_que_pedida": "terminal",
     # o ML recusou tirar o individual atual: nada foi tocado, retentar nao muda
     "nao_removi_individual": "terminal",
     # decisão sua, não falha transitória: retentar igual dá o mesmo resultado
@@ -785,6 +820,13 @@ TIPOS_SEM_REENTRADA = {"LIGHTNING", "DOD"}
 # ser outro (janela de propagação, tipo de campanha, vigência). Quando houver
 # medição — e não palpite — é só ligar TROCAR_INDIVIDUAL=1.
 TROCAR_INDIVIDUAL = (os.environ.get("TROCAR_INDIVIDUAL", "0").strip() == "1")
+# Quanto a margem pode ficar ABAIXO da pedida sem o robô recusar, em pontos.
+# Não é folga de negociação: é só arredondamento de centavo (18,00 -> 17,998).
+# MARGEM_TOL_PP=0 deixa estrito, ao pé da letra.
+try:
+    MARGEM_TOL_PP = abs(float(os.environ.get("MARGEM_TOL_PP", "0.05").replace(",", ".")))
+except (TypeError, ValueError):
+    MARGEM_TOL_PP = 0.05
 
 
 def individual_em_vigor(ofertas):
@@ -1671,6 +1713,49 @@ def processar(fila, access):
     if not corpo:
         gravar(fila["id"], {"status": "erro", "resultado": f"não montei corpo pro tipo {tipo}"})
         return "sem_corpo"
+    # ================= TRAVA DA MARGEM PEDIDA =================
+    # O 'ev' acima foi calculado com o preço que a gente QUERIA. O corpo_post pode
+    # ter cortado esse preço na faixa do anúncio (_clamp_preco) — e preço menor é
+    # margem menor. Antes desta trava o robô mandava o teto do ML assim mesmo e
+    # gravava a margem antiga: o MLB5344013854 entrou a ~2,2% registrado como
+    # 11,17%. Aqui a margem é refeita NO PREÇO QUE VAI SER ENVIADO.
+    _p_env = None
+    try:
+        if corpo.get("deal_price") is not None:
+            _p_env = float(corpo["deal_price"])
+    except (TypeError, ValueError):
+        _p_env = None
+    if _p_env is None:
+        _p_env = rec.preco_oferta(cand)          # tipos em que o preço é do ML
+    _mg_ped = fila.get("margem_alvo_manual")
+    if _mg_ped in (None, ""):
+        _mg_ped = fila.get("margem_prevista")    # a margem que a tela mostrou
+    try:
+        _mg_ped = float(_mg_ped) if _mg_ped not in (None, "") else None
+    except (TypeError, ValueError):
+        _mg_ped = None
+    if _p_env is not None and _mg_ped is not None:
+        _ev_env = ev
+        try:
+            if abs(float(_p_env) - float(ev["pb"])) > 0.005:
+                _c_env = dict(cand)
+                _c_env["price"] = round(float(_p_env), 2)
+                _ev_env = rec.avaliar(_c_env, cat, ltid, access, frete, custo) or ev
+        except (TypeError, ValueError, KeyError):
+            _ev_env = ev
+        _mg_real = _ev_env.get("margem")
+        if _mg_real is not None and float(_mg_real) < float(_mg_ped) - MARGEM_TOL_PP:
+            gravar(fila["id"], {"status": "erro", "resultado": (
+                f"NÃO APLIQUEI. Você pediu {float(_mg_ped):.2f}% e o preço que o ML aceita "
+                f"(R${float(_p_env):.2f}) entrega {float(_mg_real):.2f}% — margem MENOR que a sua. "
+                f"O preço que daria a sua margem era R${float(ev['pb']):.2f}, e o ML não aceita "
+                f"esse valor neste anúncio. Nada foi tocado.")})
+            print(f"  ! margem_menor_que_pedida {iid}: pedida {float(_mg_ped):.2f}% | sairia "
+                  f"{float(_mg_real):.2f}% a R${float(_p_env):.2f} — NÃO apliquei", flush=True)
+            return "margem_menor_que_pedida"
+        # margem confirmada no preço real: é ELA que vai para o registro
+        ev = _ev_env
+    # ===========================================================
     if DRY:
         if acao == "trocar" and tipo == "PRICE_DISCOUNT":
             plano = "TROCA (desconto individual): SAI das ativas ANTES e só então entra "
@@ -1755,6 +1840,27 @@ def processar(fila, access):
         # ele (a doc do ML diz que DEAL ativo impede o individual de valer). Logo
         # o substituto tambem nao sera bloqueado, e remover campanha aqui seria
         # risco puro: DEAL e SELLER_CAMPAIGN o robo nao repoe.
+        # TRAVA (22/ago): remover o individual para recriar falhou 16 de 16 na
+        # ultima rodada, com 15 anuncios ficando SEM desconto nenhum. Enquanto a
+        # causa nao for medida, o robo prefere NAO TROCAR a trocar e perder.
+        # TROCAR_INDIVIDUAL=1 devolve o comportamento anterior.
+        if (tipo == "PRICE_DISCOUNT" and _ind_ativo is not None
+                and not TROCAR_INDIVIDUAL):
+            _pv_tv = None
+            try:
+                _pv_tv = rec.preco_oferta(_ind_ativo)
+            except Exception:
+                _pv_tv = None
+            _txt_tv = (f"R${float(_pv_tv):.2f}" if _pv_tv else "preço não lido")
+            gravar(fila["id"], {"status": "erro", "resultado": (
+                f"NÃO MEXI EM NADA. O anúncio já tem desconto individual em vigor "
+                f"({_txt_tv}) e a troca está desligada: em 22/ago ela falhou 16 de 16 "
+                f"e 15 anúncios ficaram sem desconto porque o ML recusou devolver o "
+                f"antigo. Troque no painel do ML, ou ligue TROCAR_INDIVIDUAL=1 "
+                f"assumindo esse risco.")})
+            print(f"  ! ja_tem_individual {iid}: em vigor {_txt_tv} — troca DESLIGADA, "
+                  f"não removi nada", flush=True)
+            return "ja_tem_individual"
         _so_o_preco = (tipo == "PRICE_DISCOUNT" and _ind_ativo is not None)
         if _so_o_preco:
             _pv_sd = None
