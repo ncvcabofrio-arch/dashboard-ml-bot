@@ -821,12 +821,17 @@ TIPOS_SEM_REENTRADA = {"LIGHTNING", "DOD"}
 # medição — e não palpite — é só ligar TROCAR_INDIVIDUAL=1.
 TROCAR_INDIVIDUAL = (os.environ.get("TROCAR_INDIVIDUAL", "0").strip() == "1")
 # Quanto a margem pode ficar ABAIXO da pedida sem o robô recusar, em pontos.
-# Não é folga de negociação: é só arredondamento de centavo (18,00 -> 17,998).
+#
+# 0,25 saiu da rodada de 125 itens, não de gosto: a trava barrou 5 lá, e os
+# números se separam sozinhos em dois grupos. Graves — pedida 16,04% saindo
+# -10,00%, e pedida 18% saindo 13,83%. Marginais — 18% pedidos contra 17,81,
+# 17,81 e 17,94, diferenças de 0,06 a 0,19 que na prática são o mesmo número.
+# 0,25 deixa os marginais passarem e mantém os graves barrados.
 # MARGEM_TOL_PP=0 deixa estrito, ao pé da letra.
 try:
-    MARGEM_TOL_PP = abs(float(os.environ.get("MARGEM_TOL_PP", "0.05").replace(",", ".")))
+    MARGEM_TOL_PP = abs(float(os.environ.get("MARGEM_TOL_PP", "0.25").replace(",", ".")))
 except (TypeError, ValueError):
-    MARGEM_TOL_PP = 0.05
+    MARGEM_TOL_PP = 0.25
 
 
 def individual_em_vigor(ofertas):
@@ -1144,13 +1149,25 @@ def confirmar_pos_entrada(fila, access):
                         f"R${float(pv):.2f}, enviei R${float(alvo):.2f} "
                         f"(diferença R${float(alvo) - float(pv):.2f}). NÃO MEDI A CAUSA. "
                         f"Hipótese a conferir: preço propagado de anúncio irmão sincronizado.")
-            elif _pedido is not None:
-                # Preço obedecido. A diferença está entre o PEDIDO da tela e o teto do
-                # anúncio, e essa causa foi medida no envio — não é erro de aplicação.
+            elif _pedido is not None and float(alvo) < float(_pedido) - 0.005:
+                # TETO DE VERDADE: o preço enviado ficou MENOR que o pedido, ou seja, o
+                # corte da faixa (max_discounted_price) realmente apertou. Essa causa foi
+                # medida no envio.
                 TETO_DO_ML.append((iid, float(_pedido), float(alvo)))
                 nota += (f" || TETO DO ML: você pediu R${float(_pedido):.2f}, mas o ML só "
                          f"aceita desconto até R${float(alvo):.2f} neste anúncio "
                          f"(max_discounted_price) — enviei o teto")
+            elif _pedido is not None:
+                # Preço final MAIOR que o pedido. Teto do ML não faz isso — ele só pode
+                # te fazer cobrar menos. A mensagem antiga carimbava "teto" aqui e saía
+                # com número negativo ("R$-4,60 a menos do que você queria cobrar"), que
+                # lido em voz alta é uma contradição. A causa mais provável é o preço vir
+                # do anúncio irmão sincronizado — e o log acima já mostra quando é isso.
+                # Aqui eu digo o que aconteceu e NÃO invento a causa.
+                nota += (f" || PREÇO MAIOR QUE O PEDIDO: você pediu R${float(_pedido):.2f} "
+                         f"e entrou R${float(alvo):.2f} (R${float(alvo) - float(_pedido):.2f} "
+                         f"a mais). NÃO É teto do ML — teto só faz cobrar menos. "
+                         f"NÃO MEDI A CAUSA.")
         except (TypeError, ValueError):
             pass
     elif (pv is not None) or (conf_started is False):
@@ -1904,14 +1921,29 @@ def processar(fila, access):
                 saiu_antes += " | ⚠️ DELETE recusado em: " + ", ".join(_falhou)
             print(f"  ~ {iid}: escolha sua — saí de {len(_saiu)} promoção(ões) antes de entrar"
                   + (f" | falhou em {len(_falhou)}" if _falhou else ""), flush=True)
-            if _ind_ativo is not None:
-                # O individual era o que mandava no preco. Sem esperar a remocao
-                # fechar, o POST seguinte entra num item ainda em restore_requested.
-                _ind_antigo = _ind_ativo
+            # ESPERAR A REMOÇÃO FECHAR — sempre que a próxima coisa for um desconto
+            # individual, e não só quando havia um individual antes.
+            #
+            # A condição antiga era 'if _ind_ativo is not None'. Quem tinha SÓ
+            # campanhas saía delas e postava na sequência, sem esperar — e a remoção
+            # no ML é assíncrona (restore_requested, na doc). O POST chegava antes de
+            # o item ficar livre e voltava "No candidates found for item".
+            #
+            # Custou 4 anúncios com a mesma assinatura: MLB4288780921 (rodada de 79),
+            # MLB1539564488, MLB3164233836 e MLB4419645793 (rodada de 125). Nos quatro
+            # as campanhas saíram, o individual foi recusado, e a volta também.
+            #
+            # esperar_saida_individual espera exatamente o sinal certo: ela só encerra
+            # quando o ML volta a oferecer candidatura de PRICE_DISCOUNT.
+            if _ind_ativo is not None or (tipo == "PRICE_DISCOUNT" and _saiu):
+                if _ind_ativo is not None:
+                    _ind_antigo = _ind_ativo
                 _pronto, _voltas, _motivo = esperar_saida_individual(iid, access)
-                saiu_antes += f" | esperei a remoção do individual ({_voltas}x): {_motivo}"
-                print(f"  ⏳ {iid}: esperei o desconto individual sair — {_voltas} consulta(s), "
-                      f"{_motivo}", flush=True)
+                _oq = ("o desconto individual sair" if _ind_ativo is not None
+                       else f"a candidatura reabrir depois de sair de {len(_saiu)} campanha(s)")
+                saiu_antes += f" | esperei a remoção fechar ({_voltas}x): {_motivo}"
+                print(f"  ⏳ {iid}: esperei {_oq} — {_voltas} consulta(s), {_motivo}",
+                      flush=True)
     if acao == "trocar" and tipo == "PRICE_DISCOUNT" and not _sai_de_todas:
         # Caminho do piloto/reator (escolha automatica). Quando a escolha e SUA,
         # o bloco acima ja saiu de tudo e entrou — este nao roda.
