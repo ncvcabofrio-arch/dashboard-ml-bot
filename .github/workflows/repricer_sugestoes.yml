@@ -22,15 +22,35 @@ on:
         required: false
         default: "17"
   schedule:
-    - cron: '0 6,14,22 * * *'   # 3x/dia (UTC) — rede de segurança; agendado = todas as contas
+    # 3x/dia (UTC). Continuam sendo 3 rodadas — o que mudou foi TROCAR a das 06:00
+    # UTC (03h de Brasília) pela das 10:00 UTC (07h de Brasília).
+    #
+    # POR QUE: a rodada da madrugada terminava e ficava 8 horas envelhecendo antes de
+    # alguém olhar. Às 07h o painel abre com a foto do dia, e a defasagem entre o que
+    # o ML tem e o que a tela mostra passa a ser de minutos, não de uma noite inteira.
+    # O robô de custos roda de hora em hora, então às 07h as margens já nascem com o
+    # custo mais fresco possível.
+    #
+    # 10:00 UTC = 07:00 BRT o ano inteiro (o Brasil não tem mais horário de verão).
+    # Para voltar às 4 rodadas: '0 6,10,14,22 * * *'.
+    - cron: '0 10,14,22 * * *'
 
 concurrency:
   group: ml-sugestoes        # pista PRÓPRIA — botão "Rodar sugestão" não fica preso atrás dos outros
+  # MANTIDO false DE PROPOSITO. O robô começa APAGANDO as sugestões não-aplicadas de
+  # TODAS as contas e só depois reenche, conta por conta. Cancelar no meio deixa uma
+  # parte das contas com sugestão e o resto vazio — e o painel dessas contas nasce em
+  # branco até a próxima rodada. Atrasar é ruim; cancelar é pior.
   cancel-in-progress: false
 
 jobs:
   sugestoes:
     runs-on: ubuntu-latest
+    # São 5 contas com token, cada anúncio ativo custando pelo menos duas chamadas ao
+    # ML (ofertas + frete). Sem teto, o padrão do GitHub é 6 horas: uma rodada travada
+    # segura a pista até lá e come a rodada seguinte. 300 min corta antes disso.
+    # Se começar a bater no teto, o número real aparece no log e a gente ajusta.
+    timeout-minutes: 300
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -49,3 +69,26 @@ jobs:
           MAX_ITENS:  '0'                                          # 0 = todos os ativos
           MARGEM_MIN: ${{ github.event.inputs.margem_min || '17' }}
         run: python repricer_sugestoes.py
+
+      # AVISO DE FALHA.
+      # Sem isto, uma rodada que morre no meio é invisível: o robô já apagou as
+      # sugestões e não terminou de reencher, e você só descobre ao abrir o painel e
+      # ver conta vazia — sem saber há quanto tempo está assim. Usa os mesmos secrets
+      # do Telegram que o piloto já usa. continue-on-error para o aviso nunca virar
+      # um segundo erro em cima do primeiro.
+      - name: Avisar no Telegram se falhar
+        if: failure()
+        continue-on-error: true
+        env:
+          TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          if [ -z "$TELEGRAM_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
+            echo "sem secrets do Telegram — pulando o aviso"; exit 0
+          fi
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=🚨 Sugestões de promoções FALHOU (${GITHUB_WORKFLOW}).
+          As sugestões podem estar incompletas: o robô apaga tudo antes de reencher.
+          Log: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            > /dev/null || true
