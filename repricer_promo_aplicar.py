@@ -21,22 +21,11 @@ from datetime import datetime, timezone, timedelta
 from ml_auth import obter_access
 API = rec.API
 sb = rec.sb
-# ===========================================================================
-# REDE: retentar leitura do ML, sem tocar no arquivo compartilhado.
-#
-# Em 20/ago a rodada dos 16 morreu inteira num "Connection reset by peer"
-# durante /items/{id}/shipping_options. O post() e o req_delete() daqui
-# retentam 429, 5xx e 423; o rec.get() do repricer_sugestoes nao retenta
-# nada, e uma conexao derrubada mata o processo.
-#
-# O repricer_sugestoes e compartilhado com piloto e reator, entao NAO altero
-# o arquivo. Troco a funcao so DENTRO deste processo: as funcoes de la que
-# chamam get() resolvem o nome no modulo em tempo de execucao, entao passam
-# a usar esta versao. Piloto e reator, em processos proprios, seguem iguais.
-#
-# So erro de REDE e retentado. Resposta do ML (400, 404, o que for) passa
-# direto, como antes — retentar um "nao" nao muda o "nao".
-# ===========================================================================
+# REDE: retenta leitura do ML. Em 20/ago a rodada dos 16 morreu num
+# "Connection reset by peer" no shipping_options, porque rec.get() nao retenta.
+# Substituo a funcao SO neste processo (o repricer_sugestoes e compartilhado com
+# piloto e reator, e nao pode ser alterado). So erro de REDE e retentado:
+# resposta do ML passa direto — retentar um "nao" nao muda o "nao".
 _REC_GET_ORIGINAL = rec.get
 
 
@@ -257,18 +246,9 @@ def post(path, access, body, tent=3):
 def achar_candidato(ofertas, fila):
     """Localiza, na resposta ATUAL do ML, a promoção candidata que foi aprovada.
 
-    MESMA RÉGUA DO SUGERIDOR — foi daqui que saíram os 'sem_avaliar'.
-    O repricer_sugestoes monta as candidatas assim (processar_item):
-        cand_raw = [... and o.get("original_price") and preco_oferta(o)]
-    ou seja, ele DESCARTA candidata sem preço ou sem original_price, porque o
-    rec.avaliar() devolve None nesses dois casos e não há margem pra calcular.
-
-    Este aplicador não descartava: filtrava só por status e tipo e, se o id e o
-    nome não casassem, aceitava cands[0]. Podia então escolher uma candidata que
-    o sugeridor nunca teria olhado -> avaliar() = None -> 'sem_avaliar' sem motivo.
-
-    Agora procuramos primeiro entre as AVALIÁVEIS. Só se não houver nenhuma é que
-    caímos nas demais — e aí o diagnóstico do 'sem_avaliar' diz qual campo faltou.
+    MESMA RÉGUA DO SUGERIDOR: procura primeiro entre as AVALIÁVEIS (com price e
+    original_price — sem os dois, rec.avaliar devolve None). Aceitar cands[0] sem
+    esse filtro era a origem dos 'sem_avaliar' sem motivo.
     """
     tipo = (fila.get("promocao_tipo") or "").upper()
     pid = fila.get("promocao_id")
@@ -298,30 +278,13 @@ def _com_datas(corpo, cand):
     if fim:
         corpo["finish_date"] = fim
     return corpo
-# ===========================================================================
-# LIMITES DE DESCONTO — copiados da documentação, não estimados.
-#
-# PRICE_DISCOUNT (/pt_br/desconto-individua):
-#   "O desconto máximo deve ser menor que 80% e o desconto mínimo a oferecer deve
-#    ser maior ou igual a 5%."  -> erro buyer_discount_not_in_range (5, 80)
-#
-# SELLER_CAMPAIGN (/pt_br/campanhas-do-vendedor):
-#   "the minimum percentage allowed is 10.000000"
-#   A página se contradiz no teto (o texto diz 80%, a mensagem de erro diz 70%).
-#   Quem desempatou foi o PRÓPRIO ML, na rodada de 19/ago. Para o MLB4264653013
-#   (preço de lista R$199,00) ele devolveu a faixa real:
-#       "de -41.5% (desconto máximo, preço R$39,80) até 58.4% (desconto mínimo
-#        de 10%, preço R$179,10)"
-#   R$179,10 = 10% de desconto -> confirma o mínimo de 10% ao centavo.
-#   R$ 39,80 = 80% de desconto -> o máximo que a API aceita é 80%, não 70%.
-#   Então vale 10%–80%: medido na conta dele, não lido numa tabela ambígua.
-#
-# DEAL: a página não publica limites. Herda os da campanha do vendedor. ISSO NÃO É
-#   MEDIÇÃO — é a escolha conservadora, e está escrito aqui para ninguém confundir.
-#
-# Isto só vale quando o ML NÃO devolve min/max. Quando ele devolve, a faixa dele
-# manda: é a medição do próprio anúncio.
-# ===========================================================================
+# LIMITES DE DESCONTO — da doc, não estimados. Só valem quando o ML NÃO devolve
+# min/max; quando devolve, a faixa dele manda.
+#   PRICE_DISCOUNT  5%–80%  (doc: erro buyer_discount_not_in_range (5, 80))
+#   SELLER_CAMPAIGN 10%–80% A doc se contradiz no teto (texto 80%, erro 70%). Quem
+#     desempatou foi o ML, 19/ago, MLB4264653013 (lista R$199,00): faixa devolvida
+#     R$39,80 (=80% off) a R$179,10 (=10% off). Medido, não lido.
+#   DEAL            herda de SELLER_CAMPAIGN. NÃO é medição, é escolha conservadora.
 DESC_MIN_PCT = {"PRICE_DISCOUNT": 5.0,  "SELLER_CAMPAIGN": 10.0, "DEAL": 10.0}
 DESC_MAX_PCT = {"PRICE_DISCOUNT": 80.0, "SELLER_CAMPAIGN": 80.0, "DEAL": 80.0}
 
@@ -537,46 +500,18 @@ def remover_todas(iid, access):
         errs = body.get("errors") or []
     resumo = f"bulk {sc}: {len(ok_ids)} removida(s)" + (f", {len(errs)} erro(s)" if errs else "")
     return sc, resumo, body
-# ---------------------------------------------------------------------------
-# DUAS FONTES, UMA LISTA.
-#
-# rec.participacoes_ativas() varre as CAMPANHAS DO VENDEDOR
-# (/seller-promotions/users/{seller} cruzado com promotions/{id}/items). É o caminho
-# confiável para cofinanciadas — mas só enxerga o que TEM promotion_id.
-#
-# O desconto individual (PRICE_DISCOUNT) não é campanha: é oferta de NÍVEL DE ITEM,
-# sem promotion_id (confirmado no diagnóstico: promo_id null). Relâmpago e oferta do
-# dia moram no mesmo lugar. Nenhuma das três aparece naquela varredura — elas só
-# existem no endpoint por item.
-#
-# A consequência era silenciosa e cara: numa TROCA de desconto individual para uma
-# campanha cofinanciada, o individual não era encontrado e portanto não era removido.
-# O anúncio ficaria nas DUAS promoções e venderia pela mais barata — que costuma ser
-# a de margem pior. Exatamente o que a troca existe para evitar.
-#
-# Esta função junta as duas fontes. Todos os caminhos que removem promoção passam a
-# usar ela, então o conserto vale para trocar, para sair e para a 2ª passada de uma vez.
-# ---------------------------------------------------------------------------
+# DUAS FONTES, UMA LISTA. A varredura por campanha só enxerga o que tem
+# promotion_id; individual, relâmpago e oferta do dia são de NÍVEL DE ITEM
+# (promo_id null) e só aparecem no endpoint por item. Sem juntar as duas, uma troca
+# de individual->cofinanciada não removia o individual: o anúncio ficava nas DUAS e
+# vendia pela mais barata. Todo caminho que remove promoção usa esta função.
 TIPOS_NIVEL_ITEM = {"PRICE_DISCOUNT", "LIGHTNING", "DOD"}
-# ===========================================================================
-# VARREDURA DE PARTICIPAÇÃO — a mesma do repricer_sugestoes, só que rápida.
-#
-# POR QUE EXISTE UMA CÓPIA AQUI
-#   Descobrir em que promoções um anúncio está custa 1 chamada para listar as
-#   campanhas do vendedor + 1 chamada POR CAMPANHA. Com ~40 campanhas ativas
-#   são ~41 requisições — e um item que TROCA de promoção fazia isso duas vezes.
-#   Em 52 itens, deu 10 minutos de rodada.
-#
-#   Aqui muda só o TRANSPORTE, não a regra: mesmas URLs, mesmos filtros de
-#   status, mesmo formato de retorno do rec.participacoes_ativas. O que muda:
-#     - as ~40 perguntas "esse item está nesta campanha?" saem juntas;
-#     - a lista de campanhas do vendedor é lida UMA vez por rodada.
-#
-#   É tudo GET. NENHUMA escrita foi paralelizada: entrar e sair de promoção
-#   continua acontecendo um item por vez, na mesma ordem de antes. Isso é
-#   deliberado — irmãos sincronizados compartilham preço, e mexer em dois ao
-#   mesmo tempo é exatamente como um sobrescreve o outro.
-# ===========================================================================
+# VARREDURA DE PARTICIPAÇÃO — mesma regra do repricer_sugestoes, só que rápida.
+# Descobrir em que promoções um item está custava ~41 requisições (1 + 1 por
+# campanha), duas vezes por item que troca: 10 minutos em 52 itens. Aqui muda só o
+# TRANSPORTE — as perguntas saem juntas e a lista de campanhas é lida 1x por rodada.
+# É tudo GET. NENHUMA escrita foi paralelizada, de propósito: irmãos sincronizados
+# compartilham preço, e mexer em dois ao mesmo tempo é um sobrescrever o outro.
 LEITURA_PARALELA = int(os.environ.get("LEITURA_PARALELA", "6"))
 # Itens que confirmaram num preço diferente do pedido. Não é erro de aplicação —
 # o desconto entrou — mas é dinheiro diferente do combinado, e antes não aparecia
@@ -660,27 +595,14 @@ def participacoes_ativas_rapido(item_id, seller_id, access):
 def candidatas_por_campanha(item_id, seller_id, access):
     """CANDIDATURAS do item varrendo as CAMPANHAS DA CONTA — a segunda fonte.
 
-    POR QUE EXISTE
-      O /seller-promotions/items/{id} devolveu [] para o MLB4120093236 enquanto a
-      varredura das 40 campanhas achava o mesmo item como 'candidate' em DUAS
-      (ARCOS BASE - 08-26 e 9.9). Confirmado pelo diagnóstico, com as 40 campanhas
-      varridas até o fim, sem inconclusivo. Ou seja: o endpoint por item não é só
-      incompleto para participações ATIVAS (isso a doc já dizia) — ele também
-      esconde CANDIDATURAS.
+    POR QUE: o /seller-promotions/items/{id} devolveu [] para o MLB4120093236
+    enquanto a varredura achava o mesmo item como 'candidate' em DUAS campanhas.
+    O endpoint por item também esconde CANDIDATURAS, não só participações ativas —
+    e o aplicador concluía "expirou" estando cego.
 
-      O aplicador olhava só por aquela porta e concluía "candidato expirou". Não
-      tinha expirado nada: ele estava cego. Era falso negativo, e ia para a tela
-      pintado de vermelho como se fosse erro.
-
-    O QUE FAZ
-      Pergunta a cada campanha 'started/pending' se este item está lá como
-      candidate, e devolve as respostas no MESMO formato do ofertas_do_item —
-      'id' é o id da PROMOÇÃO (no corpo cru desse endpoint, 'id' é o do item, e
-      trocar os dois faria o achar_candidato nunca casar).
-
-    CUSTO
-      ~40 chamadas, em paralelo (~8 de latência). Só roda quando a porta barata
-      volta vazia, então não pesa no caminho normal.
+    Devolve no MESMO formato do ofertas_do_item: 'id' é o id da PROMOÇÃO (no corpo
+    cru desse endpoint 'id' é o do item, e trocar faria achar_candidato nunca casar).
+    Custa ~40 chamadas em paralelo, e só roda quando a porta barata volta vazia.
     """
     campanhas = [pr for pr in campanhas_do_vendedor(seller_id, access)
                  if (pr.get("status") or "").lower() in ("started", "pending")
@@ -805,29 +727,16 @@ def sair_das_outras(iid, seller_id, access, manter_pid=None, manter_tipo=None,
 # existiam no momento em que a promoção foi montada.
 TIPOS_SEM_REENTRADA = {"LIGHTNING", "DOD"}
 
-# REMOVER O DESCONTO INDIVIDUAL EM VIGOR PARA CRIAR OUTRO: DESLIGADO.
-#
-# A ideia era que o desconto ativo ocupava o lugar e bloqueava a candidatura do
-# novo. A rodada de 19/ago derrubou isso: o MLB4160427809 teve o desconto ativo
-# removido e o ML recusou o novo IGUAL. E as seis tentativas de restaurar o
-# antigo voltaram 400 — um desconto individual removido não volta pelo mesmo
-# endpoint na mesma rodada.
-#
-# Saldo: 6 anúncios perderam o desconto que tinham e não ganharam nada. Com esta
-# chave desligada eles teriam terminado em 'sem_candidatura_ml' com tudo intacto.
-#
-# Fica aqui, atrás da variável, porque a hipótese pode estar certa e o problema
-# ser outro (janela de propagação, tipo de campanha, vigência). Quando houver
-# medição — e não palpite — é só ligar TROCAR_INDIVIDUAL=1.
+# REMOVER O INDIVIDUAL EM VIGOR PARA CRIAR OUTRO: DESLIGADO.
+# Medido em 19/ago: MLB4160427809 teve o desconto removido e o ML recusou o novo
+# IGUAL; as 6 tentativas de restaurar voltaram 400. Saldo: 6 anúncios perderam o
+# que tinham e não ganharam nada. Religue com TROCAR_INDIVIDUAL=1 quando houver
+# medição que justifique.
 TROCAR_INDIVIDUAL = (os.environ.get("TROCAR_INDIVIDUAL", "0").strip() == "1")
 # Quanto a margem pode ficar ABAIXO da pedida sem o robô recusar, em pontos.
-#
-# 0,25 saiu da rodada de 125 itens, não de gosto: a trava barrou 5 lá, e os
-# números se separam sozinhos em dois grupos. Graves — pedida 16,04% saindo
-# -10,00%, e pedida 18% saindo 13,83%. Marginais — 18% pedidos contra 17,81,
-# 17,81 e 17,94, diferenças de 0,06 a 0,19 que na prática são o mesmo número.
-# 0,25 deixa os marginais passarem e mantém os graves barrados.
-# MARGEM_TOL_PP=0 deixa estrito, ao pé da letra.
+# 0,25 saiu da rodada de 125: lá a trava barrou 5, e os números se separam sozinhos —
+# graves (16,04%->-10,00% e 18%->13,83%) contra marginais (18% contra 17,81/17,81/17,94).
+# 0,25 passa os marginais e mantém os graves barrados. MARGEM_TOL_PP=0 deixa estrito.
 try:
     MARGEM_TOL_PP = abs(float(os.environ.get("MARGEM_TOL_PP", "0.25").replace(",", ".")))
 except (TypeError, ValueError):
@@ -869,14 +778,10 @@ def esperar_saida_individual(iid, access, tentativas=9, espera=2.0):
     Devolve (pronto: bool, quantas_esperas: int, motivo: str). Nunca levanta:
     se a consulta falhar, devolve pronto=False e o robô decide sem chutar.
     """
-    # SO A CANDIDATURA E PROVA. Medido em 20/ago, tres trocas:
-    #   MLB4674410371  5 consultas, "nenhum ocupando"        -> aplicou
-    #   MLB6762178464  5 consultas, "candidatura disponivel" -> aplicou
-    #   MLB6762374998  3 consultas, "nenhum ocupando"        -> RECUSADO
-    # "Nenhum ocupando" e ambiguo: pode ser "terminou" ou "ainda nao apareceu
-    # nada na lista". O terceiro saiu da espera em 6 segundos por causa dessa
-    # leitura fraca e levou "No candidates found" no POST e na restauracao.
-    # Agora so a presenca de um PRICE_DISCOUNT 'candidate' encerra a espera.
+    # SO A CANDIDATURA E PROVA. "Nenhum ocupando" e ambiguo (pode ser "terminou" ou
+    # "ainda nao apareceu"): em 20/ago o MLB6762374998 saiu da espera em 6s por essa
+    # leitura fraca e levou "No candidates found" no POST e na restauracao. Agora so a
+    # presenca de um PRICE_DISCOUNT 'candidate' encerra a espera.
     _OCUPADO = {"started", "pending", "sync_requested", "restore_requested"}
     _vazio_desde = None
     for n in range(tentativas):
@@ -998,21 +903,12 @@ def reentrar_nas_campanhas(iid, seller_id, access, perdidas):
             continue
         _preco, _fonte = None, ""
         if t in ("DEAL", "SELLER_CAMPAIGN"):
-            # NÃO REPÕE. Duas razões, as duas escritas:
-            #
-            # 1. O preço anterior não existe em lugar nenhum — participacoes_completas
-            #    guarda id, tipo, offer_id e nome, nunca preço. Qualquer número que eu
-            #    puser aqui é um preço que VOCÊ não escolheu, na sua conta.
-            #
-            # 2. A doc da campanha do vendedor diz que, com a oferta ativa,
-            #    "os preços só podem ser reduzidos"
-            #    ("New deal_price must be lower than current deal_price"). Repor pelo
-            #    sugerido ou pelo teto tem boa chance de ser recusado — e, se for
-            #    aceito, é porque ficou MAIS BARATO que estava. Nas duas saídas eu
-            #    mexo no seu preço sem ordem sua.
-            #
-            # Era isso que a versão anterior fazia. Nunca chegou a acontecer porque
-            # o ML não devolvia sugestão nessas campanhas — dei sorte, não acertei.
+            # NÃO REPÕE. (1) O preço anterior não existe em lugar nenhum —
+            # participacoes_completas guarda id, tipo, offer_id e nome, nunca preço.
+            # (2) Com a oferta ativa a doc só permite REDUZIR ("New deal_price must be
+            # lower than current deal_price"): repor pelo sugerido ou pelo teto é
+            # recusado, ou aceito deixando MAIS BARATO. Nos dois casos eu mexeria no
+            # seu preço sem ordem sua.
             nao_voltou.append(f"{rot}({t}: quem define o preço aqui é você e eu não guardei "
                               f"o anterior — refaça no ML para não trocar seu preço por um "
                               f"que você não escolheu)")
@@ -1214,23 +1110,13 @@ def confirmar_pos_entrada(fila, access):
 def _faixa_individual(iid, seller_id):
     """A FAIXA CRÍVEL do desconto individual, lida da sugestão guardada no banco.
 
-    POR QUE ISSO EXISTE
-      O desconto individual não é candidatura de campanha: ele não aparece na
-      varredura das campanhas do vendedor, e o /seller-promotions/items/{id}
-      às vezes devolve [] (confirmado pelo diagnóstico). Sem candidato vivo, o
-      aplicador parava com 'sem_candidato' — e 18 promoções individuais que
-      você montou na tela ficaram travadas por isso.
+    O individual não é candidatura de campanha e o /seller-promotions/items/{id}
+    às vezes devolve []; sem candidato vivo o aplicador parava em 'sem_candidato'
+    (18 promoções travaram assim). Mas a faixa nunca se perdeu: o repricer_sugestoes
+    já a grava em 'ofertas' como preco_min/preco_max/preco_sug.
 
-      Só que a faixa NUNCA se perdeu: o repricer_sugestoes a captura e grava na
-      coluna 'ofertas', na linha do individual, como preco_min/preco_max/preco_sug.
-      O aplicador ia buscar no ML o que já estava em casa.
-
-    POR QUE IGNORA O 'escolha_manual'
-      Aquele sinalizador protege a DECISÃO: quando você escolheu na mão, o robô
-      não troca a sua escolha pela recomendação dele. A faixa não é decisão, é
-      MEDIÇÃO — é o que o ML respondeu. Ler a medição não desfaz a sua escolha.
-
-    Devolve o dict da oferta individual, ou None.
+    Ignora o 'escolha_manual' de propósito: aquele sinalizador protege a DECISÃO, e
+    faixa não é decisão, é MEDIÇÃO. Devolve o dict da oferta individual, ou None.
     """
     try:
         rows = (sb.table("repricer_sugestoes")
@@ -1262,17 +1148,11 @@ def candidato_individual_da_sugestao(iid, seller_id, preco_lista):
     (rec.avaliar, _clamp_preco, corpo_post). Nenhum valor é inventado: todos
     vieram do ML quando a sugestão rodou.
 
-    SEM FAIXA TAMBÉM VALE. O desconto individual é criado pelo VENDEDOR — o POST
-    é promotion_type + deal_price + datas, e o piloto faz isso sem consultar
-    candidato nenhum. A faixa do ML é uma DICA de até onde o desconto é crível,
-    não uma permissão. Tratar a falta dela como impedimento travava 305 anúncios
-    por causa de um dado opcional.
-      · com faixa  -> usamos, e o POST raramente é recusado
-      · sem faixa  -> o teto é o próprio preço de lista (desconto não pode ser
-                      acima dele: isso é fato, não estimativa) e quem julga a
-                      credibilidade é o ML, na resposta do POST
-    Em nenhum dos dois casos o PREÇO é inventado: ele sai da margem que você
-    escolheu, calculada com a comissão real da API.
+    SEM FAIXA TAMBÉM VALE: o individual é criado pelo VENDEDOR (o POST é só
+    promotion_type + deal_price + datas). A faixa do ML é DICA de credibilidade, não
+    permissão — tratá-la como impedimento travava 305 anúncios por um dado opcional.
+    Sem ela o teto é o preço de lista, e quem julga é o ML no POST. Em nenhum caso o
+    preço é inventado: sai da sua margem, com a comissão real da API.
     """
     fx = _faixa_individual(iid, seller_id) or {}
     sem_faixa = (fx.get("sem_faixa") is True) or (fx.get("preco_min") is None
@@ -1477,14 +1357,9 @@ def processar(fila, access):
         return "sem_item"
     ltid = it.get("listing_type_id")
     cat = it.get("category_id")
-    # O SKU mora em TRÊS lugares no ML: seller_custom_field (campo antigo), o atributo
-    # SELLER_SKU (formulário atual) e dentro das variações. Aqui liamos só os dois
-    # primeiros — e o rec.sku_do_item() já resolve os três, com a regra de não escolher
-    # nada quando as variações discordam entre si.
-    # Sem isso, um anúncio com SKU só no atributo (ex.: MLB3967924417, SKU MLPA003)
-    # chegava como "sem custo" e o aplicador desistia — de um item que TEM custo
-    # cadastrado. Só não quebrou até agora porque o painel manda o sku na fila; pelo
-    # retry ou por qualquer caminho sem esse campo, quebraria.
+    # O SKU mora em TRÊS lugares (seller_custom_field, atributo SELLER_SKU, variações) e
+    # rec.sku_do_item() resolve os três. Lendo só os dois primeiros, um anúncio com SKU só
+    # no atributo (MLB3967924417 / MLPA003) chegava como "sem custo" tendo custo.
     sku = rec.sku_do_item(it) or fila.get("sku")
     custo = rec.custo_efetivo(iid, sku)
     if custo is None:
@@ -1532,38 +1407,17 @@ def processar(fila, access):
                 cand["price"] = round(hi, 2)
         except (TypeError, ValueError):
             pass
-    # ---- DESCONTO INDIVIDUAL (PRICE_DISCOUNT): o preço é SEU, não do ML ----
-    # A doc do desconto individual é explícita: o vendedor informa o deal_price. Por isso
-    # o candidato chega com price=0 — não é dado faltando, é o ML dizendo "escolhe você".
-    # O que ele manda é a FAIXA CRÍVEL, em min/max_discounted_price (conferido nos itens
-    # reais: min = 20% do original = teto de 80% de desconto; max = 5% a 10% de desconto,
-    # calculado pelo ML item a item).
-    # Sem preencher cand["price"], o rec.avaliar() devolvia None e o item morria em
-    # 'sem_avaliar' sem explicação.
-    # DE ONDE VEM O PREÇO, nesta ordem:
-    #   1. fila.preco_alvo         -> você fixou um preço na tela
-    #   2. fila.margem_alvo_manual -> você escolheu uma MARGEM-ALVO (é o que a tela guarda
-    #                                 hoje ao montar a promoção individual; o campo de preço
-    #                                 dela depende de comissao_pct, que o log não tem)
-    # NÃO existe caminho 3. Se você não escolheu preço nem margem, o aplicador PARA.
-    # Cair no piso do grupo seria aplicar uma margem que você não pediu — chute com
-    # aparência de regra. Melhor um item parado com o motivo escrito do que um desconto
-    # no ar com um número que ninguém decidiu.
-    # ---- CAMPANHA DE PREÇO LIVRE SEM FAIXA: mesmo tratamento do desconto individual ----
-    # DEAL e SELLER_CAMPAIGN são as campanhas em que o VENDEDOR define o preço (é o que
-    # o corpo_post já documenta no caso (6): "vendedor define o preço, dentro da faixa
-    # crível"). Quando o ML não devolve faixa NEM preço — como na ARCOS BASE-08-26, que
-    # chegou com price:0, min:null, max:null — o candidato ficava inavaliável e o robô
-    # desistia com 'sem_avaliar'. Mas a falta de faixa é um dado OPCIONAL ausente, não um
-    # impedimento: o mesmo argumento que já vale para o desconto individual.
+    # ---- PREÇO LIVRE (PRICE_DISCOUNT, DEAL, SELLER_CAMPAIGN): o preço é SEU ----
+    # O candidato chega com price=0: não é dado faltando, é o ML dizendo "escolhe você".
+    # O que ele manda é a FAIXA CRÍVEL em min/max_discounted_price (medido: min = 20% do
+    # original; max = 5% a 10% de desconto, calculado item a item). Quando não manda nem
+    # faixa (ex.: ARCOS BASE-08-26, price:0/min:null/max:null), o teto vira o preço de
+    # lista — desconto acima do cheio não existe — e quem julga credibilidade é o ML no
+    # POST. LIGHTNING/DOD ficam fora: têm bloco próprio e dependem da faixa.
     #
-    # O teto vira o preço de lista porque desconto acima do preço cheio não existe — isso
-    # é fato, não estimativa. O piso fica livre e quem julga a credibilidade é o ML, na
-    # resposta do POST. Nenhuma margem é inventada aqui: o preço continua saindo da margem
-    # que VOCÊ escolheu na tela, e sem escolha sua o robô ainda para em 'sem_preco_alvo'.
-    #
-    # LIGHTNING/DOD ficam fora: o relâmpago tem bloco próprio acima e depende da faixa do
-    # ML para a credibilidade.
+    # O PREÇO SAI DA MARGEM que você escolheu (ver a condição abaixo). Sem escolha sua o
+    # aplicador PARA em 'sem_preco_alvo': cair no piso do grupo seria aplicar uma margem
+    # que você não pediu.
     if (tipo in ("DEAL", "SELLER_CAMPAIGN")
             and not rec.preco_oferta(cand)
             and cand.get("min_discounted_price") is None
@@ -1619,8 +1473,23 @@ def processar(fila, access):
                               f"R${_orig:.2f}. Monte a promoção individual no painel escolhendo a margem.")})
             print(f"  ! sem_preco_alvo {iid}: sem escolha sua — {_faixa_txt()}", flush=True)
             return "sem_preco_alvo"
-        if _preco_tela not in (None, ""):
-            # caminho 1: você fixou um PREÇO. Ele manda; só encaixamos na faixa do ML.
+        # A MARGEM MANDA. O preço só decide quando você NÃO escolheu margem.
+        #
+        # Era o contrário, e custou caro: o painel estima o preço a partir de uma foto
+        # do banco, grava em preco_alvo, e o aplicador obedecia sem recalcular. Cinco
+        # anúncios premium saíram com a comissão do clássico embutida no preço (desvio
+        # de exatos 5,00 pontos), e um deles aplicou em setembro um preço calculado em
+        # julho — a fila é upsert por item, então a linha fica parada lá.
+        #
+        # O caminho da margem não estima nada: busca binária sobre rec.avaliar, que
+        # consulta a comissão REAL na API do ML. Se a margem não couber, ele para com
+        # 'margem_inalcancavel' em vez de aplicar menos do que você pediu.
+        #
+        # Vale para os quatro tipos de preço livre: individual, DEAL, SELLER_CAMPAIGN, DOD.
+        # O botão "melhor margem possível" manda preco_alvo SEM margem_alvo_manual, então
+        # continua caindo aqui — e ali o preço é do aplicador, medido, não estimado.
+        if _marg_tela in (None, "") and _preco_tela not in (None, ""):
+            # caminho 1: PREÇO fixado e sem margem-alvo. Ele manda; só encaixamos na faixa.
             _p = _clamp_preco(_preco_tela, cand)
             _origem = f"preço escolhido na tela R${float(_preco_tela):.2f}"
             if abs(float(_p) - float(_preco_tela)) > 0.005:
@@ -1783,45 +1652,28 @@ def processar(fila, access):
                             "preco_aplicado": ev["pb"], "margem_aplicada": ev["margem"]})
         print(f"  [DRY] {acao} {iid} {tipo} -> {json.dumps(corpo)} (margem {ev['margem']:.1f}%)", flush=True)
         return "simulado"
-    # ---- APLICAÇÃO REAL ----
-    # ORDEM (à prova de falha, em DUAS travas):
-    #   1) ENTRA na nova. Se o ML RECUSAR, não mexemos em nada (anúncio segue como estava).
-    #   2) SÓ SAI das antigas depois que o sale_price CONFIRMAR que a nova está no ar (2ª passada).
-    # Aprendizado das últimas passadas: o ML às vezes ACEITA a entrada (201) mas demora segundos/
-    # minutos pra refletir o desconto no preço (comum nas cofinanciadas -> estado 'ativando').
-    # Se saíssemos das antigas já no 201, existiria uma janela em que a nova foi aceita mas ainda
-    # não pegou E a antiga já saiu -> anúncio SEM desconto. Por isso a saída fica gated pelo PREÇO.
+    # ---- APLICAÇÃO REAL ---- ORDEM, em duas travas:
+    #   1) ENTRA na nova; se o ML recusar, nada é tocado.
+    #   2) SÓ SAI das antigas depois que o sale_price confirmar a nova (2ª passada).
+    # O ML às vezes aceita (201) e demora minutos pra refletir no preço ('ativando'). Sair
+    # já no 201 abriria uma janela com a nova ainda não valendo e a antiga já fora.
     aviso = ""
-    # ---- EXCEÇÃO DE ORDEM: desconto individual em item que já tem campanha ativa ----
-    # A regra geral deste aplicador é ENTRAR primeiro e só sair da antiga depois que o
-    # preço confirmar — assim o anúncio nunca fica descoberto. Para PRICE_DISCOUNT a
-    # ordem se INVERTE, por uma regra da própria ML (doc do desconto individual):
-    #   "Se ao iniciar o desconto o item estiver participando de um DEAL, o desconto não
-    #    será aplicado até que o DEAL associado seja finalizado."
-    # Entrando primeiro, o desconto ficaria DORMENTE: o sale_price nunca mudaria, a
-    # confirmação nunca viria e o item ficaria preso em 'aguardando' reconferindo à toa.
-    # CUSTO CONHECIDO E ACEITO: entre o DELETE e o POST o anúncio fica alguns segundos
-    # sem desconto nenhum. Se o POST for recusado nesse intervalo, ele fica SEM desconto
-    # até você agir — por isso esse caso é gritado no log e no resultado, não escondido.
+    # ---- EXCEÇÃO DE ORDEM: desconto individual em item com campanha ativa ----
+    # A regra geral é ENTRAR primeiro e sair da antiga só depois de confirmar. Para
+    # PRICE_DISCOUNT inverte, por regra da ML: "Se ao iniciar o desconto o item estiver
+    # participando de um DEAL, o desconto não será aplicado até que o DEAL associado seja
+    # finalizado" — entrando primeiro ele ficaria dormente para sempre.
+    # CUSTO ACEITO: entre o DELETE e o POST o anúncio fica segundos sem desconto; se o
+    # POST for recusado aí, fica SEM até você agir. Por isso esse caso é gritado no log.
     saiu_antes = ""
     _saiu_nomes = []          # nomes das campanhas de onde ele REALMENTE saiu (DELETE 200)
     _saiu_dicts = []          # as participações inteiras, pra poder desfazer a saída
     _ind_antigo = None        # o desconto individual que estava em vigor e foi removido
-    # ===================================================================
-    # ESCOLHA SUA = SAI DE TODAS E ENTRA NA QUE VOCE PEDIU
-    #
-    # E o que voce faria no painel do ML: tira o que esta la e poe a nova.
-    # Sem isto, entrar numa campanha com desconto individual ativo cria uma
-    # oferta DORMENTE — aceita pelo ML (201) e sem efeito nenhum no preco.
-    # Foi o caso do MLB2977506201: SMART a R$1.400 aceita, cliente pagando
-    # R$1.617,08 pelo individual, item preso na fila de retry para sempre.
-    #
-    # So vale quando a escolha e sua. Piloto e reator seguem a ordem antiga
-    # (entra primeiro, sai depois), que nunca deixa o anuncio descoberto.
-    # ===================================================================
-    # SEM EXCECAO: vale para qualquer alvo, inclusive um novo desconto individual.
-    # Antes eu excluia PRICE_DISCOUNT daqui, e com isso trocar o preco de um
-    # desconto individual continuava impossivel pelo robo — que nao era o pedido.
+    # ESCOLHA SUA = SAI DE TODAS E ENTRA NA QUE VOCE PEDIU.
+    # Sem isto, entrar numa campanha com individual ativo cria oferta DORMENTE: aceita
+    # (201) e sem efeito no preco (MLB2977506201, SMART a R$1.400 aceita e cliente
+    # pagando R$1.617,08). Vale para QUALQUER alvo, inclusive um novo individual.
+    # So quando a escolha e sua: piloto e reator seguem a ordem antiga (entra, depois sai).
     _sai_de_todas = (acao == "trocar" and bool(fila.get("escolha_manual")))
     if _sai_de_todas:
         # PRE-VOO DA FAIXA — so quando o alvo e o desconto individual.
@@ -1852,15 +1704,11 @@ def processar(fila, access):
                       f"— NÃO saí de nada", flush=True)
                 return "fora_da_faixa_doc"
         _ind_ativo = individual_em_vigor(ofertas)
-        # INDIVIDUAL -> INDIVIDUAL: troca so o preco, nao toca em campanha.
-        # Se o individual atual esta EM VIGOR, nenhuma campanha esta bloqueando
-        # ele (a doc do ML diz que DEAL ativo impede o individual de valer). Logo
-        # o substituto tambem nao sera bloqueado, e remover campanha aqui seria
-        # risco puro: DEAL e SELLER_CAMPAIGN o robo nao repoe.
-        # TRAVA (22/ago): remover o individual para recriar falhou 16 de 16 na
-        # ultima rodada, com 15 anuncios ficando SEM desconto nenhum. Enquanto a
-        # causa nao for medida, o robo prefere NAO TROCAR a trocar e perder.
-        # TROCAR_INDIVIDUAL=1 devolve o comportamento anterior.
+        # INDIVIDUAL -> INDIVIDUAL: troca so o preco, nao toca em campanha. Se o
+        # individual atual esta em vigor, nenhuma campanha o bloqueia (doc: DEAL ativo
+        # impede o individual de valer), logo o substituto tambem nao sera bloqueado.
+        # TRAVA (22/ago): remover para recriar falhou 16 de 16, com 15 anuncios ficando
+        # SEM desconto. TROCAR_INDIVIDUAL=1 devolve o comportamento anterior.
         if (tipo == "PRICE_DISCOUNT" and _ind_ativo is not None
                 and not TROCAR_INDIVIDUAL):
             _pv_tv = None
@@ -1921,20 +1769,12 @@ def processar(fila, access):
                 saiu_antes += " | ⚠️ DELETE recusado em: " + ", ".join(_falhou)
             print(f"  ~ {iid}: escolha sua — saí de {len(_saiu)} promoção(ões) antes de entrar"
                   + (f" | falhou em {len(_falhou)}" if _falhou else ""), flush=True)
-            # ESPERAR A REMOÇÃO FECHAR — sempre que a próxima coisa for um desconto
-            # individual, e não só quando havia um individual antes.
-            #
-            # A condição antiga era 'if _ind_ativo is not None'. Quem tinha SÓ
-            # campanhas saía delas e postava na sequência, sem esperar — e a remoção
-            # no ML é assíncrona (restore_requested, na doc). O POST chegava antes de
-            # o item ficar livre e voltava "No candidates found for item".
-            #
-            # Custou 4 anúncios com a mesma assinatura: MLB4288780921 (rodada de 79),
-            # MLB1539564488, MLB3164233836 e MLB4419645793 (rodada de 125). Nos quatro
-            # as campanhas saíram, o individual foi recusado, e a volta também.
-            #
-            # esperar_saida_individual espera exatamente o sinal certo: ela só encerra
-            # quando o ML volta a oferecer candidatura de PRICE_DISCOUNT.
+            # ESPERAR A REMOÇÃO FECHAR sempre que o alvo for individual — não só quando
+            # já havia um individual. A remoção no ML é assíncrona (restore_requested):
+            # quem tinha SÓ campanhas postava antes de o item ficar livre e levava "No
+            # candidates found". Custou 4 anúncios (MLB4288780921; MLB1539564488,
+            # MLB3164233836, MLB4419645793). A espera encerra no sinal certo: quando o
+            # ML volta a oferecer candidatura de PRICE_DISCOUNT.
             if _ind_ativo is not None or (tipo == "PRICE_DISCOUNT" and _saiu):
                 if _ind_ativo is not None:
                     _ind_antigo = _ind_ativo
@@ -1945,15 +1785,11 @@ def processar(fila, access):
                 print(f"  ⏳ {iid}: esperei {_oq} — {_voltas} consulta(s), {_motivo}",
                       flush=True)
     if acao == "trocar" and tipo == "PRICE_DISCOUNT" and not _sai_de_todas:
-        # Caminho do piloto/reator (escolha automatica). Quando a escolha e SUA,
-        # o bloco acima ja saiu de tudo e entrou — este nao roda.
-        # ---- PRE-VOO: decidir ANTES de tocar em qualquer campanha ----
-        # A ordem anterior saia das campanhas primeiro e so depois via que havia
-        # um desconto individual em vigor — quando o POST ja estava condenado.
-        # Em 20/ago isso custou as participacoes de 7 anuncios de uma vez.
-        #
-        # Que o ML recusa candidatura nova quando ja existe individual ativo
-        # esta MEDIDO: 17 anuncios naquela rodada, 17 recusas.
+        # Caminho do piloto/reator (escolha automatica); com escolha sua, o bloco acima
+        # ja resolveu e este nao roda.
+        # PRE-VOO: decidir ANTES de tocar em campanha. A ordem anterior saia primeiro e
+        # so entao via que havia individual em vigor — custou 7 anuncios em 20/ago. Que o
+        # ML recusa candidatura nova com individual ativo esta MEDIDO: 17 de 17.
         _ind_atual = individual_em_vigor(ofertas)
         if _ind_atual is not None and not TROCAR_INDIVIDUAL:
             _pv_at = None
@@ -1997,18 +1833,9 @@ def processar(fila, access):
             saiu_antes += " | ⚠️ DELETE recusado em: " + ", ".join(_falhou)
         print(f"  ~ {iid}: saí de {len(_saiu)} campanha(s) antes de aplicar o desconto individual"
               + (f" | falhou em {len(_falhou)}" if _falhou else ""), flush=True)
-        # HIPÓTESE TESTADA E REPROVADA (19/ago).
-        #
-        # Eu supus que o "No candidates found" acontecia porque o anúncio já tinha um
-        # desconto individual em vigor ocupando o lugar, e que remover o antigo abriria
-        # a candidatura do novo. O teste real diz o contrário: o MLB4160427809 teve o
-        # desconto ativo removido e o ML recusou o novo IGUAL. E as 6 tentativas de
-        # restaurar o antigo voltaram 400 — removido, ele não volta pelo mesmo endpoint.
-        # Seis anúncios ficaram sem o desconto que tinham.
-        #
-        # A causa do "No candidates found" segue DESCONHECIDA. Por isso o padrão é NÃO
-        # tocar no desconto em vigor: relatar que ele existe é tudo que dá pra afirmar.
-        # TROCAR_INDIVIDUAL=1 religa a remoção quando houver medição que a justifique.
+        # A causa do "No candidates found" segue DESCONHECIDA — remover o individual
+        # em vigor NÃO abre a candidatura (medição de 19/ago, ver TROCAR_INDIVIDUAL).
+        # Por isso o padrão é não tocar nele: relatar que existe é tudo que dá pra afirmar.
         _ind_antigo = _ind_atual        # ja lido no pré-voo, nao consulta de novo
         if _ind_antigo is not None:
             # ---- PRÉ-VOO: o preço que vamos pedir CABE na regra? ----
@@ -2196,20 +2023,13 @@ def processar(fila, access):
     if not ok:
         _t = json.dumps(resp, ensure_ascii=False).upper()
         if "NO CANDIDATES FOUND" in _t:
-            # "No candidates found for item" NÃO quer dizer "não é elegível".
-            #
-            # VERIFICADO no navegador, em 3 dos 12 recusados de uma rodada real: os três
-            # JÁ ESTAVAM com o preço-alvo na página do anúncio. Em todas as 12 recusas,
-            # um IRMÃO sincronizado tinha aplicado o mesmo preço na mesma rodada. O ML
-            # propaga o desconto pela família e, feito isso, não sobra candidatura para
-            # pedir de novo — então ele responde "sem candidatos".
-            #
-            # Ou seja: o trabalho FOI feito, só não por este POST. Marcar como recusa
-            # pintava 12 vermelhos por rodada em anúncios que estavam certos.
-            #
-            # Antes de concluir qualquer coisa, perguntamos ao ML quanto o cliente paga.
-            # (Cuidado ao conferir na página: a campanha "Desconto no Pix" tira mais uns
-            # R$10 por baixo. O sale_price devolve o preço sem esse desconto.)
+            # "No candidates found for item" NÃO é "não é elegível". Verificado no
+            # navegador em 3 dos 12 recusados de uma rodada: os três já estavam no
+            # preço-alvo. Nas 12, um IRMÃO sincronizado aplicara o mesmo preço na mesma
+            # rodada — o ML propaga pela família e não sobra candidatura para pedir de
+            # novo. O trabalho foi feito, só não por este POST. Então perguntamos ao ML
+            # quanto o cliente paga antes de concluir. (Ao conferir na página: "Desconto
+            # no Pix" tira mais uns R$10; o sale_price vem sem ele.)
             _alvo_ok = None
             try:
                 _pv, _pt = preco_venda_real(iid, access)
@@ -2406,6 +2226,7 @@ def main():
                 codigo_final[fid] = rr
                 resumo["2p_" + rr] = resumo.get("2p_" + rr, 0) + 1
     # ---- BOOKKEEPING DA FILA DE RETRY: cada item entra/atualiza/sai conforme o desfecho ----
+    _cod_por_fila = {}      # código -> [ids de repricer_promo_fila]
     if not DRY:
         for f in fila:
             code = codigo_final.get(f["id"])
@@ -2416,7 +2237,33 @@ def main():
                 txt = (_RETRY_PATCH.get(f["id"], {}) or {}).get("resultado") or f.get("resultado")
             else:
                 txt = (res1_mem.get(f["id"], ("", ""))[1]) or f.get("resultado")
+                _cod_por_fila.setdefault(code, []).append(f["id"])
             registrar_retry(f, code, txt)
+
+    # ---- CÓDIGO DO DESFECHO NA FILA ----
+    # O status ('erro') não distingue "o ML recusou" de "eu me recusei de propósito",
+    # e o painel pintava as duas coisas com a mesma pílula vermelha. O código separa.
+    # Os ids "retry:..." ficam de fora de propósito: não são linha de repricer_promo_fila.
+    #
+    # Um update por CÓDIGO (não por item): 5 a 10 chamadas numa rodada de centenas.
+    if _cod_por_fila:
+        _ok, _erro = 0, None
+        for _code, _ids in _cod_por_fila.items():
+            try:
+                sb.table("repricer_promo_fila").update({"codigo": _code}).in_("id", _ids).execute()
+                _ok += len(_ids)
+            except Exception as e:
+                _erro = e
+                break
+        if _erro is not None:
+            # Não derruba a rodada: o status e o resultado JÁ foram gravados item a item.
+            # Esta coluna é informação a mais.
+            print(f"  aviso: não gravei o código do desfecho na fila ({_erro}). "
+                  f"Se a mensagem falar em coluna inexistente, rode o fase_codigo_fila.sql "
+                  f"no Supabase — a rodada em si não foi afetada.", flush=True)
+        else:
+            print(f"  código do desfecho gravado em {_ok} linha(s) da fila "
+                  f"({len(_cod_por_fila)} desfecho(s) distinto(s)).", flush=True)
     if REENTRADAS:
         print(f"\n↩️  {len(REENTRADAS)} anúncio(s) tiveram a saída DESFEITA: o ML recusou o "
               f"desconto individual e o robô refez as participações.", flush=True)
