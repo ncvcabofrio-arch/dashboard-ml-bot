@@ -1,0 +1,46 @@
+# De onde saem os 5,00 pontos — SÓ LEITURA. Não altera nada no ML nem no banco.
+#
+# Decompõe a margem em suas parcelas e mostra, item a item, a conta do PAINEL
+# (A e B deduzidos dos dois pontos da faixa que o ML mandou) ao lado da conta do
+# ROBÔ (comissão da API + rebate do ML + frete + custo). O que sobra é a
+# diferença, já separada em "veio de A" e "veio de B".
+#
+# Sem MLBS ele pega sozinho quem a trava da margem barrou na fila desta conta.
+name: Conferir a comissao (leitura)
+on:
+  workflow_dispatch:
+    inputs:
+      seller_id:
+        description: 'Conta (seller_id). Padrão = 177795203 (CF), a das rodadas.'
+        required: false
+        default: '177795203'
+      mlbs:
+        description: 'MLBs separados por vírgula. VAZIO = pega os barrados por margem na fila.'
+        required: false
+        default: ''
+      limite:
+        description: 'Teto de itens quando a lista vem da fila.'
+        required: false
+        default: '40'
+jobs:
+  ler:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Instalar dependencias
+        run: pip install requests supabase
+      - name: Conferir a comissao
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          ML_CLIENT_ID: ${{ secrets.ML_CLIENT_ID }}
+          ML_CLIENT_SECRET: ${{ secrets.ML_CLIENT_SECRET }}
+          ML_REFRESH_TOKEN: ${{ secrets.ML_REFRESH_TOKEN }}
+          SELLER_ID: ${{ inputs.seller_id }}
+          MLBS: ${{ inputs.mlbs }}
+          LIMITE: ${{ inputs.limite }}
+        run: python -u conferir_comissao.py
