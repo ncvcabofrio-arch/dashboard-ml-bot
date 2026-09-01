@@ -844,22 +844,39 @@ def restaurar_individual(iid, access, oferta):
         corpo["start_date"] = ini
     if fim:
         corpo["finish_date"] = fim
-    try:
-        scd, resp = post(f"/seller-promotions/items/{iid}?app_version=v2", access, corpo)
-    except Exception as e:
-        return False, f"erro de rede ao restaurar: {e}"
-    if scd in (200, 201):
-        return True, f"R${float(preco):.2f} (datas originais)"
-    # 2ª tentativa: a data de início já passou. Recomeça hoje, mantendo o fim.
-    if ini:
-        hoje = (datetime.now(timezone.utc) - timedelta(hours=3)).strftime("%Y-%m-%d")
-        corpo["start_date"] = hoje + "T00:00:00"
-        try:
-            scd, resp = post(f"/seller-promotions/items/{iid}?app_version=v2", access, corpo)
-        except Exception as e:
-            return False, f"erro de rede na 2ª tentativa: {e}"
-        if scd in (200, 201):
-            return True, f"R${float(preco):.2f} (início refeito para hoje, fim mantido)"
+    hoje = (datetime.now(timezone.utc) - timedelta(hours=3)).strftime("%Y-%m-%d")
+
+    # INSISTE. Esta e a ULTIMA linha de defesa: se ela falhar, o anuncio fica SEM
+    # desconto nenhum e so a sua mao resolve. Na rodada de 146 ela falhou em 4
+    # (MLB4233151510, MLB4500918924, MLB4799734358, MLB4975782925), todas com
+    # "No candidates found" — o mesmo sintoma assincrono que a espera trata em
+    # todo o resto do arquivo, e que aqui tinha UMA tentativa por formato.
+    #
+    # Agora sao 3 RODADAS: cada uma espera a candidatura reabrir de novo e tenta os
+    # dois formatos de data. Uma tentativa a mais que falha nao custa nada; uma que
+    # acerta salva o desconto do anuncio.
+    # scd/resp precisam existir mesmo se TODAS as tentativas caírem no except (rede):
+    # sem isto o return final levantaria NameError e a mensagem de erro sumiria junto.
+    scd, resp = None, None
+    _ultimo = None
+    for _volta in range(3):
+        if _volta:
+            time.sleep(4.0)
+            esperar_saida_individual(iid, access)
+        for _rotulo, _corpo in (("datas originais", corpo),
+                                ("início refeito para hoje, fim mantido",
+                                 {**corpo, "start_date": hoje + "T00:00:00"} if ini else None)):
+            if _corpo is None:
+                continue
+            try:
+                scd, resp = post(f"/seller-promotions/items/{iid}?app_version=v2", access, _corpo)
+            except Exception as e:
+                _ultimo = f"erro de rede ao restaurar: {e}"
+                continue
+            if scd in (200, 201):
+                _quando = "" if not _volta else f", na {_volta + 1}ª rodada"
+                return True, f"R${float(preco):.2f} ({_rotulo}{_quando})"
+            _ultimo = resp
     # O corpo do 400 é a única pista de POR QUE o ML recusa recriar um desconto que
     # ele mesmo tinha. Sem ele sobra "(400)", que não permite consertar nada.
     return False, (f"ML recusou a restauração ({scd}) — preço antigo era R${float(preco):.2f} "
