@@ -1742,14 +1742,21 @@ def processar(fila, access):
                     _mg_vigor = _e_tv.get("margem") if _e_tv else None
                 except (TypeError, ValueError, KeyError):
                     _mg_vigor = None
+            # A comparação é uma FAIXA, não um piso. Eu tinha escrito ">= alvo", e isso
+            # confundiu duas coisas diferentes: "já está no ponto que você pediu" com
+            # "está acima do que você pediu". Na rodada de 27 isso engoliu 18 anúncios —
+            # um deles com 34,93% de margem enquanto você pedia 18%, ou seja, R$18,74 de
+            # desconto que você mandou dar e não foi dado. No Acelerar, margem ACIMA do
+            # alvo não é item resolvido: é justamente o item que falta descontar.
             if (_mg_vigor is not None and _mg_alvo is not None
-                    and float(_mg_vigor) >= float(_mg_alvo) - MARGEM_TOL_PP):
+                    and abs(float(_mg_vigor) - float(_mg_alvo)) <= MARGEM_TOL_PP):
                 gravar(fila["id"], {"status": "aplicada",
                                     "preco_aplicado": round(float(_pv_tv), 2),
                                     "margem_aplicada": _mg_vigor,
                                     "resultado": (
                     f"JÁ ESTÁ NO ALVO ✓ — o desconto individual em vigor ({_txt_tv}) "
-                    f"entrega {float(_mg_vigor):.2f}%, e você pediu {float(_mg_alvo):.2f}%. "
+                    f"entrega {float(_mg_vigor):.2f}%, e você pediu {float(_mg_alvo):.2f}% "
+                    f"(diferença de {abs(float(_mg_vigor)-float(_mg_alvo)):.2f} ponto, dentro da tolerância). "
                     f"Não havia o que trocar. Quando o preço bate com o que seria enviado, "
                     f"em geral é o anúncio IRMÃO sincronizado que já aplicou por este.")})
                 print(f"  = {iid}: já está no alvo ✓ — em vigor {_txt_tv} entrega "
