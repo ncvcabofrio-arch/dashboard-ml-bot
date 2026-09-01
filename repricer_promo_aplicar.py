@@ -1755,15 +1755,39 @@ def processar(fila, access):
                 print(f"  = {iid}: já está no alvo ✓ — em vigor {_txt_tv} entrega "
                       f"{float(_mg_vigor):.2f}% (pedido {float(_mg_alvo):.2f}%)", flush=True)
                 return "ja_ativa"
-            gravar(fila["id"], {"status": "erro", "resultado": (
-                f"NÃO MEXI EM NADA. O anúncio já tem desconto individual em vigor "
-                f"({_txt_tv}) e a troca está desligada: em 22/ago ela falhou 16 de 16 "
-                f"e 15 anúncios ficaram sem desconto porque o ML recusou devolver o "
-                f"antigo. Troque no painel do ML, ou ligue TROCAR_INDIVIDUAL=1 "
-                f"assumindo esse risco.")})
-            print(f"  ! ja_tem_individual {iid}: em vigor {_txt_tv} — troca DESLIGADA, "
-                  f"não removi nada", flush=True)
-            return "ja_tem_individual"
+            # ---- TEM OUTRA PROMOÇÃO ATIVA? É ISSO QUE DECIDE ----
+            # O piloto troca individual por individual todo dia e funciona. A regra
+            # dele (linha 515) é pular quando existe OUTRA promoção ativa — e o 16/16
+            # de 22/ago foi feito justamente nesses. A doc explica: "Se ao iniciar o
+            # desconto o item estiver participando de um DEAL, o desconto não será
+            # aplicado até que o DEAL associado seja finalizado."
+            #
+            # participacoes_completas junta as DUAS fontes de propósito: o endpoint por
+            # item não devolve participação ATIVA de campanha cofinanciada, que é
+            # exatamente a que atrapalha aqui.
+            _outras_ativas = [p for p in (participacoes_completas(
+                                  iid, str(fila.get("seller_id") or ""), access, ofertas) or [])
+                              if (p.get("type") or "").upper() != "PRICE_DISCOUNT"]
+            if _outras_ativas:
+                _nomes_out = ", ".join(
+                    f"{(p.get('name') or p.get('promotion_id') or '?')}({(p.get('type') or '?')})"
+                    for p in _outras_ativas[:6])
+                gravar(fila["id"], {"status": "erro", "resultado": (
+                    f"NÃO MEXI EM NADA. O anúncio tem desconto individual em vigor "
+                    f"({_txt_tv}) E TAMBÉM {len(_outras_ativas)} promoção(ões) ativa(s): "
+                    f"{_nomes_out}. Trocar o individual assim é o caso que falhou 16 de 16 "
+                    f"em 22/ago — a doc do ML diz que com um DEAL ativo o desconto novo "
+                    f"não passa a valer. Para trocar, é preciso sair dessas promoções antes, "
+                    f"e isso eu não faço sozinho: de DEAL o robô não sabe devolver o preço.")})
+                print(f"  ! ja_tem_individual {iid}: em vigor {_txt_tv} + {len(_outras_ativas)} "
+                      f"promoção(ões) ativa(s) ({_nomes_out}) — não troco com campanha ativa",
+                      flush=True)
+                return "ja_tem_individual"
+            # Nada mais ativo: é o caminho limpo, o mesmo que o piloto roda todo dia.
+            # Segue para o bloco _so_o_preco: remove o individual, ESPERA a candidatura
+            # reabrir (melhor que o sleep(0.3) do piloto) e recria com os 14 dias.
+            print(f"  ~ {iid}: só o nosso desconto individual está ativo ({_txt_tv}) — "
+                  f"trocando o preço pela receita do piloto", flush=True)
         _so_o_preco = (tipo == "PRICE_DISCOUNT" and _ind_ativo is not None)
         if _so_o_preco:
             _pv_sd = None
