@@ -202,10 +202,28 @@ def conta_do_robo(pb, p0, mp, cat, ltid, frete, custo, access):
     }
 
 
+def token_da_conta():
+    """Resolve o access token da conta escolhida — MESMA mecânica do
+    repricer_sugestoes.main() e do aplicador:  obter_access(sb, seller_id, refresh)
+    devolve (access, sid_real, refresh).  O seller_id que vem da tabela 'contas'
+    pode ser None (conta semeada por ML_REFRESH_TOKEN), por isso a conferência é
+    feita no sid que VOLTA da chamada, não no que foi enviado."""
+    for seller_id, refresh in rec.contas():
+        try:
+            access, sid, refresh = obter_access(rec.sb, seller_id, refresh)
+        except Exception as e:
+            print(f"  !! não consegui token de {seller_id}: {e}", flush=True)
+            continue
+        if str(sid) == SELLER:
+            return access, str(sid)
+    return None, None
+
+
 def main():
-    access = obter_access(SELLER)
+    access, sid = token_da_conta()
     if not access:
-        print(f"sem token para a conta {SELLER}")
+        print(f"sem token para a conta {SELLER} — as contas com token são: "
+              f"{[c[0] for c in rec.contas()]}")
         return
     rec.preload(SELLER)
 
