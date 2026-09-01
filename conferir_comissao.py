@@ -294,13 +294,23 @@ def main():
         ltid = it.get("listing_type_id")
         p_lista = num(it.get("price"))
         sku = rec.sku_do_item(it) if it else None
-        custo, orig_custo = rec.custo_efetivo(iid, sku)
-        frete = rec.frete_de(sku, iid, access) or 0.0
+        # ATENCAO as formas de retorno — elas NAO sao simetricas, e eu ja troquei uma
+        # pela outra:  custo_efetivo devolve UM valor (ou None);  frete_de devolve
+        # uma TUPLA (custo, origem).
+        custo = rec.custo_efetivo(iid, sku)
+        frete, orig_frete = rec.frete_de(sku, iid, access)
+        frete = frete or 0.0
 
         print("=" * 78)
         print(f"{iid}  {str(it.get('title') or '')[:44]}")
         print(f"  categoria {cat} | tipo de anuncio {ltid} | preco de lista {brl(p_lista)}")
-        print(f"  sku {sku} | custo {brl(custo)} ({orig_custo}) | frete {brl(frete)}")
+        print(f"  sku {sku} | custo {brl(custo)} | frete {brl(frete)} ({orig_frete})")
+        if custo is None:
+            # o robo de sugestoes PULA anuncio sem custo (custo None -> return None em
+            # processar_item). Sem custo nao ha margem, entao aqui tambem nao ha o que
+            # comparar — digo isso em vez de somar None e explodir mais na frente.
+            print("  SEM CUSTO cadastrado — nao da para conferir margem neste anuncio.\n")
+            continue
 
         # ---- % da comissao: com o tipo do anuncio, e sem ele
         pct_com = rec._percentual(cat, ltid, access)
