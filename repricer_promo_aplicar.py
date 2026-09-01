@@ -1717,6 +1717,44 @@ def processar(fila, access):
             except Exception:
                 _pv_tv = None
             _txt_tv = (f"R${float(_pv_tv):.2f}" if _pv_tv else "preço não lido")
+            # ---- JÁ ESTÁ NO ALVO? ----
+            # Mede a margem NO PREÇO QUE JÁ ESTÁ EM VIGOR. Se ela já entrega o que
+            # você pediu, não há o que trocar: o desfecho é 'resolvido', não 'bloqueado'.
+            # Acontece muito por causa do ANÚNCIO IRMÃO: o ML propaga o desconto pela
+            # família, então o irmão aplicado nesta mesma rodada já deixou este aqui no
+            # preço certo. Na rodada de 70 foram pelo menos 4 assim, ao centavo.
+            #
+            # A comparação é de MARGEM, não de preço: um centavo de diferença não pode
+            # reprovar um item que está certo. Tolerância é a mesma da trava da margem.
+            _mg_alvo = fila.get("margem_alvo_manual")
+            if _mg_alvo in (None, ""):
+                _mg_alvo = fila.get("margem_prevista")
+            try:
+                _mg_alvo = float(_mg_alvo) if _mg_alvo not in (None, "") else None
+            except (TypeError, ValueError):
+                _mg_alvo = None
+            _mg_vigor = None
+            if _pv_tv and _mg_alvo is not None:
+                try:
+                    _c_tv = dict(cand)
+                    _c_tv["price"] = round(float(_pv_tv), 2)
+                    _e_tv = rec.avaliar(_c_tv, cat, ltid, access, frete, custo)
+                    _mg_vigor = _e_tv.get("margem") if _e_tv else None
+                except (TypeError, ValueError, KeyError):
+                    _mg_vigor = None
+            if (_mg_vigor is not None and _mg_alvo is not None
+                    and float(_mg_vigor) >= float(_mg_alvo) - MARGEM_TOL_PP):
+                gravar(fila["id"], {"status": "aplicada",
+                                    "preco_aplicado": round(float(_pv_tv), 2),
+                                    "margem_aplicada": _mg_vigor,
+                                    "resultado": (
+                    f"JÁ ESTÁ NO ALVO ✓ — o desconto individual em vigor ({_txt_tv}) "
+                    f"entrega {float(_mg_vigor):.2f}%, e você pediu {float(_mg_alvo):.2f}%. "
+                    f"Não havia o que trocar. Quando o preço bate com o que seria enviado, "
+                    f"em geral é o anúncio IRMÃO sincronizado que já aplicou por este.")})
+                print(f"  = {iid}: já está no alvo ✓ — em vigor {_txt_tv} entrega "
+                      f"{float(_mg_vigor):.2f}% (pedido {float(_mg_alvo):.2f}%)", flush=True)
+                return "ja_ativa"
             gravar(fila["id"], {"status": "erro", "resultado": (
                 f"NÃO MEXI EM NADA. O anúncio já tem desconto individual em vigor "
                 f"({_txt_tv}) e a troca está desligada: em 22/ago ela falhou 16 de 16 "
