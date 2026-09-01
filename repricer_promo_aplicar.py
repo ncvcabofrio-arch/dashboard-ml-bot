@@ -784,6 +784,7 @@ def esperar_saida_individual(iid, access, tentativas=9, espera=2.0):
     # presenca de um PRICE_DISCOUNT 'candidate' encerra a espera.
     _OCUPADO = {"started", "pending", "sync_requested", "restore_requested"}
     _vazio_desde = None
+    _ultimo_http = None      # ultimo HTTP que nao deu lista (409 = item ocupado)
     for n in range(tentativas):
         time.sleep(espera)
         try:
@@ -791,7 +792,14 @@ def esperar_saida_individual(iid, access, tentativas=9, espera=2.0):
         except Exception as e:
             return False, n + 1, f"não consegui consultar o item ({e})"
         if not isinstance(d, list):
-            return False, n + 1, f"resposta inesperada do ML (HTTP {st})"
+            # NAO DESISTE AQUI. Resposta que nao e lista quase sempre e 409 (conflito):
+            # o ML dizendo que ja existe operacao em andamento neste item — ou seja,
+            # a remocao AINDA ESTA RODANDO. Isso e o motivo mais forte para ESPERAR,
+            # e a versao anterior fazia o contrario: abortava a espera e postava cedo.
+            # Custou o MLB3982333097 na rodada de 27 (409 na 4a consulta -> POST
+            # recusado -> restaurei o antigo).
+            _ultimo_http = st
+            continue
         pds = [o for o in d if isinstance(o, dict)
                and (o.get("type") or "").upper() == "PRICE_DISCOUNT"]
         if any((o.get("status") or "").lower() == "candidate" for o in pds):
@@ -804,6 +812,9 @@ def esperar_saida_individual(iid, access, tentativas=9, espera=2.0):
     if _vazio_desde is not None:
         return True, tentativas, (f"nenhum desconto individual ocupando o item (vago desde a "
                                   f"{_vazio_desde}ª consulta, mas o ML não reabriu candidatura)")
+    if _ultimo_http is not None:
+        return False, tentativas, (f"o ML respondeu HTTP {_ultimo_http} até o fim da espera "
+                                   f"({tentativas * espera:.0f}s) — item ainda ocupado")
     return False, tentativas, ("o desconto antigo ainda aparece ocupando o item depois de "
                               f"{tentativas * espera:.0f}s")
 
