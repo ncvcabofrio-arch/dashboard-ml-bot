@@ -59,6 +59,7 @@ USO
 """
 import json
 import os
+import re
 
 import repricer_sugestoes as rec
 from ml_auth import obter_access
@@ -107,32 +108,76 @@ def fila_do_item(iid):
         return {}
 
 
-def barrados_da_fila():
-    """Pega sozinho quem a trava da margem barrou. Se a coluna do resultado tiver
-    outro nome, o filtro cai fora e a gente avisa em vez de fingir lista vazia."""
+# A trava da margem NAO grava o codigo 'margem_menor_que_pedida' na fila — esse codigo
+# e o valor de RETORNO da funcao, que so alimenta o resumo do log. Na tabela ela grava
+# status='erro' e um texto explicativo. Foi assim que a primeira versao deste script
+# achou zero item: eu filtrei pelo codigo do log em vez do texto do banco.
+#
+# O texto e (repricer_promo_aplicar.py, trava da margem):
+#   "NÃO APLIQUEI. Você pediu 16.00% e o preço que o ML aceita (R$2628.63) entrega
+#    11.00% — margem MENOR que a sua. ..."
+#
+# Bonus: os DOIS numeros estao escritos ali. Entao a fila me da a margem pedida mesmo
+# que a coluna margem_alvo_manual esteja vazia — e me da tambem a margem que o robo
+# mediu, que e o alvo que este script tem que reproduzir.
+ASSINATURA_TRAVA = "margem menor que a sua"
+_RE_TRAVA = re.compile(r"pediu\s+([\d.,]+)%.*?\(R\$\s*([\d.,]+)\)\s*entrega\s+([\d.,]+)%",
+                       re.IGNORECASE | re.DOTALL)
+
+
+def _n(txt):
+    """Numero no formato do texto do robo (usa ponto decimal) -> float."""
     try:
-        rows = (rec.sb.table("repricer_promo_fila").select("*")
+        return float(str(txt).replace(".", "").replace(",", ".")) if "," in str(txt) \
+            else float(txt)
+    except (TypeError, ValueError):
+        return None
+
+
+def le_fila(limite_linhas=1500):
+    try:
+        return (rec.sb.table("repricer_promo_fila").select("*")
                 .eq("seller_id", str(SELLER))
-                .order("id", desc=True).limit(1200).execute().data) or []
+                .order("id", desc=True).limit(limite_linhas).execute().data) or []
     except Exception as e:
         print(f"nao consegui ler a fila: {e}")
         return []
+
+
+def barrados_da_fila():
+    """Pega sozinho quem a trava da margem barrou, pelo TEXTO que ela grava.
+    Se nao achar nada, mostra o que a fila realmente tem — em vez de dizer
+    'nada para conferir' e deixar voce sem saber se e ausencia ou filtro errado."""
+    rows = le_fila()
     if not rows:
-        return []
-    cols = set(rows[0].keys())
-    campo = "resultado" if "resultado" in cols else None
-    if campo is None:
-        print(f"a fila nao tem coluna 'resultado'. Colunas: {sorted(cols)}")
-        return []
-    vistos, out = set(), []
+        print("a fila desta conta esta vazia.")
+        return [], {}
+    if "resultado" not in rows[0]:
+        print(f"a fila nao tem coluna 'resultado'. Colunas: {sorted(rows[0].keys())}")
+        return [], {}
+    vistos, out, pedidos = set(), [], {}
     for r in rows:
-        if str(r.get(campo) or "") != "margem_menor_que_pedida":
+        txt = str(r.get("resultado") or "")
+        if ASSINATURA_TRAVA not in txt.lower():
             continue
         iid = r.get("item_id")
-        if iid and iid not in vistos:
-            vistos.add(iid)
-            out.append(iid)
-    return out[:LIMITE]
+        if not iid or iid in vistos:
+            continue
+        vistos.add(iid)
+        out.append(iid)
+        m = _RE_TRAVA.search(txt)
+        if m:
+            pedidos[iid] = {"pedida": _n(m.group(1)), "preco": _n(m.group(2)),
+                            "real": _n(m.group(3))}
+    if not out:
+        print("nenhum item barrado pela trava da margem nesta fila. O que ela tem:")
+        cont = {}
+        for r in rows:
+            chave = str(r.get("resultado") or "(vazio)")[:60]
+            cont[chave] = cont.get(chave, 0) + 1
+        for chave, n in sorted(cont.items(), key=lambda x: -x[1])[:12]:
+            print(f"   {n:5d}x  {chave}")
+    return out[:LIMITE], pedidos
 
 
 # ---------------------------------------------------------------- sugestao (a curva do painel)
@@ -227,9 +272,16 @@ def main():
         return
     rec.preload(SELLER)
 
-    alvos = ALVOS_ENV or barrados_da_fila()
+    pedidos = {}
+    if ALVOS_ENV:
+        alvos = ALVOS_ENV
+    else:
+        alvos, pedidos = barrados_da_fila()
     if not alvos:
-        print("nada para conferir (nenhum item barrado por margem na fila desta conta).")
+        # o motivo ja foi impresso por barrados_da_fila (fila vazia, coluna faltando,
+        # ou a lista do que a fila realmente tem). Aqui so digo o caminho manual.
+        print("\nnada para conferir automaticamente. Rode com MLBS='MLB...,MLB...' "
+              "para conferir itens escolhidos por voce.")
         return
     print(f"conta {SELLER} | {len(alvos)} item(ns)\n")
 
@@ -268,8 +320,16 @@ def main():
         if mg_ped is None:
             mg_ped = num(fila.get("margem_prevista"))
             de_onde = "margem_prevista (a tela calculou)"
-        if fila and mg_ped is None:
+        if mg_ped is None and iid in pedidos:
+            mg_ped = pedidos[iid].get("pedida")
+            de_onde = "texto que a trava gravou na fila"
+        if mg_ped is None:
             print(f"  a fila nao trouxe margem pedida. Colunas: {sorted(fila.keys())}")
+        alvo_medido = (pedidos.get(iid) or {}).get("real")
+        if alvo_medido is not None:
+            print(f"  na rodada o robo mediu {pp(alvo_medido)}% "
+                  f"a {brl((pedidos.get(iid) or {}).get('preco'))} — e esse numero que eu "
+                  f"tenho que reproduzir aqui")
 
         # ---- a curva que o painel usou
         row_sug, ofs = ofertas_guardadas(iid)
