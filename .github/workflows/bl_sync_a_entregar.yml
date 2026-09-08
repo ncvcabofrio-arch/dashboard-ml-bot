@@ -5,8 +5,16 @@
 name: Base — vendido a entregar (sync)
 
 on:
+  # 1) o webhook do Mercado Livre (ml_webhook) dispara este evento quando
+  #    chega notificacao de pedido/envio. E' o caminho rapido.
+  repository_dispatch:
+    types: [a_entregar]
+
+  # 2) rede de seguranca: mesmo que o webhook falhe ou o debounce segure,
+  #    de hora em hora ele roda de qualquer jeito.
   schedule:
-    - cron: '40 * * * *'         # de hora em hora, no minuto 40
+    - cron: '40 * * * *'
+
   workflow_dispatch:
     inputs:
       dry_run:
@@ -24,9 +32,12 @@ on:
         required: false
         default: '60'
 
+# Rajada de notificacoes vira UMA execucao: a ultima cancela as anteriores.
+# Como cada rodada reescreve o retrato inteiro, perder uma no meio nao deixa
+# dado pela metade — a seguinte corrige.
 concurrency:
   group: sync-a-entregar
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   sync:
