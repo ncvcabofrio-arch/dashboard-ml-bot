@@ -1,0 +1,40 @@
+# Planilha de ESTOQUE x RESERVA da BaseLinker, para conferencia e inventario.
+# So leitura: nao grava nada na Base nem no Supabase.
+# Roda so' no botao -- nao tem horario.
+name: Base — planilha estoque x reserva
+
+on:
+  workflow_dispatch:
+    inputs:
+      depositos:
+        description: 'Depositos a somar (ex.: bl_68154). Vazio = todos'
+        required: false
+        default: ''
+
+jobs:
+  planilha:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Instalar dependencias
+        run: pip install requests openpyxl
+
+      - name: Gerar planilha
+        env:
+          BASELINKER_TOKEN: ${{ secrets.BASELINKER_TOKEN }}
+          BL_INVENTORY_ID: '58792'
+          BL_WAREHOUSES: ${{ inputs.depositos || '' }}
+          BL_SAIDA: estoque_reservas.xlsx
+        run: python -u bl_export_estoque.py
+
+      - name: Publicar a planilha para download
+        uses: actions/upload-artifact@v4
+        with:
+          name: estoque-reservas
+          path: estoque_reservas.xlsx
+          retention-days: 30
