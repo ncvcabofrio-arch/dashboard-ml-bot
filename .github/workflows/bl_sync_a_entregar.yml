@@ -1,0 +1,52 @@
+# Vendido a entregar -> tabela base_a_entregar no Supabase.
+# E' dela que a Edge Function 'base_estoque' tira o aviso que aparece na
+# tela do app de contagem.
+# Nao mexe em estoque, custo nem produtos.
+name: Base — vendido a entregar (sync)
+
+on:
+  schedule:
+    - cron: '40 * * * *'         # de hora em hora, no minuto 40
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Simulacao? 1 = mostra o que faria e NAO grava'
+        required: false
+        default: '0'
+        type: choice
+        options: ['0', '1']
+      status_a_entregar:
+        description: 'IDs dos status que sao "ainda na prateleira"'
+        required: false
+        default: '373553'
+      dias:
+        description: 'Quantos dias de pedidos para tras'
+        required: false
+        default: '60'
+
+concurrency:
+  group: sync-a-entregar
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Instalar dependencias
+        run: pip install requests
+
+      - name: Atualizar o vendido a entregar
+        env:
+          BASELINKER_TOKEN: ${{ secrets.BASELINKER_TOKEN }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          BL_STATUS_A_ENTREGAR: ${{ inputs.status_a_entregar || '373553' }}
+          BL_DIAS: ${{ inputs.dias || '60' }}
+          BL_DRY_RUN: ${{ inputs.dry_run || '0' }}
+        run: python -u bl_sync_a_entregar.py
