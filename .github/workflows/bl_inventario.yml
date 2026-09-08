@@ -1,0 +1,56 @@
+# Foto completa para a contagem fisica: estoque + reserva + vendido a entregar.
+# So leitura: nao grava nada na Base nem no Supabase. So roda no botao.
+name: Base — inventario (contagem)
+
+on:
+  workflow_dispatch:
+    inputs:
+      status_a_entregar:
+        description: 'IDs dos status que sao "ainda na prateleira" (vazio = so explorar)'
+        required: false
+        default: ''
+      dias:
+        description: 'Quantos dias de pedidos para tras'
+        required: false
+        default: '60'
+      depositos:
+        description: 'Depositos a somar (ex.: bl_68154). Vazio = todos'
+        required: false
+        default: ''
+      incluir_nao_confirmados:
+        description: 'Incluir pedidos ainda nao confirmados?'
+        required: false
+        default: '0'
+        type: choice
+        options: ['0', '1']
+
+jobs:
+  inventario:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Instalar dependencias
+        run: pip install requests openpyxl
+
+      - name: Montar a planilha de inventario
+        env:
+          BASELINKER_TOKEN: ${{ secrets.BASELINKER_TOKEN }}
+          BL_INVENTORY_ID: '58792'
+          BL_WAREHOUSES: ${{ inputs.depositos || '' }}
+          BL_DIAS: ${{ inputs.dias || '60' }}
+          BL_STATUS_A_ENTREGAR: ${{ inputs.status_a_entregar || '' }}
+          BL_INCLUIR_NAO_CONFIRMADOS: ${{ inputs.incluir_nao_confirmados || '0' }}
+          BL_SAIDA: inventario.xlsx
+        run: python -u bl_inventario.py
+
+      - name: Publicar a planilha para download
+        uses: actions/upload-artifact@v4
+        with:
+          name: inventario
+          path: inventario.xlsx
+          retention-days: 30
