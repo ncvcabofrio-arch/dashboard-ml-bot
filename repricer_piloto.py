@@ -52,6 +52,11 @@ MAX_ITENS = int(os.environ.get("MAX_ITENS", "0"))                    # 0 = todos
 WORKERS = int(os.environ.get("WORKERS", "16"))                       # análise em paralelo
 CONFIRMA = (os.environ.get("CONFIRMA") or "").strip().upper() == "SIM"
 ATIVO = (os.environ.get("ATIVO") or "SIM").strip().upper() == "SIM"  # botão de pânico
+# Deixar o robô SAIR de campanha cofinanciada do ML quando ela está entregando
+# margem abaixo do piso do anúncio. Nasce DESLIGADO: o cron deste workflow roda
+# ao vivo de hora em hora, e comportamento novo não estreia em produção sem
+# ensaio. Ligue primeiro num workflow_dispatch com confirma=NAO.
+CONSERTAR_CAMPANHA = (os.environ.get("CONSERTAR_CAMPANHA") or "").strip().upper() == "SIM"
 # regras globais — resolvidas em resolver_config() (input do workflow > painel/repricer_config > default)
 MAX_ALTERACOES = 0     # teto de CRIAÇÕES por rodada (0 = sem teto)
 MAX_DROP_PCT = 35.0    # anti-salto (%)
@@ -109,6 +114,54 @@ ACOES_DESCONTO = {"descontar", "descontar_ean", "descontar_piso"}
 REMOVER_OK = {"subir_margem", "ja_competitivo", "manter_ganhando"}   # confiante que não precisa desconto
 _CANCEL = ("cancel",)   # só cancelada NÃO conta como venda (paid e partially_refunded contam)
 NOSSAS_PROMO = {"PRICE_DISCOUNT", "custom", "CUSTOM"}   # ofertas individuais (nossas); resto = campanha do ML
+# ---------------------------------------------------------------------------
+# CAMPANHA QUE FUROU O PISO
+#
+# Só estes tipos o robô pode abandonar sozinho: as COFINANCIADAS, onde quem
+# define o preço é o ML e o entrar_campanha() sabe voltar.
+#
+# DEAL, DOD, SELLER_CAMPAIGN e SELLER_COUPON_CAMPAIGN ficam FORA de propósito:
+# nelas o preço é do VENDEDOR, este robô não guarda o preço anterior, e se o ML
+# recusar a volta o anúncio fica sem promoção nenhuma. Foi assim que 5 anúncios
+# se perderam em set/2026 — "quem define o preço aqui é você e eu não guardei o
+# anterior". Enquanto não existir a gravação do preço antes de sair, esta lista
+# não cresce.
+# ---------------------------------------------------------------------------
+CAMPANHA_ABANDONAVEL = {"SMART", "MARKETPLACE_CAMPAIGN", "PRICE_MATCHING"}
+def campanha_furando_piso(a, access):
+    """A campanha ATIVA deste item é cofinanciada E entrega margem ABAIXO do piso?
+    Devolve a oferta (pra sair dela) ou None.
+
+    None em QUALQUER dúvida — sem margem lida, sem piso, tipo desconhecido, ou
+    campanha que não é cofinanciada. Na dúvida o robô não encosta, que é o
+    comportamento de antes deste patch.
+
+    Custa uma chamada ao ML, e só nos itens que já falharam o piso."""
+    if not CONSERTAR_CAMPANHA:
+        return None
+    mv, piso = a.get("margem_venda"), a.get("piso")
+    if mv is None or piso is None:
+        return None
+    try:
+        if float(mv) >= float(piso):
+            return None                # margem sadia: campanha boa fica em paz
+    except (TypeError, ValueError):
+        return None
+    for o in promos_do_item(a.get("item_id"), access):
+        if not (isinstance(o, dict) and eh_ativa(o)):
+            continue
+        if (o.get("type") or "").upper() in CAMPANHA_ABANDONAVEL:
+            return o
+        return None                    # ativa, mas é DEAL/SELLER_CAMPAIGN: não mexo
+    return None
+def sair_da_campanha(item_id, o, access):
+    """Tira o item de UMA campanha cofinanciada. Mesmo endpoint do desconto, com o
+    promotion_type da campanha em vez de PRICE_DISCOUNT."""
+    tipo = (o.get("type") or "").upper()
+    path = f"/seller-promotions/items/{item_id}?promotion_type={tipo}&app_version=v2"
+    if o.get("id"):
+        path += f"&promotion_id={o['id']}"
+    return req("DELETE", path, access)
 def promo_estado(a):
     """(tem_pd, tem_outra) a partir do sale_price JÁ lido pela sonda — sem chamada extra.
     tem_pd = desconto nosso ativo; tem_outra = DEAL/campanha cofinanciada do ML."""
@@ -991,6 +1044,34 @@ def main():
                                    "motivo": f"aguarda venda (última venda {uv or '—'}, última subida {us or '—'})"})
                             remover_motivo = None; continue   # segura no preço atual (não sobe, não remove)
                     tem_pd, tem_outra = promo_estado(a)   # do sale_price já lido (sem chamada extra)
+                    # CAMPANHA FURANDO O PISO: era aqui que o MLB3531548027 morria.
+                    # Ele sabia subir de R$2.551,88 (0,7%) para R$2.989,85 (12,9%), e a
+                    # condição abaixo exige 'not tem_outra'. Em campanha, nunca rodava —
+                    # e nem log sobrava. Saindo da campanha, tem_outra vira False e ele
+                    # segue pelo caminho que já existe. Nada mais muda.
+                    _camp = campanha_furando_piso(a, access) if tem_outra else None
+                    if _camp:
+                        _cn = _camp.get("name") or _camp.get("type")
+                        if not CONFIRMA:
+                            print(f"• SIMULA sai da campanha {a.get('item_id')} {tit}: \"{_cn}\" "
+                                  f"entrega {a.get('margem_venda')}% < piso {a.get('piso')}%", flush=True)
+                            logar({**base_log(sid, a), "acao": "sair_campanha", "aplicado": False,
+                                   "modo": "simulacao",
+                                   "motivo": f"campanha {_cn} a {a.get('margem_venda')}% < piso {a.get('piso')}%"})
+                            tem_outra = False
+                        else:
+                            _st, _r = sair_da_campanha(a.get("item_id"), _camp, access)
+                            _ok = 200 <= _st < 300
+                            print(f"{'✅' if _ok else '⛔'} SAI CAMPANHA {a.get('item_id')} {tit}: "
+                                  f"\"{_cn}\" ({a.get('margem_venda')}% < piso {a.get('piso')}%) HTTP {_st}",
+                                  flush=True)
+                            logar({**base_log(sid, a), "acao": "sair_campanha", "aplicado": _ok,
+                                   "modo": "live", "http_status": _st,
+                                   "motivo": f"campanha {_cn} a {a.get('margem_venda')}% < piso {a.get('piso')}%"})
+                            if not _ok:
+                                continue          # não saiu: deixa como estava, sem inventar
+                            tem_outra = False
+                            time.sleep(0.4)
                     pv = a.get("preco_venda"); p0 = a.get("preco_cheio")
                     if acao == "subir_margem":
                         topo = a.get("alvo_subir")                    # já vem (2º lugar - undercut)
@@ -1047,7 +1128,31 @@ def main():
                 camp_txt = f"  |  🎁 \"{_nome}\" R${cofin['pb']:.2f} margem {cofin['margem']:.1f}% -> {_tag}"
             tem_pd, tem_outra = promo_estado(a)           # do sale_price já lido (sem chamada extra)
             if tem_outra:                                 # já em campanha/DEAL do ML -> deixa quieto
-                logar({**row, "acao": "pulado_campanha", "aplicado": False, "modo": modo.lower()}); continue
+                # ...A NÃO SER que a campanha esteja furando o piso e seja cofinanciada.
+                # Era aqui que o MLB3531499461 parava: 9,6% contra piso 18%, com o alvo
+                # R$2.995,06 já calculado. Saindo, segue pelo caminho normal do desconto.
+                _camp = campanha_furando_piso(a, access)
+                if not _camp:
+                    logar({**row, "acao": "pulado_campanha", "aplicado": False, "modo": modo.lower()}); continue
+                _cn = _camp.get("name") or _camp.get("type")
+                _mot = f"campanha {_cn} a {a.get('margem_venda')}% < piso {a.get('piso')}%"
+                if not CONFIRMA:
+                    print(f"• SIMULA sai da campanha {iid} {tit}: \"{_cn}\" "
+                          f"entrega {a.get('margem_venda')}% < piso {a.get('piso')}%", flush=True)
+                    logar({**base_log(sid, a), "acao": "sair_campanha", "aplicado": False,
+                           "modo": "simulacao", "motivo": _mot})
+                    tem_outra = False
+                else:
+                    _st, _r = sair_da_campanha(iid, _camp, access)
+                    _ok = 200 <= _st < 300
+                    print(f"{'✅' if _ok else '⛔'} SAI CAMPANHA {iid} {tit}: \"{_cn}\" "
+                          f"({a.get('margem_venda')}% < piso {a.get('piso')}%) HTTP {_st}", flush=True)
+                    logar({**base_log(sid, a), "acao": "sair_campanha", "aplicado": _ok,
+                           "modo": "live", "http_status": _st, "motivo": _mot})
+                    if not _ok:
+                        continue                  # não saiu: deixa como estava
+                    tem_outra = False
+                    time.sleep(0.4)
             if usar_campanha:                             # ===== caminho CAMPANHA =====
                 o = cofin["o"]; _nome = o.get("name") or o.get("type")
                 rowc = {**base_log(sid, a), "acao": "entrar_campanha", "deal_price": cofin["pb"],
