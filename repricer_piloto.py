@@ -57,6 +57,14 @@ ATIVO = (os.environ.get("ATIVO") or "SIM").strip().upper() == "SIM"  # botão de
 # ao vivo de hora em hora, e comportamento novo não estreia em produção sem
 # ensaio. Ligue primeiro num workflow_dispatch com confirma=NAO.
 CONSERTAR_CAMPANHA = (os.environ.get("CONSERTAR_CAMPANHA") or "").strip().upper() == "SIM"
+# Quantos PONTOS abaixo do piso a campanha precisa estar para valer a pena sair.
+# Sem banda, o robô abandonava campanha por 0,2 ponto de margem (visto em 6
+# anúncios na simulação de 17/set) — e nisso perde vitrine e cofinanciamento do
+# ML por quase nada. Mesma ideia do MARGEM_TOL_PP do aplicador.
+try:
+    CAMPANHA_TOL_PP = float((os.environ.get("CAMPANHA_TOL_PP") or "1.0").replace(",", "."))
+except ValueError:
+    CAMPANHA_TOL_PP = 1.0
 # regras globais — resolvidas em resolver_config() (input do workflow > painel/repricer_config > default)
 MAX_ALTERACOES = 0     # teto de CRIAÇÕES por rodada (0 = sem teto)
 MAX_DROP_PCT = 35.0    # anti-salto (%)
@@ -143,8 +151,8 @@ def campanha_furando_piso(a, access):
     if mv is None or piso is None:
         return None
     try:
-        if float(mv) >= float(piso):
-            return None                # margem sadia: campanha boa fica em paz
+        if float(mv) >= float(piso) - CAMPANHA_TOL_PP:
+            return None                # dentro da banda: campanha boa fica em paz
     except (TypeError, ValueError):
         return None
     for o in promos_do_item(a.get("item_id"), access):
@@ -1053,7 +1061,22 @@ def main():
                     # condição abaixo exige 'not tem_outra'. Em campanha, nunca rodava —
                     # e nem log sobrava. Saindo da campanha, tem_outra vira False e ele
                     # segue pelo caminho que já existe. Nada mais muda.
-                    _camp = campanha_furando_piso(a, access) if tem_outra else None
+                    # PRÉ-VOO: só sai se o destino for MESMO aplicável. Sair primeiro e
+                    # descobrir depois que a subida não cabe deixa o anúncio sem campanha
+                    # e sem desconto — o MLB3917650981 fez exatamente isso em 17/set.
+                    # As contas abaixo são as MESMAS do bloco que vem logo adiante.
+                    _pvx, _p0x = a.get("preco_venda"), a.get("preco_cheio")
+                    _topox = (a.get("alvo_subir") if acao == "subir_margem"
+                              else (round(a["conc_min"] - uc, 2) if a.get("conc_min") else None))
+                    _novox = None
+                    if _topox and _pvx and _p0x and _topox > _pvx + SUBIR_MIN_RS and _topox < _p0x:
+                        _novox = round(min(_topox, _pvx * (1 + SUBIR_PASSO_PCT / 100.0),
+                                           _p0x - 0.01), 2)
+                        if _novox <= _pvx + SUBIR_MIN_RS:
+                            _novox = None
+                    _dentrox = (MAX_ALTERACOES <= 0) or (criados < MAX_ALTERACOES)
+                    _camp = (campanha_furando_piso(a, access)
+                             if (tem_outra and _novox and _dentrox) else None)
                     if _camp:
                         _cn = _camp.get("name") or _camp.get("type")
                         if not CONFIRMA:
@@ -1135,7 +1158,16 @@ def main():
                 # ...A NÃO SER que a campanha esteja furando o piso e seja cofinanciada.
                 # Era aqui que o MLB3531499461 parava: 9,6% contra piso 18%, com o alvo
                 # R$2.995,06 já calculado. Saindo, segue pelo caminho normal do desconto.
-                _camp = campanha_furando_piso(a, access)
+                # PRÉ-VOO: o substituto tem que passar pelas MESMAS travas que o bloco
+                # do desconto aplica logo abaixo — anti-salto, mínimo de 5% do ML e teto
+                # da rodada. Sem isto o robô sai da campanha e SÓ ENTÃO descobre que não
+                # pode aplicar nada: ficou sem campanha e sem desconto em 3 anúncios na
+                # simulação de 17/set (MLB4438873752, MLB5652758948, MLB5652629588).
+                # Quando o destino é outra campanha (usar_campanha), o anti-salto não se
+                # aplica — quem define o preço lá é o ML.
+                _dentrox = (MAX_ALTERACOES <= 0) or (criados < MAX_ALTERACOES)
+                _destino_ok = _dentrox and (usar_campanha or (5 <= desc <= MAX_DROP_PCT))
+                _camp = campanha_furando_piso(a, access) if _destino_ok else None
                 if not _camp:
                     logar({**row, "acao": "pulado_campanha", "aplicado": False, "modo": modo.lower()}); continue
                 _cn = _camp.get("name") or _camp.get("type")
