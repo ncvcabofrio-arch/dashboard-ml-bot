@@ -935,8 +935,12 @@ def main():
     modo = "AO VIVO" if CONFIRMA else "SIMULAÇÃO"
     teto_txt = "sem teto" if MAX_ALTERACOES <= 0 else f"teto {MAX_ALTERACOES}/rodada"
     uc_txt = sonda.CONFIG.get("undercut") or sonda.UNDERCUT
+    # 'conserta campanha' no cabeçalho não é enfeite: sem ele, uma rodada sem
+    # nenhuma linha de "sai da campanha" é ambígua — chave desligada e nenhum
+    # anúncio qualificado produzem exatamente o mesmo log.
     print(f"===== PILOTO | conta {sid} | {modo} | {teto_txt} | anti-salto {MAX_DROP_PCT:.0f}% | "
-          f"gate vendas {VENDAS_MIN}u/{VENDAS_DIAS}d | UNDERCUT R${float(uc_txt):.0f} =====", flush=True)
+          f"gate vendas {VENDAS_MIN}u/{VENDAS_DIAS}d | UNDERCUT R${float(uc_txt):.0f} | "
+          f"conserta campanha: {'SIM' if CONSERTAR_CAMPANHA else 'NAO'} =====", flush=True)
     if CONFIRMA and SEMC_ATIVO:                 # aplica as subidas de lista que você aprovou no botão
         n_apr = aplicar_aprovacoes(sid, access)
         if n_apr:
