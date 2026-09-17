@@ -75,10 +75,13 @@ jobs:
           SELLER_ID:       ${{ github.event.inputs.seller_id || '471489691' }}
           CONFIRMA:        ${{ github.event.inputs.confirma || 'SIM' }}
           ATIVO:           ${{ github.event.inputs.ativo || 'SIM' }}
-          # SEM '|| ...' de propósito: no cron o github.event.inputs não existe, a
-          # expressão vira vazia, e vazio não é "SIM" -> agendado continua desligado.
-          # (É o '||' que faz o CONFIRMA acima virar SIM no agendado, aliás.)
-          CONSERTAR_CAMPANHA: ${{ github.event.inputs.conserta_campanha }}
+          # LIGADO NO AGENDADO, de propósito e por decisão sua (17/set).
+          # O '|| SIM' é a mesma mecânica do CONFIRMA acima: no cron o
+          # github.event.inputs não existe, a expressão vira vazia e o fallback
+          # entra. Foi assim que o conserto passou a valer de hora em hora.
+          # Disparo manual continua mandando: escolher NAO no formulário envia
+          # "NAO" (não-vazio), o '||' não dispara e a rodada sai sem o conserto.
+          CONSERTAR_CAMPANHA: ${{ github.event.inputs.conserta_campanha || 'SIM' }}
           # regras: vazio -> usa o painel (repricer_config). Preencha só pra forçar nesta rodada.
           MAX_ALTERACOES:  ${{ github.event.inputs.max_alteracoes }}
           MAX_DROP_PCT:    ${{ github.event.inputs.max_drop_pct }}
