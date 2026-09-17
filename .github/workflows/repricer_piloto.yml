@@ -20,6 +20,12 @@ on:
         required: true
         default: "SIM"
         options: ["SIM", "NAO"]
+      conserta_campanha:
+        description: "Sair de campanha do ML que furou o piso? (NAO = comportamento de hoje)"
+        type: choice
+        required: true
+        default: "NAO"
+        options: ["NAO", "SIM"]
       max_alteracoes:
         description: "Teto de criações/rodada (vazio = usa painel; 0 = sem teto)"
         type: string
@@ -69,6 +75,10 @@ jobs:
           SELLER_ID:       ${{ github.event.inputs.seller_id || '471489691' }}
           CONFIRMA:        ${{ github.event.inputs.confirma || 'SIM' }}
           ATIVO:           ${{ github.event.inputs.ativo || 'SIM' }}
+          # SEM '|| ...' de propósito: no cron o github.event.inputs não existe, a
+          # expressão vira vazia, e vazio não é "SIM" -> agendado continua desligado.
+          # (É o '||' que faz o CONFIRMA acima virar SIM no agendado, aliás.)
+          CONSERTAR_CAMPANHA: ${{ github.event.inputs.conserta_campanha }}
           # regras: vazio -> usa o painel (repricer_config). Preencha só pra forçar nesta rodada.
           MAX_ALTERACOES:  ${{ github.event.inputs.max_alteracoes }}
           MAX_DROP_PCT:    ${{ github.event.inputs.max_drop_pct }}
