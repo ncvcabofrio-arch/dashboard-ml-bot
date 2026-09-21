@@ -115,6 +115,11 @@ CODIGO_CATEGORIA = {
     # decisão sua, não falha transitória: retentar igual dá o mesmo resultado
     "fora_da_faixa_doc": "terminal",
     "so_reduz": "terminal",
+    # o ML aceitou a entrada a um preço que entrega menos que a margem pedida e o robô
+    # saiu na hora: retentar entraria no mesmo preço -> decisão sua
+    "ml_mudou_preco_revertido": "terminal",
+    # idem, mas o ML recusou a saída: o anúncio ficou no preço ruim -> precisa de você
+    "ml_mudou_preco_preso": "terminal",
     # a sugestão mudou de promoção
     "divergencia": "divergencia",
 }
@@ -530,6 +535,11 @@ REENTRADAS = []
 # MEDIDA (veio do próprio candidato), então fica numa lista separada — misturar
 # isso com divergência de verdade era o que produzia diagnóstico inventado.
 TETO_DO_ML = []
+# Entradas em que o ML devolveu, na resposta do POST, um preço diferente do candidato
+# (SMART e afins: quem define o preço é o ML). Antes o robô ignorava esse preço e
+# gravava o do candidato — foi assim que a Focusrite MLB3470043951 entrou a 6,66%
+# registrada como 19,45%. (iid, esperado, preco_ml, margem_pedida, margem_ml, desfecho)
+ML_MUDOU_PRECO = []
 _CAMPANHAS_CACHE = {}                 # seller_id -> campanhas (uma leitura por rodada)
 _CAMPANHAS_LOCK = threading.Lock()
 
@@ -2040,6 +2050,69 @@ def processar(fila, access):
     if not _put_feito:
         sc, resp = post(f"/seller-promotions/items/{iid}?app_version=v2", access, corpo)
     ok = sc in (200, 201)
+    # ================= PREÇO QUE O ML DEVOLVEU NA ENTRADA =================
+    # Nos tipos em que o ML define o preço (o corpo não leva deal_price), a trava
+    # acima só pôde conferir o preço do CANDIDATO. O preço que vale de verdade vem na
+    # resposta do 201. Caso real: candidato R$3.013 (19,45%), resposta "price": 2551.88
+    # (6,66%) — e o robô gravou 19,45%. Aqui a resposta é lida e, se a margem ficou
+    # abaixo da pedida, o robô sai na hora.
+    _ml_preco, _mg_ml, _ml_rev, _ml_preso = None, None, "", ""
+    if (ok and not _put_feito and isinstance(corpo, dict) and corpo.get("deal_price") is None
+            and isinstance(resp, dict) and resp.get("price") not in (None, "")):
+        try:
+            _ml_preco = round(float(resp.get("price")), 2)
+        except (TypeError, ValueError):
+            _ml_preco = None
+        if _ml_preco is not None and abs(_ml_preco - float(ev["pb"])) > 0.005:
+            _ev_ml = None
+            try:
+                _c_ml = dict(cand)
+                _c_ml["price"] = _ml_preco
+                _ev_ml = rec.avaliar(_c_ml, cat, ltid, access, frete, custo)
+            except Exception:
+                _ev_ml = None
+            _mg_ml = _ev_ml.get("margem") if isinstance(_ev_ml, dict) else None
+            _ruim = False
+            if _mg_ped is not None:
+                if _mg_ml is not None:
+                    _ruim = float(_mg_ml) < float(_mg_ped) - MARGEM_TOL_PP
+                else:
+                    # não consegui calcular a margem: preço MENOR que o conferido não
+                    # passa — aceitar seria margem por chute
+                    _ruim = _ml_preco < float(ev["pb"]) - 0.005
+            _txt_mg = (f"{float(_mg_ml):.2f}%" if _mg_ml is not None else "margem não calculável")
+            if _ruim:
+                _oid_ml = resp.get("offer_id") or corpo.get("offer_id")
+                _scx, _bx = remover_participacao(
+                    iid, {"type": tipo, "promotion_id": cand.get("id"), "offer_id": _oid_ml}, access)
+                _base_txt = (f"O ML ACEITOU A ENTRADA A OUTRO PREÇO: conferi R${float(ev['pb']):.2f} "
+                             f"({float(ev['margem']):.2f}%), mas a resposta do ML veio R${_ml_preco:.2f} "
+                             f"({_txt_mg}); você pediu {float(_mg_ped):.2f}%. ")
+                if _scx in (200, 201):
+                    _ml_rev = _base_txt + "SAÍ NA HORA (DELETE aceito) — não fica na campanha. "
+                    ML_MUDOU_PRECO.append((iid, float(ev["pb"]), _ml_preco, float(_mg_ped), _mg_ml, "saí"))
+                    print(f"  ↩️ ml_mudou_preco {iid}: ML deu R${_ml_preco:.2f} ({_txt_mg}) < pedida "
+                          f"{float(_mg_ped):.2f}% — saí na hora", flush=True)
+                else:
+                    _ml_preso = _base_txt + (f"🚨 TENTEI SAIR E O ML RECUSOU (HTTP {_scx}) — o anúncio "
+                                             f"ESTÁ na campanha a R${_ml_preco:.2f}. Tire na mão. ")
+                    ML_MUDOU_PRECO.append((iid, float(ev["pb"]), _ml_preco, float(_mg_ped), _mg_ml,
+                                           f"PRESO (DELETE {_scx})"))
+                    print(f"  🚨 ml_mudou_preco {iid}: ML deu R${_ml_preco:.2f} ({_txt_mg}) e o DELETE "
+                          f"voltou {_scx} — FICOU na campanha", flush=True)
+                # daqui pra baixo é tratado como entrada NÃO feita: numa troca as antigas
+                # ficam intactas; no "sai de todas" o robô devolve o que tirou.
+                ok = False
+            elif isinstance(_ev_ml, dict):
+                # margem ok no preço do ML: grava o que o ML REALMENTE deu, não o candidato
+                ML_MUDOU_PRECO.append((iid, float(ev["pb"]), _ml_preco,
+                                       float(_mg_ped) if _mg_ped is not None else None, _mg_ml, "ok"))
+                print(f"  ~ {iid}: ML deu R${_ml_preco:.2f} ({_txt_mg}) em vez de "
+                      f"R${float(ev['pb']):.2f} — "
+                      + ("dentro da margem pedida" if _mg_ped is not None else "sem margem pedida na fila")
+                      + ", gravo o preço real", flush=True)
+                ev = _ev_ml
+    # =====================================================================
     if acao == "trocar" and _sai_de_todas:
         # Ja saimos de tudo antes de entrar: nao ha antiga para sair depois.
         aviso = saiu_antes + (" | entrei na que você escolheu ✓" if ok else
@@ -2163,12 +2236,17 @@ def processar(fila, access):
         elif "START_DATE" in _t:
             motivo = "FAÇA NA MÃO — essa campanha exige data que o ML não aceitou pela API. "
             cod_erro = "faca_na_mao"
+    if _ml_rev or _ml_preso:
+        # o 201 não é recusa: o desfecho é o preço que o ML deu (lido acima)
+        motivo = _ml_rev or _ml_preso
+        cod_erro = "ml_mudou_preco_revertido" if _ml_rev else "ml_mudou_preco_preso"
     gravar(fila["id"], {
         "status": "aplicada" if ok else "erro",
         "resultado": (f"{aviso_piso}OK {sc}{aviso}: {json.dumps(resp, ensure_ascii=False)[:220]}{light_diag}" if ok
                       else f"{aviso_piso}{motivo}{'ERRO ' + str(sc) if not aviso else 'ATENÇÃO'}{aviso} [enviei {json.dumps(corpo, ensure_ascii=False)}]: {json.dumps(resp, ensure_ascii=False)[:170]}{light_diag}"),
-        "preco_aplicado": ev["pb"] if ok else None,
-        "margem_aplicada": ev["margem"] if ok else None,
+        # PRESO: o anúncio ESTÁ no preço do ML — é esse que vai registrado
+        "preco_aplicado": ev["pb"] if ok else (_ml_preco if _ml_preso else None),
+        "margem_aplicada": ev["margem"] if ok else (_mg_ml if _ml_preso else None),
     })
     return "aplicado" if ok else cod_erro
 def grava_status(estado, resumo=None):
@@ -2400,6 +2478,16 @@ def main():
         print("      NÃO MEDI A CAUSA. Hipótese a conferir: preço propagado de irmão sincronizado.",
               flush=True)
         resumo["preco_divergente"] = len(PRECO_DIVERGENTE)
+    if ML_MUDOU_PRECO:
+        print(f"\n🏷️  {len(ML_MUDOU_PRECO)} entrada(s): o ML respondeu com preço DIFERENTE do candidato "
+              f"(causa MEDIDA na resposta do POST):", flush=True)
+        for _iid, _esp, _pml, _mped, _mml, _fim in ML_MUDOU_PRECO:
+            print(f"      {_iid}: conferi R${_esp:.2f} | ML deu R${_pml:.2f} "
+                  f"({(f'{_mml:.2f}%' if _mml is not None else 'margem ?')}"
+                  f"{(f' vs pedida {_mped:.2f}%' if _mped is not None else '')}) -> {_fim}", flush=True)
+        if any(x[5].startswith("PRESO") for x in ML_MUDOU_PRECO):
+            print("      🚨 Os PRESO continuam na campanha no preço do ML: tire na mão.", flush=True)
+        resumo["ml_mudou_preco"] = len(ML_MUDOU_PRECO)
     print("resumo:", json.dumps(resumo, ensure_ascii=False), flush=True)
     grava_status("concluido", json.dumps(resumo, ensure_ascii=False))
 if __name__ == "__main__":
