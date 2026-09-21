@@ -112,6 +112,9 @@ CODIGO_CATEGORIA = {
     "margem_menor_que_pedida": "terminal",
     # o ML recusou tirar o individual atual: nada foi tocado, retentar nao muda
     "nao_removi_individual": "terminal",
+    # "entrar" por cima de uma campanha ativa mais barata que a margem pedida: o novo
+    # nunca valeria. Retentar dá o mesmo -> decisão sua
+    "campanha_ativa_abaixo": "terminal",
     # decisão sua, não falha transitória: retentar igual dá o mesmo resultado
     "fora_da_faixa_doc": "terminal",
     "so_reduz": "terminal",
@@ -751,6 +754,14 @@ try:
     MARGEM_TOL_PP = abs(float(os.environ.get("MARGEM_TOL_PP", "0.25").replace(",", ".")))
 except (TypeError, ValueError):
     MARGEM_TOL_PP = 0.25
+# Quanto a margem de uma campanha JÁ ATIVA pode ficar abaixo da pedida antes de o
+# robô recusar um "entrar" por cima dela. 1 ponto, igual ao CAMPANHA_TOL_PP do
+# piloto (escolha do dono em 21/set). Caso: MLB3531534275, arrastado pelo irmão para
+# o Essencial Setembro 2 (6,66%) e recebendo um individual de 18% que nunca valeu.
+try:
+    CAMPANHA_TOL_PP = abs(float((os.environ.get("CAMPANHA_TOL_PP") or "1.0").replace(",", ".")))
+except (TypeError, ValueError):
+    CAMPANHA_TOL_PP = 1.0
 
 
 def individual_em_vigor(ofertas):
@@ -1680,6 +1691,41 @@ def processar(fila, access):
         # margem confirmada no preço real: é ELA que vai para o registro
         ev = _ev_env
     # ===========================================================
+    # ============ "ENTRAR" COM CAMPANHA ATIVA MAIS BARATA ============
+    # A fila foi montada quando o anúncio não tinha nada; na hora de aplicar ele pode
+    # já estar numa campanha (o irmão entrou e o ML arrastou este junto). Entrar por
+    # cima não resolve: o cliente paga a mais barata. Aqui só se LÊ e decide.
+    if acao == "entrar" and antigas and _mg_ped is not None:
+        _pior = None                        # (preço, margem, nome) da ativa mais barata
+        _nao_calc = []
+        for _o in antigas:
+            if not isinstance(_o, dict) or str(_o.get("id") or "") == str(cand.get("id") or ""):
+                continue
+            _nm = _o.get("name") or _o.get("type") or "?"
+            try:
+                _po = rec.preco_oferta(_o)
+                _eo = rec.avaliar(dict(_o), cat, ltid, access, frete, custo) if _po else None
+            except Exception:
+                _po, _eo = None, None
+            if not _po or not isinstance(_eo, dict) or _eo.get("margem") is None:
+                _nao_calc.append(_nm)
+                continue
+            if _pior is None or float(_po) < _pior[0]:
+                _pior = (float(_po), float(_eo["margem"]), _nm)
+        if _nao_calc:
+            light_diag += " ativa_sem_margem=" + json.dumps(_nao_calc, ensure_ascii=False)
+        if _pior is not None and _pior[1] < float(_mg_ped) - CAMPANHA_TOL_PP:
+            gravar(fila["id"], {"status": "erro", "resultado": (
+                f"{aviso_piso}NÃO APLIQUEI. O anúncio JÁ ESTÁ na campanha \"{_pior[2]}\" a "
+                f"R${_pior[0]:.2f} ({_pior[1]:.2f}%), e você pediu {float(_mg_ped):.2f}%. Entrar por "
+                f"cima não adiantaria: o ML cobra a mais barata. Não medi como ela chegou lá (um "
+                f"anúncio irmão entrando pode arrastar este). Nada foi tocado — para ficar com a sua "
+                f"margem, tire da campanha e aplique o desconto.{light_diag}")})
+            print(f"  ! campanha_ativa_abaixo {iid}: já está em \"{_pior[2]}\" a R${_pior[0]:.2f} "
+                  f"({_pior[1]:.2f}%) < pedida {float(_mg_ped):.2f}% - {CAMPANHA_TOL_PP:.1f} — "
+                  f"NÃO apliquei", flush=True)
+            return "campanha_ativa_abaixo"
+    # ================================================================
     if DRY:
         if acao == "trocar" and tipo == "PRICE_DISCOUNT":
             plano = "TROCA (desconto individual): SAI das ativas ANTES e só então entra "
