@@ -2320,7 +2320,9 @@ def _mapa(func, itens):
     return [func(x) for x in itens]
 def main():
     grava_status("rodando")
-    rec.preload()
+    # Catálogo de custo do DONO da conta escolhida. Sem conta -> o da casa, como
+    # sempre foi. Casa (org pontomusical ou sem org) -> 'produtos', igual a antes.
+    rec.preload(SELLER_FILTRO or None)
     # alinha o piso dos itens "Padrão" ao mesmo valor da simulação (ex.: 17),
     # pra não recusar no apply o que a sugestão mostrou como OK.
     if MARGEM_MIN:
@@ -2360,6 +2362,26 @@ def main():
             if retry:
                 print(f"fila de retry: {len(retry)} item(ns) na hora de reprocessar", flush=True)
                 fila += retry
+    # SEM CONTA ESCOLHIDA, o catálogo carregado é o da casa. Item de conta de outra
+    # org não pode ser aplicado com ele (custo errado = preço errado). Fica de fora
+    # desta rodada, intocado: nem grava na fila, nem mexe no retry.
+    if not SELLER_FILTRO and fila:
+        try:
+            _orgs = {str(c.get("seller_id")): (c.get("org") or None)
+                     for c in (sb.table("contas").select("seller_id, org").execute().data or [])}
+        except Exception as e:
+            _orgs = None
+            print(f"aviso: não li a org das contas ({e}) — sigo como antes", flush=True)
+        if _orgs is not None:
+            _casa = getattr(rec, "ORG_CASA", "pontomusical")
+            _fora = [f for f in fila
+                     if (_orgs.get(str(f.get("seller_id"))) or _casa) != _casa]
+            if _fora:
+                fila = [f for f in fila if f not in _fora]
+                _sids = sorted({str(f.get("seller_id")) for f in _fora})
+                print(f"pulei {len(_fora)} item(ns) de conta de outra org ({', '.join(_sids)}): "
+                      f"o catálogo desta rodada é o da casa. Rode o aplicador com a conta "
+                      f"escolhida para eles.", flush=True)
     escopo = (f" | itens {len(ITENS_FILTRO)} selecionados" if ITENS_FILTRO
               else (f" | item {ITEM_FILTRO}" if ITEM_FILTRO else " | FILA INTEIRA da conta"))
     print(f"{'SIMULAÇÃO (DRY_RUN)' if DRY else 'APLICAÇÃO REAL'} — {len(fila)} item(ns)"
