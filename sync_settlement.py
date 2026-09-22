@@ -88,10 +88,36 @@ def renovar_token(refresh):
     return d
 
 
+def _so_contas_da_casa(linhas_contas, rotulo):
+    """Deixa de fora conta de OUTRA org (ex.: conta só do repricer).
+    Entra: org = ORG_BI ou org vazia (comportamento de antes para as suas)."""
+    org_bi = (os.environ.get("ORG_BI") or "pontomusical").strip()
+    dentro, fora = [], []
+    for c in linhas_contas:
+        org = (c.get("org") or "").strip()
+        if org and org != org_bi:
+            fora.append(f"{c.get('seller_id')} (org={org})")
+        else:
+            dentro.append(c)
+    if fora:
+        print(f"{rotulo}: fora, não são da org '{org_bi}' ({len(fora)}): {', '.join(fora)}",
+              flush=True)
+    return dentro
+
+
+def _ler_contas(colunas):
+    """Lê a tabela contas COM a org; sem a coluna, lê como antes e avisa."""
+    try:
+        return sb.table("contas").select(colunas + ", org").execute().data or []
+    except Exception:
+        print("AVISO: coluna 'org' não existe na tabela contas - puxando TODAS "
+              "as contas (comportamento antigo).", flush=True)
+        return sb.table("contas").select(colunas).execute().data or []
+
 def lista_contas():
-    res = sb.table("contas").select("seller_id, apelido, refresh_token").execute()
+    linhas = _so_contas_da_casa(_ler_contas("seller_id, apelido, refresh_token"), "settlement")
     tk = [(str(c["seller_id"]), c.get("apelido"), c["refresh_token"])
-          for c in (res.data or []) if c.get("refresh_token")]
+          for c in linhas if c.get("refresh_token")]
     if not tk and SEED_REFRESH:
         tk = [(None, "(seed)", SEED_REFRESH)]
     if ONLY_SELLER:
