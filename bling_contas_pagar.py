@@ -22,6 +22,7 @@ Python puro (sem pip install).
 =====================================================================================
 """
 import os
+import sys
 import json
 import time
 import base64
@@ -30,8 +31,14 @@ import urllib.error
 import urllib.parse
 from datetime import datetime, timezone, timedelta
 
+# Mostra as mensagens AO VIVO no log (sem segurar o texto até o fim).
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+except Exception:
+    pass
+
 # >>> AJUSTE AQUI <<<  (vazio "" = normal; com data = só até essa data de lançamento)
-DATA_ATE = "2026-08-31"
+DATA_ATE = ""
 # Também dá pra controlar por variável no GitHub, sem mexer no código:
 DATA_ATE = (os.environ.get("DATA_ATE", DATA_ATE) or "").strip()[:10]
 
@@ -178,8 +185,8 @@ def filtrar_por_lancamento(access, conta, registros):
             continue
         if em <= DATA_ATE:
             selecionados.append(r)
-        if modo == "detalhe" and idx % 100 == 0:
-            print(f"    ...{idx}/{len(registros)} conferidos")
+        if modo == "detalhe" and idx % 50 == 0:
+            print(f"    ...{idx}/{len(registros)} conferidos ({len(selecionados)} até {DATA_ATE})")
     if sem_data:
         print(f"[{conta}] AVISO: {sem_data} sem data de lançamento legível (ignorados).")
     return selecionados
@@ -220,9 +227,11 @@ def main():
     total = 0
     for row in contas:
         conta = row["conta"]
+        print(f"--- Processando {conta} ---")
         try:
             access = obter_access(row)
             registros = baixar_contas(access)
+            print(f"[{conta}] baixei {len(registros)} boletos do Bling.")
         except Exception as e:
             print(f"[{conta}] pulei (erro, mantive dados de ontem): {e}")
             continue
