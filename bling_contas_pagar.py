@@ -1,11 +1,25 @@
 """
-Robô: puxa as CONTAS A PAGAR em aberto do Bling (das contas em bling_contas) e mantém
+Robô: puxa as CONTAS A PAGAR do Bling (das contas em bling_contas) e mantém
 a tabela contas_pagar sempre igual ao Bling (boleto pago some sozinho).
 
 - Renova o token só se estiver perto de expirar (< 15 min).
 - Resolve o NOME do fornecedor (com cache em bling_contatos).
-- Estratégia "substituir": pra cada conta, apaga e regrava só os EM ABERTO (situacao=1).
+- Upsert por id (atualiza a situação quando um boleto passa de aberto p/ pago).
 Python puro (sem pip install).
+
+=====================================================================================
+ LIGA/DESLIGA DO FILTRO DE DATA DE LANÇAMENTO  (carga faseada)
+=====================================================================================
+ Com uma data aqui, o robô traz SÓ o que foi lançado ATÉ essa data (ex.: fechar agosto).
+ Vale também nas rodadas automáticas — então o painel fica "travado" nessa fase.
+
+   DATA_ATE = "2026-08-31"   -> traz só o que foi lançado até 31/08 (fase 1)
+
+ Quando quiser VOLTAR AO NORMAL (trazer tudo, inclusive setembro em diante),
+ troque a linha abaixo por uma vazia:
+
+   DATA_ATE = ""             -> sem filtro, traz tudo (normal)
+=====================================================================================
 """
 import os
 import json
@@ -16,8 +30,15 @@ import urllib.error
 import urllib.parse
 from datetime import datetime, timezone, timedelta
 
-BASE = "https://www.bling.com.br/Api/v3"
-TOKEN_URL = BASE + "/oauth/token"
+# >>> AJUSTE AQUI <<<  (vazio "" = normal; com data = só até essa data de lançamento)
+DATA_ATE = "2026-08-31"
+# Também dá pra controlar por variável no GitHub, sem mexer no código:
+DATA_ATE = (os.environ.get("DATA_ATE", DATA_ATE) or "").strip()[:10]
+
+# ATENÇÃO (set/2026): o Bling BLOQUEOU www.bling.com.br para requisições de DADOS (HTTP 403).
+# Agora os dados precisam ir para api.bling.com.br. Já o OAuth/token continua em www.bling.com.br.
+API_BASE = "https://api.bling.com.br/Api/v3"           # dados: /contas/pagar, /contatos
+TOKEN_URL = "https://www.bling.com.br/Api/v3/oauth/token"   # oauth continua no www
 SB_URL = os.environ["SUPABASE_URL"].rstrip("/")
 SB_KEY = os.environ["SUPABASE_KEY"]
 SB_HDR = {"apikey": SB_KEY, "Authorization": "Bearer " + SB_KEY}
@@ -107,7 +128,7 @@ def baixar_contas(access):
     hdr = {"Authorization": "Bearer " + access, "Accept": "application/json"}
     tudo, pagina = [], 1
     while pagina <= 300:  # trava de segurança
-        st, raw = bling("GET", f"{BASE}/contas/pagar?pagina={pagina}&limite=100", hdr)
+        st, raw = bling("GET", f"{API_BASE}/contas/pagar?pagina={pagina}&limite=100", hdr)
         if st >= 300:
             raise RuntimeError(f"contas/pagar HTTP {st}: {raw[:200]}")
         data = json.loads(raw).get("data", [])
@@ -118,6 +139,50 @@ def baixar_contas(access):
             break
         pagina += 1
     return tudo
+
+
+def achar_emissao(obj):
+    """Acha a DATA DE LANÇAMENTO/EMISSÃO por qualquer chave que contenha 'emiss' ou
+    'lanca' (nunca casa com 'vencimento'). Retorna 'AAAA-MM-DD' ou None."""
+    for k, v in obj.items():
+        lk = k.lower()
+        if "emiss" in lk or "lanca" in lk or "lançа" in lk:
+            if isinstance(v, str) and len(v) >= 10 and v[4] == "-" and v[7] == "-":
+                return v[:10]
+    return None
+
+
+def emissao_detalhe(access, cid):
+    hdr = {"Authorization": "Bearer " + access, "Accept": "application/json"}
+    st, raw = bling("GET", f"{API_BASE}/contas/pagar/{cid}", hdr)
+    if st < 300:
+        return achar_emissao(json.loads(raw).get("data", {}))
+    return None
+
+
+def filtrar_por_lancamento(access, conta, registros):
+    """Se DATA_ATE estiver ligado, mantém só os lançados até essa data."""
+    if not DATA_ATE:
+        return registros
+    print(f"[{conta}] AMOSTRA do 1º registro: "
+          f"{json.dumps(registros[0], ensure_ascii=False)[:600]}")
+    tem_na_lista = any(achar_emissao(r) for r in registros[:8])
+    modo = "lista" if tem_na_lista else "detalhe"
+    print(f"[{conta}] filtro LIGADO: só lançados até {DATA_ATE}. Data de lançamento via: {modo}"
+          + ("" if tem_na_lista else " (consultando detalhe de cada boleto — pode demorar alguns minutos)"))
+    selecionados, sem_data = [], 0
+    for idx, r in enumerate(registros, 1):
+        em = achar_emissao(r) if tem_na_lista else emissao_detalhe(access, r["id"])
+        if not em:
+            sem_data += 1
+            continue
+        if em <= DATA_ATE:
+            selecionados.append(r)
+        if modo == "detalhe" and idx % 100 == 0:
+            print(f"    ...{idx}/{len(registros)} conferidos")
+    if sem_data:
+        print(f"[{conta}] AVISO: {sem_data} sem data de lançamento legível (ignorados).")
+    return selecionados
 
 
 def resolver_fornecedores(access, ids):
@@ -133,7 +198,7 @@ def resolver_fornecedores(access, ids):
     for i in ids:
         if i in nome:
             continue
-        st, raw = bling("GET", f"{BASE}/contatos/{i}", hdr)
+        st, raw = bling("GET", f"{API_BASE}/contatos/{i}", hdr)
         if st < 300:
             d = json.loads(raw).get("data", {})
             nome[i] = d.get("nome") or f"(contato {i})"
@@ -146,6 +211,10 @@ def resolver_fornecedores(access, ids):
 
 
 def main():
+    if DATA_ATE:
+        print(f">>> FILTRO LIGADO: importando só o que foi LANÇADO até {DATA_ATE} <<<")
+    else:
+        print(">>> Modo normal: importando tudo <<<")
     contas = sb_get("bling_contas?select=conta,client_id,refresh_token,access_token,access_expira_em")
     print("Contas:", [c["conta"] for c in contas])
     total = 0
@@ -157,6 +226,8 @@ def main():
         except Exception as e:
             print(f"[{conta}] pulei (erro, mantive dados de ontem): {e}")
             continue
+
+        registros = filtrar_por_lancamento(access, conta, registros) if registros else registros
 
         ids = sorted({(x.get("contato") or {}).get("id") for x in registros})
         nome = resolver_fornecedores(access, ids)
@@ -179,7 +250,8 @@ def main():
         pago = sum((l["valor"] or 0) for l in linhas if l["situacao"] == 2)
         print(f"[{conta}] {len(linhas)} contas — em aberto R$ {aberto:,.2f} · pagas R$ {pago:,.2f}")
         total += len(linhas)
-    print(f"Fim. {total} contas a pagar (aberto + pagas) no total.")
+    print(f"Fim. {total} contas a pagar no total"
+          + (f" (só lançadas até {DATA_ATE})." if DATA_ATE else "."))
 
 
 if __name__ == "__main__":
