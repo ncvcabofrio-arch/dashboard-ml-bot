@@ -581,9 +581,13 @@ def participacoes_ativas_rapido(item_id, seller_id, access):
             sti = (it.get("status") or "").lower()
             if sti not in ("started", "pending"):
                 continue
+            # preco_atual: o preço que ESTA participação está praticando agora. É o
+            # que permite devolver DEAL/SELLER_CAMPAIGN exatamente como estava se a
+            # entrada seguinte for recusada. None quando o ML não informa.
             return {"promotion_id": pid, "type": ptipo.upper(),
                     "offer_id": it.get("offer_id") or it.get("ref_id"),
-                    "name": pr.get("name"), "status": sti}
+                    "name": pr.get("name"), "status": sti,
+                    "preco_atual": rec.preco_oferta(it)}
         return None
 
     n = max(1, min(LEITURA_PARALELA, len(campanhas)))
@@ -700,6 +704,7 @@ def participacoes_completas(iid, seller_id, access, ofertas=None):
                         "offer_id": o.get("offer_id") or o.get("ref_id"),
                         "name": o.get("name") or ("Desconto individual" if t == "PRICE_DISCOUNT" else t),
                         "status": (o.get("status") or "started"),
+                        "preco_atual": rec.preco_oferta(o),
                         "nivel_item": True})
     return achadas
 def sair_das_outras(iid, seller_id, access, manter_pid=None, manter_tipo=None,
@@ -951,7 +956,15 @@ def reentrar_nas_campanhas(iid, seller_id, access, perdidas):
             nao_voltou.append(f"{rot}({t}: o ML não oferece mais candidatura)")
             continue
         _preco, _fonte = None, ""
-        if t in ("DEAL", "SELLER_CAMPAIGN"):
+        if t in ("DEAL", "SELLER_CAMPAIGN") and p.get("preco_atual") not in (None, ""):
+            # AGORA EXISTE: o preço foi lido quando a participação foi encontrada,
+            # antes do DELETE. Devolver com ele é devolver ao estado anterior — não é
+            # escolher preço no lugar do dono.
+            try:
+                _preco, _fonte = float(p["preco_atual"]), "o preço que estava antes"
+            except (TypeError, ValueError):
+                _preco, _fonte = None, ""
+        if t in ("DEAL", "SELLER_CAMPAIGN") and _preco is None:
             # NÃO REPÕE. (1) O preço anterior não existe em lugar nenhum —
             # participacoes_completas guarda id, tipo, offer_id e nome, nunca preço.
             # (2) Com a oferta ativa a doc só permite REDUZIR ("New deal_price must be
