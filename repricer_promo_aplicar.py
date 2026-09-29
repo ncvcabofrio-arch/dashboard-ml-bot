@@ -330,10 +330,36 @@ def _clamp_preco(preco, cand):
     except (TypeError, ValueError):
         pass
     return round(preco, 2)
+# Tipos em que QUEM DEFINE O PREÇO SOMOS NÓS: o corpo do POST leva deal_price.
+# Sem preço aqui não existe "padrão razoável" — existe preço inventado.
+TIPOS_PRECO_NOSSO = {"PRICE_DISCOUNT", "DEAL", "SELLER_CAMPAIGN", "LIGHTNING", "DOD"}
+
+
 def corpo_post(tipo, cand, preco_alvo):
     """Monta o corpo do POST de ENTRADA conforme o tipo (docs seller-promotions v2 — auditado
     contra TODAS as páginas). Cada família tem um formato próprio."""
     tipo = (tipo or "").upper()
+    # ===================== CONSERTO 29/set — SEM PREÇO NÃO SE MONTA CORPO =====================
+    # Sem esta guarda, preco_alvo=None chegava ao _clamp_preco, virava 0.00 em
+    # float(preco or 0) e o clamp SUBIA esse zero até min_discounted_price — o menor
+    # preço que o ML aceita, ou seja, o MAIOR desconto possível.
+    #
+    # Medido na conta 177795203 em 29/set, pelo caminho reentrar_nas_campanhas:
+    #   MLB1537561283  foi a R$360,80    (o irmão MLB4120034304 VENDEU nesse preço)
+    #   MLB4026035041  foi a R$2.307,30  (o irmão MLB5681407854 ficou nesse preço)
+    #   MLB4923656563  foi a R$370,00    -> o ML PAUSOU por mudança atípica de preço
+    #   MLB3157109874  foi a R$394,18    -> o ML PAUSOU por mudança atípica de preço
+    #
+    # Devolver None faz o chamador registrar "não montei corpo" e NÃO tocar no
+    # anúncio. Todos os chamadores já tratam corpo=None. Preço cheio não dá
+    # prejuízo; preço chutado dá.
+    if tipo in TIPOS_PRECO_NOSSO:
+        try:
+            if preco_alvo in (None, "") or float(preco_alvo) <= 0:
+                return None
+        except (TypeError, ValueError):
+            return None
+    # =========================================================================================
     oid = cand.get("ref_id") or cand.get("offer_id") or cand.get("candidate_id") or cand.get("id")
     # (1) cofinanciadas automatizadas / preços competitivos: id+type+offer_id
     #     (mantém as datas p/ SMART/PM como já vinha funcionando)
@@ -917,11 +943,10 @@ def reentrar_nas_campanhas(iid, seller_id, access, perdidas):
     'perdidas' são os dicionários que sair_das_outras removeu com 200/201.
     Retorna (voltou[], nao_voltou[]) com rótulos legíveis.
 
-    O preço não vem de lugar nenhum guardado: participacoes_completas não registra
-    preço. Para os tipos em que o preço é do ML isso não importa (o corpo é só
-    id+tipo). Para DEAL/SELLER_CAMPAIGN o robô usa o SUGERIDO do ML e, na falta
-    dele, o TETO da faixa — o menor desconto possível, que é a escolha de menor
-    risco de margem. Qual número foi usado sai escrito no log."""
+    PREÇO: só repõe com o preço LIDO antes do DELETE (p['preco_atual']). Nos tipos em
+    que o preço é do ML (SMART, MARKETPLACE_CAMPAIGN...) isso não importa, porque o
+    corpo é só id+tipo. Nos tipos de preço nosso, sem o preço guardado o robô NÃO
+    repõe — escolher o número no seu lugar é o que produziu o estrago de 29/set."""
     voltou, nao_voltou = [], []
     if not perdidas:
         return voltou, nao_voltou
@@ -940,6 +965,17 @@ def reentrar_nas_campanhas(iid, seller_id, access, perdidas):
         if t in TIPOS_SEM_REENTRADA:
             nao_voltou.append(f"{rot}({t}: exige estoque/data — refaça no ML)")
             continue
+        # ============ CONSERTO 29/set — O INDIVIDUAL NÃO SE REPÕE POR AQUI ============
+        # Ele chega dentro de 'perdidas' porque sair_das_outras remove tudo. Mas quem o
+        # restaura é restaurar_individual(), chamado logo antes, que lê o preço real da
+        # oferta removida. Repor de novo aqui era uma SEGUNDA gravação — e esta sem
+        # preço nenhum, que o _clamp_preco transformava no piso da faixa do ML (o maior
+        # desconto possível). Foi o que pôs MLB1537561283 a R$360,80 e MLB4026035041 a
+        # R$2.307,30 em 29/set, e fez o ML pausar outros dois por mudança atípica.
+        # Não é erro nem perda: é trabalho que já foi feito na linha de cima.
+        if t == "PRICE_DISCOUNT":
+            continue
+        # =============================================================================
         # acha a candidatura correspondente: por id quando existe, por tipo nos
         # casos de nível de item (onde promotion_id costuma vir nulo).
         alvo = None
@@ -956,7 +992,7 @@ def reentrar_nas_campanhas(iid, seller_id, access, perdidas):
             nao_voltou.append(f"{rot}({t}: o ML não oferece mais candidatura)")
             continue
         _preco, _fonte = None, ""
-        if t in ("DEAL", "SELLER_CAMPAIGN") and p.get("preco_atual") not in (None, ""):
+        if t in TIPOS_PRECO_NOSSO and p.get("preco_atual") not in (None, ""):
             # AGORA EXISTE: o preço foi lido quando a participação foi encontrada,
             # antes do DELETE. Devolver com ele é devolver ao estado anterior — não é
             # escolher preço no lugar do dono.
@@ -964,20 +1000,20 @@ def reentrar_nas_campanhas(iid, seller_id, access, perdidas):
                 _preco, _fonte = float(p["preco_atual"]), "o preço que estava antes"
             except (TypeError, ValueError):
                 _preco, _fonte = None, ""
-        if t in ("DEAL", "SELLER_CAMPAIGN") and _preco is None:
-            # NÃO REPÕE. (1) O preço anterior não existe em lugar nenhum —
-            # participacoes_completas guarda id, tipo, offer_id e nome, nunca preço.
-            # (2) Com a oferta ativa a doc só permite REDUZIR ("New deal_price must be
-            # lower than current deal_price"): repor pelo sugerido ou pelo teto é
-            # recusado, ou aceito deixando MAIS BARATO. Nos dois casos eu mexeria no
-            # seu preço sem ordem sua.
+        if t in TIPOS_PRECO_NOSSO and _preco is None:
+            # NÃO REPÕE. (1) Sem o preço lido antes do DELETE, qualquer número aqui é
+            # escolhido por mim, não por você. (2) Com a oferta ativa a doc só permite
+            # REDUZIR ("New deal_price must be lower than current deal_price"): repor
+            # pelo sugerido ou pelo teto é recusado, ou aceito deixando MAIS BARATO.
+            # Nos dois casos eu mexeria no seu preço sem ordem sua.
             nao_voltou.append(f"{rot}({t}: quem define o preço aqui é você e eu não guardei "
                               f"o anterior — refaça no ML para não trocar seu preço por um "
                               f"que você não escolheu)")
             continue
         corpo = corpo_post(t, alvo, _preco)
         if not corpo:
-            nao_voltou.append(f"{rot}({t}: não sei montar o corpo desse tipo)")
+            nao_voltou.append(f"{rot}({t}: não sei montar o corpo desse tipo, ou não tenho preço "
+                              f"para ele — refaça no ML)")
             continue
         try:
             scd, resp = post(f"/seller-promotions/items/{iid}?app_version=v2", access, corpo)
@@ -2525,9 +2561,13 @@ def main():
               f"desconto individual e o robô refez as participações.", flush=True)
         for _iid, _campanhas in REENTRADAS:
             print(f"      {_iid}: voltou para {len(_campanhas)} — " + ", ".join(_campanhas), flush=True)
-        print("      Onde aparece um preço, ele NÃO é o preço anterior (esse não fica guardado "
-              "em lugar nenhum): é o sugerido pelo ML ou o teto da faixa. Confira se importa.",
-              flush=True)
+        # CONSERTO 29/set: o texto antigo dizia que o preço mostrado NÃO era o anterior,
+        # e que vinha do sugerido do ML ou do teto da faixa. Isso descrevia o bug, não o
+        # desenho. Agora a reentrada só acontece com o preço LIDO antes do DELETE — e
+        # quando não há preço guardado o robô não repõe, e diz isso na linha do item.
+        print("      O preço mostrado é o que a participação praticava ANTES da saída, lido "
+              "do ML na hora em que foi encontrada. Sem esse preço o robô NÃO repõe: ele "
+              "lista o anúncio abaixo, pra você refazer no ML.", flush=True)
         resumo["reentradas"] = len(REENTRADAS)
     if SEM_DESCONTO_AGORA:
         # Um anúncio pode entrar aqui DUAS vezes (perdeu o individual E as campanhas).
