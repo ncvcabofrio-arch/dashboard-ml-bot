@@ -21,12 +21,17 @@ import json
 import repricer_sugestoes as rec
 import repricer_promo_aplicar as apl   # o aplicador DE VERDADE — ver nota abaixo
 from datetime import datetime, timezone, timedelta
+from urllib.parse import quote
 from ml_auth import obter_access
 sb = rec.sb
 # .upper() porque o ML recusa o id em minúsculas com "Invalid item id" — e aí TODAS as
 # chamadas falham em cascata. Custa nada normalizar e evita um diagnóstico inteiro perdido.
 ITEM = (os.environ.get("ITEM_ID") or os.environ.get("DIAG_ITEM") or "").strip().upper()
 SELLER = (os.environ.get("SELLER_ID") or "").strip()
+# FAMILIA=1 -> depois do diagnóstico normal, varre TODOS os anúncios do mesmo produto
+# (por user_product_id, por sku e por seller_sku) e compara lado a lado. Padrão ligado:
+# quase toda dúvida de promoção acaba virando "e os irmãos?". FAMILIA=0 desliga.
+FAMILIA = (os.environ.get("FAMILIA", "1").strip() != "0")
 TIPOS_SO_TIPO = {"PRICE_DISCOUNT", "LIGHTNING", "DOD"}
 TIPOS_COM_OFFER = {"SMART", "PRICE_MATCHING", "PRICE_MATCHING_MELI_ALL", "MARKETPLACE_CAMPAIGN",
                    "PRE_NEGOTIATED", "UNHEALTHY_STOCK", "VOLUME"}
@@ -377,6 +382,175 @@ def raio_x(item_id, it, access):
     else:
         print("\n  [K] USER PRODUCT: item ainda no modelo antigo (sem user_product_id)", flush=True)
     print("\n################ FIM DO RAIO-X ################", flush=True)
+# ===========================================================================
+# 6) FAMÍLIA — varre TODOS os anúncios do mesmo produto e compara lado a lado.
+#
+# POR QUE existe: o ML compartilha preço entre anúncios do mesmo produto E do
+# mesmo tipo de publicação. Diagnosticar um só responde metade da pergunta —
+# a outra metade é "e os irmãos, têm as mesmas candidaturas?". Sem isso não dá
+# pra decidir EM QUAL anúncio aplicar a promoção, nem qual mostrar no painel.
+#
+# Varre por TRÊS caminhos e une, porque nenhum sozinho pega tudo:
+#   user_product_id  pega os irmãos do modelo novo (UP), inclusive de outro tipo
+#   sku              busca por seller_custom_field (o SKU do ERP/formulário velho)
+#   seller_sku       busca pelo atributo SELLER_SKU (o formulário atual)
+# Anúncio antigo sem UP só aparece pelos dois últimos; anúncio sem SKU só pelo
+# primeiro. Unir os três é a única forma de não perder irmão.
+# ===========================================================================
+def _familia_completa(item_id, it, access, sid):
+    """{item_id: {origens}} — todos os anúncios que podem ser o MESMO produto."""
+    achados = {}
+
+    def _junta(path, rotulo):
+        st, r = _g(path, access)
+        for x in ((r.get("results") if isinstance(r, dict) else None) or []):
+            achados.setdefault(str(x), set()).add(rotulo)
+
+    upid = it.get("user_product_id")
+    if upid:
+        _junta(f"/users/{sid}/items/search?user_product_id={upid}&limit=100", "UP")
+    scf = (it.get("seller_custom_field") or "").strip()
+    if scf:
+        _junta(f"/users/{sid}/items/search?sku={quote(scf)}&limit=100", "sku")
+    at = _attr_sku(it)
+    if at and at != scf:
+        _junta(f"/users/{sid}/items/search?seller_sku={quote(at)}&limit=100", "seller_sku")
+    achados.setdefault(str(item_id), set()).add("consultado")
+    return achados
+
+
+def _foto(x, access):
+    """Retrato leve de um anúncio: tipo, preços, margem, promoções e catálogo.
+    4 GETs por anúncio — de propósito. A sonda pesada (18 campanhas x 4 vias) existe
+    pra quando as DUAS fontes da API se contradizem; aqui a pergunta é outra e o
+    /seller-promotions/items/{id} já responde."""
+    f = {"id": x}
+    st, ix = _g(f"/items/{x}", access)
+    if not isinstance(ix, dict):
+        f["erro"] = f"não li o item (HTTP {st})"
+        return f
+    f["tipo"] = ix.get("listing_type_id") or "?"
+    f["lista"] = ix.get("price")
+    f["status"] = ix.get("status")
+    f["vendidos"] = ix.get("sold_quantity")
+    f["catalog"] = ix.get("catalog_product_id")
+    f["sku"] = rec.sku_do_item(ix)
+    st, sp = _g(f"/items/{x}/sale_price?context=channel_marketplace", access)
+    if isinstance(sp, dict):
+        f["venda"] = sp.get("amount")
+        f["promo"] = (sp.get("metadata") or {}).get("promotion_type")
+    st, of = _g(f"/seller-promotions/items/{x}?app_version=v2", access)
+    f["promos"] = of if isinstance(of, list) else []
+    st, ptw = _g(f"/items/{x}/price_to_win?version=v2", access)
+    if isinstance(ptw, dict):
+        f["ptw_status"] = ptw.get("status")
+        f["ptw_preco"] = ptw.get("price_to_win")
+        f["ptw_winner"] = (ptw.get("winner") or {}).get("item_id")
+    # margem no preço de venda de hoje, mesma conta do [H]
+    try:
+        custo = rec.custo_efetivo(x, f.get("sku"))
+        frete, _o = rec.frete_de(f.get("sku"), x, access)
+        v = f.get("venda")
+        if custo is not None and v:
+            com = rec.comissao(round(float(v), 2), ix.get("category_id"),
+                               ix.get("listing_type_id"), access) or 0
+            f["margem"] = (float(v) - com - (frete or 0) - custo) / float(v) * 100
+    except Exception:
+        pass
+    return f
+
+
+def diagnostico_familia(item_id, it, access, sid, contas_suas):
+    """6) Compara TODOS os irmãos lado a lado + matriz de candidaturas por campanha."""
+    print("\n################ 6) FAMÍLIA — TODOS OS ANÚNCIOS DO MESMO PRODUTO ################", flush=True)
+    fam = _familia_completa(item_id, it, access, sid)
+    print(f"  varri por: user_product_id={it.get('user_product_id')} | "
+          f"sku={it.get('seller_custom_field')!r} | seller_sku={_attr_sku(it)!r}", flush=True)
+    print(f"  encontrei {len(fam)} anúncio(s)\n", flush=True)
+    fotos = []
+    for x in sorted(fam):
+        f = _foto(x, access)
+        f["origens"] = ",".join(sorted(fam[x]))
+        fotos.append(f)
+    # ordena por tipo e preço, que é como os blocos de preço se formam
+    fotos.sort(key=lambda f: (str(f.get("tipo")), f.get("venda") or 0))
+    print("  #   ANÚNCIO         TIPO            LISTA           VENDE        MARGEM  VEND  ACHADO POR", flush=True)
+    for i, f in enumerate(fotos, 1):
+        if f.get("erro"):
+            print(f"  #{i:<2} {f['id']}  !! {f['erro']}", flush=True)
+            continue
+        mg = f"{f['margem']:6.2f}%" if f.get("margem") is not None else "     ?"
+        aqui = "  <- ESTE" if str(f["id"]) == str(item_id) else ""
+        print(f"  #{i:<2} {f['id']}  {str(f['tipo']):<14}  {brl(f.get('lista')):>13}  "
+              f"{brl(f.get('venda')):>13}  {mg}  {str(f.get('vendidos')):>4}  "
+              f"{f['origens']}{aqui}", flush=True)
+    # ---- blocos que COMPARTILHAM preço (mesmo tipo) ----
+    print("\n  BLOCOS DE PREÇO (mesmo produto + mesmo tipo = um preço só):", flush=True)
+    por_tipo = {}
+    for f in fotos:
+        if not f.get("erro"):
+            por_tipo.setdefault(str(f.get("tipo")), []).append(f)
+    for t, lst in por_tipo.items():
+        precos = {round(float(f["venda"]), 2) for f in lst if f.get("venda") is not None}
+        ids = ", ".join(f["id"] for f in lst)
+        if len(lst) < 2:
+            print(f"    {t:<14} {ids} — sozinho", flush=True)
+        elif len(precos) == 1:
+            print(f"    {t:<14} {ids} -> TODOS em {brl(list(precos)[0])} ✅ aplicar em UM só", flush=True)
+        else:
+            print(f"    {t:<14} {ids} -> preços DIFERENTES {sorted(precos)} ⚠️ conferir", flush=True)
+    # ---- MATRIZ: qual anúncio tem qual candidatura ----
+    # É ISTO que responde "em qual anúncio aplicar": a promoção não é oferecida
+    # igual pra todos os irmãos. Onde aparecer '—' o ML não oferece candidatura.
+    print("\n  MATRIZ DE CANDIDATURAS — status de cada campanha em cada anúncio:", flush=True)
+    campanhas = {}
+    for i, f in enumerate(fotos, 1):
+        for o in (f.get("promos") or []):
+            if not isinstance(o, dict):
+                continue
+            nome = (o.get("name") or "").strip() or ("Desconto individual"
+                                                     if (o.get("type") or "").upper() == "PRICE_DISCOUNT"
+                                                     else (o.get("type") or "?"))
+            chave = (nome, (o.get("type") or "").upper())
+            campanhas.setdefault(chave, {})[i] = (o.get("status"), o.get("price"))
+    if not campanhas:
+        print("    (nenhum anúncio da família devolveu promoções)", flush=True)
+    else:
+        cab = "    {:<34} {:<24}".format("CAMPANHA", "TIPO")
+        cab += "".join(f"#{i:<10}" for i in range(1, len(fotos) + 1))
+        print(cab, flush=True)
+        for (nome, tipo), porcol in sorted(campanhas.items()):
+            linha = "    {:<34} {:<24}".format(nome[:33], tipo[:23])
+            for i in range(1, len(fotos) + 1):
+                st_pr = porcol.get(i)
+                linha += "{:<11}".format(st_pr[0] if st_pr else "—")
+            print(linha, flush=True)
+        print("\n    '—' = o ML NÃO oferece essa campanha nesse anúncio. Aplicar nele seria "
+              "recusa garantida.", flush=True)
+    # ---- catálogo: quem ganha a caixa, e se é conta SUA ----
+    print("\n  CATÁLOGO — quem está ganhando a caixa de compra:", flush=True)
+    idx = {f["id"]: i for i, f in enumerate(fotos, 1)}
+    for i, f in enumerate(fotos, 1):
+        if not f.get("catalog"):
+            continue
+        w = f.get("ptw_winner")
+        quem = ""
+        if w:
+            if str(w) == str(f["id"]):
+                quem = "ele mesmo"
+            elif w in idx:
+                quem = f"#{idx[w]} {w} — IRMÃO SINCRONIZADO DELE 🔴"
+            else:
+                stw, wd = _g(f"/items/{w}", access)
+                wsid = str(wd.get("seller_id")) if isinstance(wd, dict) else ""
+                nome_conta = contas_suas.get(wsid)
+                quem = (f"{w} — 🔴 CONTA SUA ({nome_conta or wsid})" if nome_conta
+                        else f"{w} — outro vendedor (seller {wsid or '?'})")
+        print(f"    #{i} {f['id']} [{f.get('tipo')}] status={f.get('ptw_status')} | "
+              f"pra ganhar precisaria de {brl(f.get('ptw_preco'))} | ganhador: {quem}", flush=True)
+    print("\n################ FIM DA FAMÍLIA ################", flush=True)
+
+
 def _sugestao_fresca(item_id, sid):
     """Lê a recomendação MAIS NOVA e VIVA do robô pra o item (status != 'aplicada')."""
     try:
@@ -628,6 +802,18 @@ def main():
               f"inconclusivo — a saída acima é confiável.", flush=True)
     # 5) SIMULAÇÃO DE ENTRADA (só leitura) — reproduz o aplicador e mostra o POST exato
     simular_entrada(ITEM, access, SID)
+    # 6) FAMÍLIA — fica POR ÚLTIMO de propósito: o GitHub Actions corta o log pelo
+    # começo quando ele é grande, então o que mais importa tem que ficar no fim.
+    if FAMILIA:
+        contas_suas = {}
+        try:
+            for c in (sb.table("contas").select("seller_id, nome").execute().data or []):
+                contas_suas[str(c.get("seller_id"))] = c.get("nome")
+        except Exception as e:
+            print(f"  (não li a tabela contas: {e} — não vou saber dizer se o ganhador é seu)", flush=True)
+        diagnostico_familia(ITEM, it, access, SID, contas_suas)
+    else:
+        print("\n(para varrer TODOS os anúncios do mesmo produto, rode com FAMILIA=1)", flush=True)
     print("\n################ FIM — nada foi alterado (só leitura) ################", flush=True)
 if __name__ == "__main__":
     main()
