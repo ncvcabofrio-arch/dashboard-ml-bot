@@ -9,6 +9,11 @@ recomendada e mostra o POST EXATO que ele enviaria, SEM escrever nada (nem no ML
 NOVO: seção 0) RAIO-X — traz TUDO que dá pra consultar do anúncio pela API (preço de venda x lista,
 todos os preços, tarifa detalhada, frete, concorrência/price_to_win, catálogo, visitas/demanda) e
 calcula a MARGEM ATUAL. Base pra desenhar estratégia melhor.
+NOVO (29/set): o bloco [K] passa a mostrar TIPO e PREÇO de cada anúncio irmão. Era o que faltava
+pra responder a pergunta que importa — quais irmãos OBRIGATORIAMENTE compartilham preço. O ML
+sincroniza preço entre anúncios do MESMO produto e do MESMO tipo de publicação (clássico com
+clássico, premium com premium), nunca entre tipos. Sem as colunas de tipo e preço, a lista de
+irmãs era só uma lista de IDs e não decidia nada.
 Uso (inputs do workflow): ITEM_ID (obrigatório) e SELLER_ID (conta).
 """
 import os
@@ -319,15 +324,56 @@ def raio_x(item_id, it, access):
         rl = (rules.get("rules") if isinstance(rules, dict) else None) or []
         print(f"      sem automação atribuída. Regras que o item aceitaria: {[r.get('rule_id') for r in rl] or 'nenhuma'}", flush=True)
     # [K] USER PRODUCT (MLBU) + condições de venda irmãs (mesmo produto, preços/ tipos diferentes)
+    #
+    # POR QUE TIPO E PREÇO, e não só o ID (29/set):
+    # O ML sincroniza o preço entre anúncios do MESMO produto e do MESMO tipo de
+    # publicação — clássico com clássico, premium com premium — e NUNCA entre tipos.
+    # Um MLBU costuma ter os dois tipos dentro, com preços diferentes e independentes.
+    # Listar só os IDs não dizia quais irmãos brigam pelo mesmo preço, que é a única
+    # pergunta que esta seção precisa responder. Medido no MLB5183041271 (Acordeão
+    # Michael ACM1200): quatro irmãos, dois em R$7.512,21 (clássico) e dois em
+    # R$8.429,66 (premium) — e o próprio painel do ML diz "Sincronizado com #...".
     upid = it.get("user_product_id")
     if upid:
         st, up = _g(f"/user-products/{upid}", access)
         nome_up = up.get("name") if isinstance(up, dict) else None
+        # family_id mora no /user-products, NÃO no /items. Lendo do item imprimia None
+        # sempre — um campo que parecia respondido e não estava.
+        _fam = (up.get("family_id") if isinstance(up, dict) else None) or it.get("family_id")
         st, irmas = _g(f"/users/{it.get('seller_id')}/items/search?user_product_id={upid}", access)
         ids = (irmas.get("results") if isinstance(irmas, dict) else None) or []
-        print(f"\n  [K] USER PRODUCT: {upid} '{nome_up}' | family_id={it.get('family_id')} | condições de venda (irmãs): {len(ids)}", flush=True)
+        print(f"\n  [K] USER PRODUCT: {upid} '{nome_up}' | family_id={_fam} | "
+              f"condições de venda (irmãs): {len(ids)}", flush=True)
+        _por_tipo = {}
         for x in ids[:12]:
-            print(f"        - {x}{'  <- ESTE' if str(x) == str(item_id) else ''}", flush=True)
+            _st, _ix = _g(f"/items/{x}", access)
+            _lt = (_ix.get("listing_type_id") if isinstance(_ix, dict) else None) or "?"
+            _lista_x = _ix.get("price") if isinstance(_ix, dict) else None
+            _stp, _spx = _g(f"/items/{x}/sale_price?context=channel_marketplace", access)
+            _pv = _spx.get("amount") if isinstance(_spx, dict) else None
+            _pt = (_spx.get("metadata") or {}).get("promotion_type") if isinstance(_spx, dict) else None
+            print(f"        - {x} | {str(_lt):<13} | lista {brl(_lista_x):>13} | "
+                  f"vende {brl(_pv):>13} ({_pt or 'sem promo'})"
+                  + ("  <- ESTE" if str(x) == str(item_id) else ""), flush=True)
+            if _pv is not None:
+                _por_tipo.setdefault(str(_lt), []).append((str(x), round(float(_pv), 2)))
+        # O veredito: dentro de um tipo, os preços têm que ser iguais. Se forem, esses
+        # anúncios são um bloco só para qualquer decisão de preço ou de promoção.
+        print("\n      QUEM COMPARTILHA PREÇO (mesmo produto + mesmo tipo):", flush=True)
+        for _lt, _lst in _por_tipo.items():
+            _precos = {p for _, p in _lst}
+            _ids = ", ".join(i for i, _ in _lst)
+            if len(_lst) < 2:
+                print(f"        {_lt:<13} {_ids} — sozinho neste tipo", flush=True)
+            elif len(_precos) == 1:
+                print(f"        {_lt:<13} {_ids} -> TODOS em {brl(list(_precos)[0])} "
+                      f"✅ compartilham preço: trate como UM anúncio só", flush=True)
+            else:
+                print(f"        {_lt:<13} {_ids} -> preços DIFERENTES {sorted(_precos)} "
+                      f"⚠️ não compartilham (ou um deles ainda está propagando)", flush=True)
+        if len(_por_tipo) > 1:
+            print(f"        >>> {len(_por_tipo)} tipos diferentes neste produto. Tipos NÃO "
+                  f"compartilham preço entre si — cada bloco decide o seu.", flush=True)
     else:
         print("\n  [K] USER PRODUCT: item ainda no modelo antigo (sem user_product_id)", flush=True)
     print("\n################ FIM DO RAIO-X ################", flush=True)
