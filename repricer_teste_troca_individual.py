@@ -275,9 +275,14 @@ def main():
 
     # ------------------------------------------------------- HIPÓTESE A: PUT (modificar)
     if MODO in ("AUTO", "PUT"):
-        corpo_put = {"promotion_id": ind.get("id"),
-                     "promotion_type": "PRICE_DISCOUNT",
+        # O desconto individual vem SEM id (medido: "id": None, "ref_id": None). Mandar
+        # "promotion_id": null faria o ML reclamar do CAMPO, e a gente aprenderia nada sobre
+        # o mecanismo. O DELETE do individual funciona só com promotion_type, sem id — o PUT
+        # segue a mesma forma: sem id, o campo não vai.
+        corpo_put = {"promotion_type": "PRICE_DISCOUNT",
                      "deal_price": round(PRECO_NOVO, 2)}
+        if ind.get("id"):
+            corpo_put["promotion_id"] = ind.get("id")
         print("\n################ HIPÓTESE A — PUT (modificar, sem remover) ################",
               flush=True)
         dump("corpo enviado", corpo_put)
@@ -293,7 +298,7 @@ def main():
             if ok:
                 print(f"\n>>> PUT FUNCIONOU: {brl(p_antes)} -> {brl(visto)} "
                       f"em {voltas} conferência(s), sem remover nada.", flush=True)
-                _fim(access, p_antes, resultado)
+                _fim(access, p_antes, resultado, irm)
                 return
             print(f"\n    ⚠ o ML aceitou o PUT mas a vitrine ficou em {brl(visto)}. "
                   f"Aceitar não é valer.", flush=True)
@@ -326,15 +331,30 @@ def main():
         else:
             print("    recusado — é este o erro que faltava ler.", flush=True)
 
-    _fim(access, p_antes, resultado)
+    _fim(access, p_antes, resultado, irm)
 
 
-def _fim(access, p_antes, resultado):
+def _fim(access, p_antes, resultado, irm=None):
     print("\n################ ESTADO FINAL ################", flush=True)
     ofertas, _, bruto = promocoes(access)
     dump("promoções do anúncio DEPOIS", bruto)
     p_dep, _, _ = sale_price(access)
     print(f"\n    sale_price: {brl(p_antes)} -> {brl(p_dep)}", flush=True)
+    # IRMÃOS: cada um tem o SEU desconto individual (medido no MLB5320075152). Então a
+    # pergunta "o desconto se propaga pelo bloco sincronizado?" é respondida aqui de graça,
+    # olhando o preço deles DEPOIS da escrita — sem tocar em nenhum.
+    for _irmao in (irm or {}):
+        st_i, d_i = rec.get(f"/seller-promotions/items/{_irmao}?app_version=v2", access)
+        _ind_i = None
+        for _o in (d_i if isinstance(d_i, list) else []):
+            if isinstance(_o, dict) and (_o.get("type") or "").upper() == "PRICE_DISCOUNT" \
+                    and rec.eh_ativa(_o):
+                _ind_i = _o
+                break
+        st_s, d_s = rec.get(f"/items/{_irmao}/sale_price?context=channel_marketplace", access)
+        _amt = d_s.get("amount") if isinstance(d_s, dict) else None
+        print(f"\n    IRMÃO {_irmao}: sale_price {brl(_amt)} | desconto individual "
+              f"{brl(rec.preco_oferta(_ind_i)) if _ind_i else 'nenhum ativo'}", flush=True)
     dump("RESUMO", resultado)
     print("\n    Para desfazer: rode este mesmo workflow com DESFAZER=SIM.", flush=True)
     print("    (Isso REMOVE o desconto individual — o anúncio volta ao preço de lista ou "
