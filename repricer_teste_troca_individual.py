@@ -145,6 +145,128 @@ def irmaos(access, it):
     return achados
 
 
+def esperar_vaga(access, tentativas=40, espera=3.0):
+    """Espera o ML REABRIR a candidatura de PRICE_DISCOUNT depois do DELETE.
+
+    MEDIDO em 30/set: postar sem essa vaga devolve 400 "No candidates found for item".
+    É a mesma espera que o aplicador já faz — aqui ela vai CRONOMETRADA, porque o número
+    de segundos que ela leva é chute no robô de hoje.
+
+    A doc lista 'restore_requested' como "processo pendente de remoção do desconto": o 200
+    do DELETE quer dizer pedido aceito, não removido."""
+    t0 = time.time()
+    for i in range(tentativas):
+        ofertas, _, _ = promocoes(access)
+        cand, restos = [], []
+        for o in ofertas:
+            if not isinstance(o, dict) or (o.get("type") or "").upper() != "PRICE_DISCOUNT":
+                continue
+            st = (o.get("status") or "").lower()
+            (cand if st == "candidate" else restos).append(st)
+        dt = round(time.time() - t0, 1)
+        print(f"     {dt:>5.1f}s  candidate={len(cand)}  outros={restos or '-'}", flush=True)
+        if cand:
+            # a vaga apareceu, mas o ML ainda esta assentando: postar no mesmo instante
+            # em que o 'candidate' surge e apostar que o indice dele ja concordou.
+            time.sleep(3.0)
+            return True, dt, i + 1
+        time.sleep(espera)
+    return False, round(time.time() - t0, 1), tentativas
+
+
+def postar_individual(access, preco, ini, fim_, rotulo, tentativas=3, espera=4.0):
+    """POST do desconto individual, com repetição. Você me disse: o ML às vezes recusa por
+    erro dele, até no painel deles. Então uma recusa não é resposta final — mas também não
+    insisto para sempre."""
+    corpo = {"deal_price": round(float(preco), 2), "promotion_type": "PRICE_DISCOUNT",
+             "start_date": ini, "finish_date": fim_}
+    for i in range(tentativas):
+        print(f"\n  [POST {rotulo} {i+1}/{tentativas}]", flush=True)
+        dump("corpo enviado", corpo)
+        sc, resp = apl.post(f"/seller-promotions/items/{ITEM}?app_version=v2", access, corpo)
+        print(f"    POST -> HTTP {sc}", flush=True)
+        dump("RESPOSTA DO ML (inteira)", resp)
+        if sc in (200, 201):
+            return True, sc, resp, i + 1
+        if i + 1 < tentativas:
+            print(f"    recusado — esperando {espera}s e tentando de novo", flush=True)
+            time.sleep(espera)
+    return False, sc, resp, tentativas
+
+
+def hipotese_c(access, ind, p_antes, corpo_datas, irm):
+    """DELETE -> esperar a vaga -> POST. É o único caminho que existe, e é o que o
+    aplicador roda hoje na tela Acelerar. Aqui ele vai cronometrado e com volta atrás."""
+    p_velho = rec.preco_oferta(ind)
+    ini_velho = ind.get("start_date") or corpo_datas["start_date"]
+    fim_velho = ind.get("finish_date") or corpo_datas["finish_date"]
+    r = {"preco_velho": p_velho, "etapas": []}
+
+    print("\n################ HIPÓTESE C — DELETE, esperar a vaga, POST ################",
+          flush=True)
+    print(f"    ATENÇÃO: a partir daqui o anúncio fica SEM desconto até o POST entrar.", flush=True)
+    print(f"    Se tudo falhar, eu recoloco {brl(p_velho)} (o preço de agora).", flush=True)
+
+    sc, body = apl.req_delete(
+        f"/seller-promotions/items/{ITEM}?promotion_type=PRICE_DISCOUNT&app_version=v2", access)
+    print(f"\n  [1] DELETE -> HTTP {sc}", flush=True)
+    dump("resposta do DELETE", body)
+    r["etapas"].append({"delete": sc})
+    if sc not in (200, 201):
+        print("\n!! o DELETE foi recusado — NADA foi removido, o desconto continua "
+              f"{brl(p_velho)}. Fim.", flush=True)
+        r["desfecho"] = "delete_recusado"
+        return r
+
+    print("\n  [2] esperando o ML reabrir a candidatura:", flush=True)
+    vaga, seg, voltas = esperar_vaga(access)
+    r["etapas"].append({"vaga": vaga, "segundos": seg, "consultas": voltas})
+    print(f"\n    vaga {'ABRIU' if vaga else 'NÃO abriu'} em {seg}s ({voltas} consultas)",
+          flush=True)
+
+    if not vaga:
+        print("    ⚠ a vaga não apareceu na janela de espera. Vou tentar o POST mesmo assim —\n"
+              "      se vier 'No candidates found', é só o ML ainda não ter assentado, e a\n"
+              "      volta ao preço antigo entra em seguida.", flush=True)
+    ok, sc, resp, n = postar_individual(access, PRECO_NOVO, corpo_datas["start_date"],
+                                        fim_velho, "preço NOVO", tentativas=4, espera=8.0)
+    r["etapas"].append({"post_novo": sc, "tentativas": n, "resposta": resp})
+    if ok:
+        print("\n    aceito. Conferindo a vitrine:", flush=True)
+        valeu, visto, v = esperar_preco(access, round(PRECO_NOVO, 2))
+        r["preco_depois"] = visto
+        r["desfecho"] = "trocado" if valeu else "aceito_mas_nao_valeu"
+        if valeu:
+            print(f"\n>>> TROCA FUNCIONOU: {brl(p_antes)} -> {brl(visto)} "
+                  f"(vaga em {seg}s, POST na tentativa {n})", flush=True)
+        else:
+            print(f"\n    ⚠ o ML aceitou mas a vitrine ficou em {brl(visto)}.", flush=True)
+        return r
+
+    # ---- não entrou: devolve o preço que estava, que é o que o anúncio merecia ----
+    print(f"\n!! O POST do preço novo falhou {n}x. O anúncio está SEM desconto agora.", flush=True)
+    print(f"!! RECOLOCANDO o preço anterior ({brl(p_velho)}).", flush=True)
+    print("\n  [volta] esperando a vaga de novo antes de recolocar:", flush=True)
+    esperar_vaga(access)
+    ok2, sc2, resp2, n2 = postar_individual(access, p_velho, corpo_datas["start_date"],
+                                            fim_velho, "VOLTA ao preço antigo",
+                                            tentativas=6, espera=10.0)
+    r["etapas"].append({"post_volta": sc2, "tentativas": n2, "resposta": resp2})
+    if ok2:
+        valeu2, visto2, _ = esperar_preco(access, round(float(p_velho), 2))
+        r["preco_depois"] = visto2
+        r["desfecho"] = "voltou_ao_antigo" if valeu2 else "volta_aceita_mas_nao_valeu"
+        print(f"\n>>> VOLTEI ao preço anterior: vitrine em {brl(visto2)}", flush=True)
+    else:
+        r["desfecho"] = "SEM_DESCONTO_INTERVIR"
+        print("\n" + "!" * 70, flush=True)
+        print(f"!! NÃO CONSEGUI RECOLOCAR O DESCONTO. O anúncio {ITEM} está SEM desconto,", flush=True)
+        print(f"!! vendendo pelo preço de lista. O desconto que estava lá era {brl(p_velho)},", flush=True)
+        print(f"!! de {ini_velho} até {fim_velho}. PRECISA SER REFEITO NA MÃO.", flush=True)
+        print("!" * 70, flush=True)
+    return r
+
+
 def main():
     if not ITEM:
         print("!! defina ITEM_ID", flush=True)
@@ -271,7 +393,14 @@ def main():
     corpo_datas = {"start_date": hoje.strftime("%Y-%m-%dT00:00:00"),
                    "finish_date": fim.strftime("%Y-%m-%dT00:00:00")}
 
-    resultado = {"put": None, "post": None}
+    resultado = {"put": None, "post": None, "troca": None}
+
+    # MODO=TROCA: pula PUT e POST-por-cima (os dois já foram medidos e não existem) e vai
+    # direto no único caminho real: DELETE -> esperar a vaga -> POST.
+    if MODO == "TROCA":
+        resultado["troca"] = hipotese_c(access, ind, p_antes, corpo_datas, irm)
+        _fim(access, p_antes, resultado, irm)
+        return
 
     # ------------------------------------------------------- HIPÓTESE A: PUT (modificar)
     # MEDIDO em 30/set, primeira rodada: PUT sem datas devolveu
