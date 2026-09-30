@@ -274,36 +274,69 @@ def main():
     resultado = {"put": None, "post": None}
 
     # ------------------------------------------------------- HIPÓTESE A: PUT (modificar)
+    # MEDIDO em 30/set, primeira rodada: PUT sem datas devolveu
+    #     400 "Start and finish dates must be in local format"
+    # Repare no que esse erro NÃO diz: não diz que PRICE_DISCOUNT não pode ser modificado,
+    # não pede promotion_id, não fala em desconto já existente. Ele passou pela validação
+    # de tipo e parou na de campos. O PUT ACEITA este tipo — faltava o corpo completo.
+    #
+    # "local format" = o formato que o próprio ML devolve no GET: "2026-09-29T00:00:00",
+    # sem fuso. É o mesmo que o POST usou sem reclamar (o POST caiu por outro motivo).
+    # Reaproveitamos as datas do desconto EM VIGOR: modificar não é recomeçar.
     if MODO in ("AUTO", "PUT"):
-        # O desconto individual vem SEM id (medido: "id": None, "ref_id": None). Mandar
-        # "promotion_id": null faria o ML reclamar do CAMPO, e a gente aprenderia nada sobre
-        # o mecanismo. O DELETE do individual funciona só com promotion_type, sem id — o PUT
-        # segue a mesma forma: sem id, o campo não vai.
-        corpo_put = {"promotion_type": "PRICE_DISCOUNT",
-                     "deal_price": round(PRECO_NOVO, 2)}
-        if ind.get("id"):
-            corpo_put["promotion_id"] = ind.get("id")
+        def _corpo_put(ini, fim_):
+            c = {"promotion_type": "PRICE_DISCOUNT",
+                 "deal_price": round(PRECO_NOVO, 2),
+                 "start_date": ini,
+                 "finish_date": fim_}
+            # o individual vem sem id (medido: "id": None). Mandar null faria o ML reclamar
+            # do CAMPO e a gente não aprenderia nada sobre o mecanismo.
+            if ind.get("id"):
+                c["promotion_id"] = ind.get("id")
+            return c
+
+        # tentativa 1: as datas do desconto que já está lá, como o ML as devolve.
+        # tentativa 2 (só se a 1 falhar POR DATA): início hoje — caso o ML recuse
+        # start_date no passado. Vai na MESMA rodada pra não gastar outra ida sua.
+        tentativas_put = [("datas do desconto em vigor",
+                           ind.get("start_date") or corpo_datas["start_date"],
+                           ind.get("finish_date") or corpo_datas["finish_date"])]
         print("\n################ HIPÓTESE A — PUT (modificar, sem remover) ################",
               flush=True)
-        dump("corpo enviado", corpo_put)
-        sc, resp = apl.req_put(f"/seller-promotions/items/{ITEM}?app_version=v2", access, corpo_put)
-        print(f"    PUT -> HTTP {sc}", flush=True)
-        dump("RESPOSTA DO ML (inteira)", resp)
-        resultado["put"] = {"http": sc, "resposta": resp}
-        if sc in (200, 201):
-            print("\n    aceito. Conferindo se o preço da vitrine mudou de verdade:", flush=True)
-            ok, visto, voltas = esperar_preco(access, round(PRECO_NOVO, 2))
-            resultado["put"]["preco_depois"] = visto
-            resultado["put"]["valeu"] = ok
-            if ok:
-                print(f"\n>>> PUT FUNCIONOU: {brl(p_antes)} -> {brl(visto)} "
-                      f"em {voltas} conferência(s), sem remover nada.", flush=True)
-                _fim(access, p_antes, resultado, irm)
-                return
-            print(f"\n    ⚠ o ML aceitou o PUT mas a vitrine ficou em {brl(visto)}. "
-                  f"Aceitar não é valer.", flush=True)
-        else:
+        for _i, (_rot, _ini, _dfim) in enumerate(tentativas_put):
+            corpo_put = _corpo_put(_ini, _dfim)
+            print(f"\n  [PUT {_i+1}] {_rot}", flush=True)
+            dump("corpo enviado", corpo_put)
+            sc, resp = apl.req_put(f"/seller-promotions/items/{ITEM}?app_version=v2",
+                                   access, corpo_put)
+            print(f"    PUT -> HTTP {sc}", flush=True)
+            dump("RESPOSTA DO ML (inteira)", resp)
+            resultado["put"] = {"tentativa": _rot, "corpo": corpo_put,
+                                "http": sc, "resposta": resp}
+            if sc in (200, 201):
+                print("\n    aceito. Conferindo se o preço da vitrine mudou de verdade:",
+                      flush=True)
+                ok, visto, voltas = esperar_preco(access, round(PRECO_NOVO, 2))
+                resultado["put"]["preco_depois"] = visto
+                resultado["put"]["valeu"] = ok
+                if ok:
+                    print(f"\n>>> PUT FUNCIONOU: {brl(p_antes)} -> {brl(visto)} "
+                          f"em {voltas} conferência(s), SEM REMOVER NADA.", flush=True)
+                    _fim(access, p_antes, resultado, irm)
+                    return
+                print(f"\n    ⚠ o ML aceitou o PUT mas a vitrine ficou em {brl(visto)}. "
+                      f"Aceitar não é valer.", flush=True)
+                break
+            _msg = (resp.get("message") if isinstance(resp, dict) else "") or ""
+            if "date" in _msg.lower() and len(tentativas_put) == 1:
+                # ainda é data: tenta uma vez com início HOJE, mesmo fim.
+                _hoje = datetime.now().strftime("%Y-%m-%dT00:00:00")
+                tentativas_put.append(("início HOJE, mesmo fim", _hoje, _dfim))
+                print("    recusado POR DATA — tentando de novo com início de hoje.",
+                      flush=True)
+                continue
             print("    recusado — é este o erro que faltava ler.", flush=True)
+            break
 
     # ----------------------------------------------- HIPÓTESE B: POST por cima do ativo
     if MODO in ("AUTO", "POST"):
