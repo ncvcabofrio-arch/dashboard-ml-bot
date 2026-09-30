@@ -738,6 +738,58 @@ def _oferta_preco_livre_dict(fx, access=None):
 # por item (/seller-promotions/items/{id}) como candidatas — não precisa varrer as
 # campanhas do vendedor. Pro PAINEL mostramos TODAS as candidatas (inclusive as
 # 'pending'/programadas); a trava de vigência vale só pra DECISÃO do robô (abaixo).
+def _pb_num(a):
+    """Preço da oferta como número, sempre. avaliar() só devolve dict com pb numérico
+    (ele retorna None quando não há preço), então isto nunca deveria ser acionado — é
+    cinto de segurança pra ordenação nunca derrubar o anúncio inteiro por um campo
+    estranho. Sem preço vai pro fim da fila, não pro começo."""
+    try:
+        return float(a["pb"])
+    except (TypeError, ValueError, KeyError):
+        return float("inf")
+
+
+def _quem_governa(item_id, ativas_ev, access):
+    """Qual das promoções ATIVAS está REALMENTE valendo neste anúncio.
+
+    MEDIDO, não deduzido. O objeto da promoção declara um preço; quem diz o que o
+    CLIENTE PAGA é /items/{id}/sale_price — o mesmo endpoint que o aplicador usa
+    para carimbar uma entrada como 'confirmado'.
+
+    Por que passou a importar: o ML permite várias promoções ativas no mesmo
+    anúncio. Medido em 29/set, MLB5183041271 — desconto individual a R$8.429,66 e
+    DEAL '10.10' a R$10.184,00, as duas 'started'. Quem valia era o individual, e o
+    sale_price dizia isso ao centavo.
+
+    Só consulta quando há MAIS DE UMA ativa: com uma só não existe o que decidir, e
+    aí não custa chamada nenhuma. Devolve (oferta_avaliada, motivo_legível)."""
+    if not ativas_ev:
+        return None, None
+    if len(ativas_ev) == 1:
+        return ativas_ev[0], "única ativa"
+    try:
+        st, d = get(f"/items/{item_id}/sale_price?context=channel_marketplace", access)
+        amt = d.get("amount") if isinstance(d, dict) else None
+        if amt is not None:
+            alvo = min(ativas_ev, key=lambda a: abs(_pb_num(a) - float(amt)))
+            if abs(_pb_num(alvo) - float(amt)) <= 0.02:
+                return alvo, f"sale_price R${float(amt):.2f}"
+    except Exception:
+        # Exception ampla DE PROPÓSITO, e só aqui dentro: esta consulta é um EXTRA que
+        # não existia antes. Se ela estourar (timeout, conexão, JSON estranho), o
+        # processar_item tem um 'except Exception' lá fora que devolveria None e a
+        # sugestão do anúncio SUMIRIA — um anúncio perdido por causa de uma chamada
+        # que só serve pra desempatar. Engolir aqui é o comportamento seguro: cai no
+        # fallback abaixo, com o motivo gravado.
+        pass
+    # O ML não confirmou: endpoint fora do ar, ou preço que não bate com nenhuma das
+    # ativas (ex.: desconto do Pix por cima). Fica a de MENOR preço — que é o
+    # comportamento observado — e o motivo vai GRAVADO junto, pra não confundir
+    # medição com palpite depois.
+    return (min(ativas_ev, key=_pb_num),
+            "sale_price não confirmou — usei a de menor preço")
+
+
 def processar_item(item_id, access, sid, detalhes):
     """Processa UM anúncio (só leitura) e devolve o dict da sugestão, ou None.
     Sem gravar no banco — é chamado em paralelo por várias threads."""
@@ -787,12 +839,21 @@ def processar_item(item_id, access, sid, detalhes):
             return None
         frete, frete_origem = frete_de(sku, item_id, access)
         piso, grupo = margem_minima_do(sku)
-        ativa = None
+        # ============ CONSERTO 30/set — TODAS AS ATIVAS, NÃO SÓ A PRIMEIRA ============
+        # Havia um 'break' aqui. O ML permite várias promoções ativas no mesmo anúncio,
+        # e o robô guardava só a primeira avaliável — a tela mostrava menos do que
+        # existe, enquanto o aplicador (que lê ao vivo) via tudo e recusava por uma
+        # campanha invisível pra quem estava decidindo.
+        # Medido em 29/set, MLB5183041271: o ML devolvia 5 promoções e o 'ofertas'
+        # gravado tinha 3 — o DEAL '10.10', ativo, sumia exatamente aqui.
+        ativas_ev = []
         for o in ativas_raw:
             ev = avaliar(o, cat, ltid, access, frete, custo)
             if ev:
-                ativa = ev
-                break
+                ativas_ev.append(ev)
+        # QUEM GOVERNA o preço é medido no sale_price, não escolhido por regra.
+        ativa, _fonte_ativa = _quem_governa(item_id, ativas_ev, access)
+        # ==============================================================================
         cand_todas = [avaliar(o, cat, ltid, access, frete, custo) for o in cand_raw]
         cand_todas = [c for c in cand_todas if c]     # TODAS as candidatas (p/ EXIBIR no painel)
         # NÃO recomenda promoção que ainda não está vigente (programada/futura) nem já encerrada.
@@ -835,8 +896,22 @@ def processar_item(item_id, access, sid, detalhes):
         # 'cand_todas' — inclui as candidatas 'pending'/programadas (ex.: SMART "TOP SELLERS"
         # que ainda não começou), que a trava de vigência tira da decisão mas o Pricebot mostra.
         ofertas_lst = []
-        if ativa:
-            ofertas_lst.append(_oferta_dict(ativa, True, acao == "manter", acao, access))
+        # A QUE GOVERNA VAI NA FRENTE, e as outras ativas logo atrás, da mais barata
+        # pra mais cara. Isto NÃO é enfeite: o painel escolhe o Preço Ativo com
+        # ofs.find(o => o.ativa && !o.programada && o.preco != null), que pega a
+        # PRIMEIRA da lista. Gravando em ordem, ele acerta sozinho — e é por isso que
+        # este conserto não precisa de nenhuma mudança do lado do navegador.
+        _ordem_ativas = (([ativa] if ativa else [])
+                         + sorted([a for a in ativas_ev if a is not ativa],
+                                  key=_pb_num))
+        for _a in _ordem_ativas:
+            _d = _oferta_dict(_a, True, (_a is ativa) and acao == "manter", acao, access)
+            if _a is ativa:
+                # a prova viaja junto com o dado: na linha expandida do painel dá pra
+                # ver as duas ativas E qual delas está valendo, com o motivo.
+                _d["governa"] = True
+                _d["governa_fonte"] = _fonte_ativa
+            ofertas_lst.append(_d)
         for _c in sorted(cand_todas, key=lambda x: (x["margem"] if x.get("margem") is not None else -999), reverse=True):
             ofertas_lst.append(_oferta_dict(_c, False, _c is alvo, acao, access))
         # preço próprio por último: são opções do vendedor, não recomendação do robô.
