@@ -1,0 +1,76 @@
+name: Repricer - TESTE trocar desconto individual sem remover
+
+# Testa se da pra trocar o PRECO de um desconto individual que JA ESTA ATIVO,
+# sem deletar o atual - primeiro por PUT (modificar), depois por POST (oferecer).
+# Imprime o corpo INTEIRO da resposta do ML nos dois casos.
+#
+# SEM confirmar=SIM ele SO LE e para. Nada e gravado no Supabase em nenhum caso.
+# Para desfazer: rode de novo com desfazer=SIM (remove o desconto individual).
+on:
+  workflow_dispatch:
+    inputs:
+      item_id:
+        description: "Anuncio (MLB...) - precisa ter desconto individual ATIVO"
+        type: string
+        required: true
+        default: "MLB5293304734"
+      seller_id:
+        description: "Conta: 177795203=CF, 471489691=Cabo Frio, 3244206480=MG"
+        type: string
+        required: false
+        default: "177795203"
+      preco_novo:
+        description: "Preco novo (so ABAIXAR). Ex: 75.00"
+        type: string
+        required: false
+      confirmar:
+        description: "Escreva SIM para escrever de verdade. Vazio = so leitura."
+        type: string
+        required: false
+        default: ""
+      modo:
+        description: "AUTO (PUT e, se falhar, POST) | PUT | POST"
+        type: choice
+        required: false
+        default: "AUTO"
+        options: ["AUTO", "PUT", "POST"]
+      desfazer:
+        description: "SIM = REMOVE o desconto individual do anuncio e para"
+        type: string
+        required: false
+        default: ""
+      permitir_top:
+        description: "SIM = seguir mesmo que o desconto atual tenha preco para compradores fieis"
+        type: string
+        required: false
+        default: ""
+
+concurrency:
+  group: ml-teste-individual
+  cancel-in-progress: false
+
+jobs:
+  teste:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Instalar dependencias
+        run: pip install requests supabase
+      - name: Teste
+        env:
+          ML_CLIENT_ID:     ${{ secrets.ML_CLIENT_ID }}
+          ML_CLIENT_SECRET: ${{ secrets.ML_CLIENT_SECRET }}
+          ML_REFRESH_TOKEN: ${{ secrets.ML_REFRESH_TOKEN }}
+          SUPABASE_URL:     ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY:     ${{ secrets.SUPABASE_KEY }}
+          ITEM_ID:          ${{ github.event.inputs.item_id }}
+          SELLER_ID:        ${{ github.event.inputs.seller_id }}
+          PRECO_NOVO:       ${{ github.event.inputs.preco_novo }}
+          CONFIRMAR:        ${{ github.event.inputs.confirmar }}
+          MODO:             ${{ github.event.inputs.modo }}
+          DESFAZER:         ${{ github.event.inputs.desfazer }}
+          PERMITIR_TOP:     ${{ github.event.inputs.permitir_top }}
+        run: python repricer_teste_troca_individual.py
