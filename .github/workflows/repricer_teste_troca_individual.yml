@@ -29,11 +29,11 @@ on:
         required: false
         default: ""
       modo:
-        description: "AUTO (PUT e, se falhar, POST) | PUT | POST"
+        description: "TROCA = DELETE + esperar a vaga + POST (o unico caminho real). AUTO/PUT/POST = so diagnostico."
         type: choice
         required: false
-        default: "AUTO"
-        options: ["AUTO", "PUT", "POST"]
+        default: "TROCA"
+        options: ["TROCA", "AUTO", "PUT", "POST"]
       desfazer:
         description: "SIM = REMOVE o desconto individual do anuncio e para"
         type: string
