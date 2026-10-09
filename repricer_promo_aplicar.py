@@ -108,6 +108,7 @@ CODIGO_CATEGORIA = {
     "sem_candidatura_ml": "terminal",
     # ja tem desconto individual em vigor: retentar da o mesmo nao
     "ja_tem_individual": "terminal",
+    "tem_smart_nao_saio": "terminal",
     # o ML só aceita um preço que entrega menos margem que a sua: retentar dá o mesmo
     "margem_menor_que_pedida": "terminal",
     # o ML recusou tirar o individual atual: nada foi tocado, retentar nao muda
@@ -333,6 +334,14 @@ def _clamp_preco(preco, cand):
 # Tipos em que QUEM DEFINE O PREÇO SOMOS NÓS: o corpo do POST leva deal_price.
 # Sem preço aqui não existe "padrão razoável" — existe preço inventado.
 TIPOS_PRECO_NOSSO = {"PRICE_DISCOUNT", "DEAL", "SELLER_CAMPAIGN", "LIGHTNING", "DOD"}
+# Campanhas das quais SAIR É DEFINITIVO: o ML não devolve a participação depois.
+# Medido 06-09/10/2026: 12 saídas de SMART, 12 recusas na volta (CANDIDATE_NOT_FOUND,
+# "Candidate not valid", "o ML não oferece mais candidatura"). ARCOS (SELLER_CAMPAIGN)
+# e 10.10 (DEAL) voltaram no preço exato em praticamente todas as reversões.
+# DECISÃO SUA (09/10/2026): sair de TODAS, inclusive SMART. Por isso o conjunto está
+# vazio. Para voltar a proteger a SMART, basta pôr {"SMART"} aqui de novo — o bloco que
+# usa esta constante continua no lugar, logo abaixo do guard do desconto individual.
+TIPOS_SEM_VOLTA = set()
 
 
 def corpo_post(tipo, cand, preco_alvo):
@@ -1912,17 +1921,63 @@ def processar(fila, access):
                 _nomes_out = ", ".join(
                     f"{(p.get('name') or p.get('promotion_id') or '?')}({(p.get('type') or '?')})"
                     for p in _outras_ativas[:6])
-                gravar(fila["id"], {"status": "erro", "resultado": (
-                    f"NÃO MEXI EM NADA. O anúncio tem desconto individual em vigor "
-                    f"({_txt_tv}) E TAMBÉM {len(_outras_ativas)} promoção(ões) ativa(s): "
-                    f"{_nomes_out}. Trocar o individual assim é o caso que falhou 16 de 16 "
-                    f"em 22/ago — a doc do ML diz que com um DEAL ativo o desconto novo "
-                    f"não passa a valer. Para trocar, é preciso sair dessas promoções antes, "
-                    f"e isso eu não faço sozinho: de DEAL o robô não sabe devolver o preço.")})
-                print(f"  ! ja_tem_individual {iid}: em vigor {_txt_tv} + {len(_outras_ativas)} "
-                      f"promoção(ões) ativa(s) ({_nomes_out}) — não troco com campanha ativa",
-                      flush=True)
-                return "ja_tem_individual"
+                # ---- SMART: a ÚNICA que não tem volta ----
+                # Medido entre 06 e 09/10/2026: 12 saídas de SMART, 12 perdas. O ML
+                # responde CANDIDATE_NOT_FOUND / "Candidate not valid" / "não oferece
+                # mais candidatura" e NÃO devolve a participação, nem na mesma rodada.
+                # ARCOS (SELLER_CAMPAIGN) e 10.10 (DEAL) voltaram no preço exato em
+                # todas as reversões, menos duas de ARCOS. Por isso ARCOS e DEAL passam
+                # a sair quando a escolha é sua, e a SMART continua barrando: reverter
+                # depois NÃO salva a SMART, porque a saída acontece no começo.
+                _smart_ativas = [p for p in _outras_ativas
+                                 if (p.get("type") or "").upper() in TIPOS_SEM_VOLTA]
+                if _smart_ativas:
+                    _nomes_smart = ", ".join(
+                        f"{(p.get('name') or p.get('promotion_id') or '?')}"
+                        f"({(p.get('type') or '?')})" for p in _smart_ativas[:6])
+                    gravar(fila["id"], {"status": "erro", "resultado": (
+                        f"NÃO MEXI EM NADA. O anúncio tem desconto individual em vigor "
+                        f"({_txt_tv}) e também {len(_smart_ativas)} campanha(s) SEM VOLTA "
+                        f"ativa(s): {_nomes_smart}. Sair dessas é perda definitiva — "
+                        f"medido 12 de 12: o ML recusa a reentrada com CANDIDATE_NOT_FOUND. "
+                        f"Se você quiser mesmo trocar aqui, saia dessa campanha pelo painel "
+                        f"do ML e enfileire de novo.")})
+                    print(f"  ! tem_smart_nao_saio {iid}: em vigor {_txt_tv} + "
+                          f"{_nomes_smart} — campanha sem volta, não saio",
+                          flush=True)
+                    return "tem_smart_nao_saio"
+                # ---- ESCOLHA SUA: sai das campanhas e troca o individual ----
+                # Era aqui que o robô recusava com 'ja_tem_individual'. Decisão sua de
+                # 09/10/2026: quando VOCÊ manda, ele sai da ARCOS/DEAL, troca o preço do
+                # individual e, se o ML não der o preço pedido, o rollback do fim da
+                # função devolve as campanhas no preço que praticavam antes — é o mesmo
+                # caminho que já desfaz saída todo dia (bloco 'if acao == trocar and
+                # _sai_de_todas'), e ele usa justamente _saiu_dicts e _ind_antigo.
+                _saiu, _falhou, _rest = sair_das_outras(
+                    iid, str(fila.get("seller_id") or ""), access,
+                    manter_tipo="PRICE_DISCOUNT",   # o individual sai no bloco _so_o_preco
+                    saiu_dicts=_saiu_dicts)
+                _saiu_nomes = list(_saiu)
+                saiu_antes = (f" | ESCOLHA SUA: saí de {len(_saiu)} campanha(s) "
+                              f"({_nomes_out}) para trocar o desconto individual")
+                # RASTRO DA SMART: mesmo saindo por decisão sua, fica escrito que aquela
+                # campanha não volta. Assim o resultado da fila já nasce com o nome dela
+                # e você sabe o que refazer no ML sem precisar caçar no log.
+                _smart_saindo = [p for p in _outras_ativas
+                                 if (p.get("type") or "").upper() == "SMART"]
+                if _smart_saindo:
+                    _ns = ", ".join(f"{(p.get('name') or p.get('promotion_id') or '?')}"
+                                    for p in _smart_saindo[:6])
+                    saiu_antes += (f" | 🚨 SAÍ DE CAMPANHA SEM VOLTA: {_ns} — o ML não "
+                                   f"devolve participação de SMART (12 de 12 medidos). "
+                                   f"Se precisar dela, refaça no painel do ML.")
+                    print(f"  🚨 {iid}: saindo de SMART ({_ns}) — essa não volta, "
+                          f"decisão sua", flush=True)
+                if _falhou:
+                    saiu_antes += " | ⚠️ DELETE recusado em: " + ", ".join(_falhou)
+                print(f"  ~ {iid}: escolha sua — saí de {len(_saiu)} campanha(s) "
+                      f"para trocar o individual em vigor ({_txt_tv})"
+                      + (f" | falhou em {len(_falhou)}" if _falhou else ""), flush=True)
             # Nada mais ativo: é o caminho limpo, o mesmo que o piloto roda todo dia.
             # Segue para o bloco _so_o_preco: remove o individual, ESPERA a candidatura
             # reabrir (melhor que o sleep(0.3) do piloto) e recria com os 14 dias.
