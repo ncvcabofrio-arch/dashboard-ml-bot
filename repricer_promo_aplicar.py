@@ -794,6 +794,27 @@ try:
     MARGEM_TOL_PP = abs(float(os.environ.get("MARGEM_TOL_PP", "0.25").replace(",", ".")))
 except (TypeError, ValueError):
     MARGEM_TOL_PP = 0.25
+# ---- TOLERÂNCIA DEPOIS QUE O ANÚNCIO JÁ SAIU DAS CAMPANHAS ----
+# São dois momentos diferentes e eles não merecem a mesma régua.
+#
+# ANTES de tocar em nada (margem_menor_que_pedida, bloco do pré-voo): recusar é de
+# graça — o anúncio fica exatamente como estava. Lá vale o MARGEM_TOL_PP de 0,25.
+#
+# DEPOIS do POST (ml_mudou_preco): o anúncio JÁ SAIU das campanhas. Reverter custa,
+# e caro: foi nesse ciclo que morreram as 12 SMART medidas entre 06 e 09/10/2026, e
+# agora que o robô também sai da ARCOS por decisão sua, é a ARCOS que corre o risco.
+#
+# Levantamento das reversões da semana de 06-09/10: 4 casos ficaram até 0,5 ponto
+# abaixo do pedido, 3 entre 0,5 e 1,0, e o primeiro caso realmente ruim só aparece em
+# 1,30. Os graves (2,40%, 4,80%, -5,10%, -5,38% contra pedidos de 17 a 21%) estão
+# todos acima de 2 pontos. Com 1,0 ponto, o pior caso aceito perde 0,79 ponto — uns
+# R$18 numa venda de R$2.339 — e sete ciclos de saída deixam de acontecer.
+#
+# Escolha do dono em 09/10/2026: 1 ponto. MARGEM_TOL_ML_PP=0 volta ao estrito.
+try:
+    MARGEM_TOL_ML_PP = abs(float(os.environ.get("MARGEM_TOL_ML_PP", "1.0").replace(",", ".")))
+except (TypeError, ValueError):
+    MARGEM_TOL_ML_PP = 1.0
 # Quanto a margem de uma campanha JÁ ATIVA pode ficar abaixo da pedida antes de o
 # robô recusar um "entrar" por cima dela. 1 ponto, igual ao CAMPANHA_TOL_PP do
 # piloto (escolha do dono em 21/set). Caso: MLB3531534275, arrastado pelo irmão para
@@ -2225,7 +2246,8 @@ def processar(fila, access):
             _ruim = False
             if _mg_ped is not None:
                 if _mg_ml is not None:
-                    _ruim = float(_mg_ml) < float(_mg_ped) - MARGEM_TOL_PP
+                    # AQUI o anúncio já saiu das campanhas: usa a tolerância maior.
+                    _ruim = float(_mg_ml) < float(_mg_ped) - MARGEM_TOL_ML_PP
                 else:
                     # não consegui calcular a margem: preço MENOR que o conferido não
                     # passa — aceitar seria margem por chute
@@ -2237,7 +2259,8 @@ def processar(fila, access):
                     iid, {"type": tipo, "promotion_id": cand.get("id"), "offer_id": _oid_ml}, access)
                 _base_txt = (f"O ML ACEITOU A ENTRADA A OUTRO PREÇO: conferi R${float(ev['pb']):.2f} "
                              f"({float(ev['margem']):.2f}%), mas a resposta do ML veio R${_ml_preco:.2f} "
-                             f"({_txt_mg}); você pediu {float(_mg_ped):.2f}%. ")
+                             f"({_txt_mg}); você pediu {float(_mg_ped):.2f}% "
+                             f"(tolerância de {MARGEM_TOL_ML_PP:.2f} ponto). ")
                 if _scx in (200, 201):
                     _ml_rev = _base_txt + "SAÍ NA HORA (DELETE aceito) — não fica na campanha. "
                     ML_MUDOU_PRECO.append((iid, float(ev["pb"]), _ml_preco, float(_mg_ped), _mg_ml, "saí"))
