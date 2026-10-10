@@ -4,6 +4,11 @@
 name: ML — perguntas (sync)
 
 on:
+  # o ml_webhook acorda este robo quando nao consegue buscar a pergunta sozinho
+  # (token vencido, ML fora do ar). Freio de disparo pela pode_disparar().
+  repository_dispatch:
+    types: [perguntas]
+
   schedule:
     - cron: '7,22,37,52 * * * *'    # de 15 em 15 min, fora dos minutos cheios
   workflow_dispatch:
