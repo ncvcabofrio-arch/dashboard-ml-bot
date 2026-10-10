@@ -50,6 +50,11 @@ AGORA = datetime.now(timezone.utc)
 DIAS_PEDIDOS = int(_dias) if _dias else (1 if AGORA.minute < 15 else 0)
 AVISO_JANELA = timedelta(hours=3)        # mensagem mais velha que isso nao apita
 PRAZO_MSG = timedelta(hours=24)          # prazo de referencia das mensagens
+INICIO = time.time()
+# a carga grande (varrer pedidos de muitos dias) para antes de estourar o tempo do
+# GitHub; o que faltou entra na proxima rodada. Fila, nao lidas e reclamacoes
+# sempre sao lidas (sao poucas e sao as que importam).
+TEMPO_MAX = 18 * 60
 MAX_REFRESH = 60                         # conversas do banco atualizadas por rodada
 
 ACOES_PT = {
@@ -426,6 +431,7 @@ def main():
 
     conversas, mensagens, avisar = [], [], []
     fila_ok = []
+    tot = {"conversas": 0, "abertas": 0, "mensagens": 0}
 
     for c in contas:
         sid, apelido = str(c["seller_id"]), c.get("apelido") or c["seller_id"]
@@ -447,18 +453,32 @@ def main():
         n_fila = len(packs)
         packs |= packs_nao_lidos(token)
         n_nl = len(packs) - n_fila
-        packs |= packs_dos_pedidos(token, sid, DIAS_PEDIDOS)
         abertas_banco = sb_get(
             "atend_conversas?select=pack_id&tipo=eq.mensagem&status=in.(aberta,respondida)"
             f"&seller_id=eq.{sid}&order=atualizado_em.asc&limit={MAX_REFRESH}")
         packs |= {str(x["pack_id"]) for x in abertas_banco if x.get("pack_id")}
-        print(f"   mensagens: {len(packs)} conversa(s) para ler (fila {n_fila}, nao lidas {n_nl})")
+        prioridade = set(packs)
+        dos_pedidos = packs_dos_pedidos(token, sid, DIAS_PEDIDOS) - prioridade
+        packs |= dos_pedidos
+        print(f"   mensagens: {len(packs)} conversa(s) para ler (fila {n_fila}, nao lidas {n_nl}, "
+              f"pedidos {len(dos_pedidos)})")
+        # tempo desta conta para varrer pedidos (divide o que sobra entre as contas que faltam)
+        faltam = max(1, len(contas) - contas.index(c))
+        limite_conta = time.time() + max(60, (TEMPO_MAX - (time.time() - INICIO)) / faltam)
 
         ids_conv = [f"msg:{p}" for p in packs]
         antes = existentes(ids_conv)
         ja_msgs = msgs_existentes(ids_conv)
         novas_conv_msg = []
-        for p in sorted(packs):
+        ordem = sorted(prioridade) + sorted(dos_pedidos, reverse=True)  # mais novos primeiro
+        lidos = 0
+        for p in ordem:
+            if p in dos_pedidos and time.time() > limite_conta:
+                print(f"   ⏸ tempo desta conta acabou: li {lidos} de {len(ordem)}; o resto entra nas proximas rodadas")
+                break
+            lidos += 1
+            if lidos % 200 == 0:
+                print(f"   ... {lidos}/{len(ordem)} ({(time.time() - INICIO) / 60:.0f} min)")
             try:
                 msgs, conv = msgs_do_pack(token, sid, p)
             except MLErro as e:
@@ -561,26 +581,38 @@ def main():
             if l.get("item_id") in th:
                 l["item_thumb"] = th[l["item_id"]]
         fila_ok += [f["id"] for f in minha_fila]
+        # grava conta por conta: se o GitHub cortar no meio, o que ja' foi lido fica salvo
+        tot["conversas"] += len(conversas)
+        tot["abertas"] += sum(1 for x in conversas if x["status"] == "aberta")
+        tot["mensagens"] += len(mensagens)
+        if not DRY_RUN:
+            gravar(conversas, mensagens)
+            print(f"   gravado: {len(conversas)} conversa(s), {len(mensagens)} mensagem(ns)")
+        conversas, mensagens = [], []
 
     # avisos de fila sem conta conhecida tambem saem da fila
     fila_ok += [f["id"] for f in fila if str(f.get("seller_id") or "") not in SELLERS]
 
     print("\n" + "=" * 60)
-    print(f"  conversas gravadas .... {len(conversas)}")
-    print(f"     abertas ............ {sum(1 for c in conversas if c['status'] == 'aberta')}")
-    print(f"  mensagens ............. {len(mensagens)}")
+    print(f"  conversas lidas ....... {tot['conversas']}")
+    print(f"     abertas ............ {tot['abertas']}")
+    print(f"  mensagens ............. {tot['mensagens']}")
+    print(f"  tempo ................. {(time.time() - INICIO) / 60:.1f} min")
     print(f"  vao gerar aviso ....... {len(avisar)}")
     if DRY_RUN:
         print("\n[DRY RUN] nada gravado.")
         return
-    # conversas primeiro (as mensagens apontam para elas)
-    upsert("atend_conversas", [{k: v for k, v in c.items() if not k.startswith("_")} for c in conversas])
-    upsert("atend_mensagens", mensagens)
     for i in range(0, len(fila_ok), 150):
         ids = ",".join(str(x) for x in fila_ok[i:i + 150])
         sb_req("PATCH", f"atend_fila?id=in.({ids})", data=json.dumps({"processado": True}))
     avisar_celular(avisar)
     print(f"\n✅ concluido em {datetime.now(timezone.utc):%H:%M:%S} UTC")
+
+
+def gravar(conversas, mensagens):
+    # conversas primeiro (as mensagens apontam para elas)
+    upsert("atend_conversas", [{k: v for k, v in c.items() if not k.startswith("_")} for c in conversas])
+    upsert("atend_mensagens", mensagens)
 
 
 def avisar_celular(itens):
