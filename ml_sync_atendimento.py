@@ -299,8 +299,42 @@ def responder_fora(token, sid, pack, msgs_st, est, ant, linha):
             "criada_em": agora.isoformat(), "enviada_por": AUTO_POR, "moderacao": None}
 
 
-def e_auto(m, auto_ids, texto_auto):
-    return m["de"] == "loja" and (m["id"] in auto_ids or (texto_auto and normal(m.get("texto")) == normal(texto_auto)))
+def manter_manual(ant, msgs_st, linha, est):
+    """Status trocado a mao no app FICA ate' chegar mensagem nova (de qualquer lado).
+    Devolve True se manteve (e ja' ajusta est)."""
+    if not ant or not ant.get("status_manual") or est["status"] in ("fechada", "bloqueada"):
+        if ant and ant.get("status_manual") and est["status"] in ("fechada", "bloqueada"):
+            linha["status_manual"] = False
+        return False
+    desde = iso(ant.get("status_manual_em"))
+    if desde and any(m["criada_em"] and m["criada_em"] > desde for m in msgs_st):
+        linha["status_manual"] = False          # chegou coisa nova: volta ao automatico
+        return False
+    est["status"] = ant["status"]
+    return True
+
+
+def e_auto(m, ja_c, texto_auto):
+    """A mensagem e' a resposta automatica do robo? Pelo id gravado, ou (se o ML
+    devolveu com outro id) pelo texto + horario perto de uma automatica gravada.
+    Resposta escrita por gente (pelo app, ML ou Responso) NUNCA conta como automatica,
+    mesmo com o mesmo texto."""
+    if m["de"] != "loja":
+        return False
+    gravada = next((x for x in ja_c if x["id"] == m["id"]), None)
+    if gravada is not None:
+        return gravada.get("enviada_por") == AUTO_POR
+    if not texto_auto or normal(m.get("texto")) != normal(texto_auto) or not m.get("criada_em"):
+        return False
+    # a gravada com o mesmo texto mais perto no horario decide (sua ou do robo)
+    perto = None
+    for x in ja_c:
+        quando = iso(x.get("criada_em"))
+        if x.get("de") == "loja" and quando and normal(x.get("texto")) == normal(m.get("texto")):
+            dif = abs((quando - m["criada_em"]).total_seconds())
+            if dif < 300 and (perto is None or dif < perto[0]):
+                perto = (dif, x)
+    return bool(perto) and perto[1].get("enviada_por") == AUTO_POR
 
 
 def iso(s):
@@ -550,7 +584,7 @@ def existentes(conv_ids):
     ids = list(conv_ids)
     for i in range(0, len(ids), 80):
         bloco = ",".join(f'"{x}"' for x in ids[i:i + 80])
-        for l in sb_get(f"atend_conversas?select=id,status,fechada_em,item_titulo,motivo_nome,comprador_id,fora_horario_em,fora_horario_pendente&id=in.({bloco})"):
+        for l in sb_get(f"atend_conversas?select=id,status,fechada_em,item_titulo,motivo_nome,comprador_id,fora_horario_em,fora_horario_pendente,status_manual,status_manual_em,prazo_em,prazo_tipo&id=in.({bloco})"):
             out[l["id"]] = l
     return out
 
@@ -565,7 +599,7 @@ def msgs_existentes(conv_ids):
     ids = list(conv_ids)
     for i in range(0, len(ids), 40):
         bloco = ",".join(f'"{x}"' for x in ids[i:i + 40])
-        for l in sb_get(f"atend_mensagens?select=id,conversa_id,de,texto,anexos,enviada_por&conversa_id=in.({bloco})"):
+        for l in sb_get(f"atend_mensagens?select=id,conversa_id,de,texto,anexos,enviada_por,criada_em&conversa_id=in.({bloco})"):
             out.setdefault(l["conversa_id"], []).append(l)
     return out
 
@@ -613,7 +647,7 @@ def main():
         packs |= packs_nao_lidos(token)
         n_nl = len(packs) - n_fila
         abertas_banco = sb_get(
-            "atend_conversas?select=pack_id&tipo=eq.mensagem&status=in.(aberta,respondida)"
+            "atend_conversas?select=pack_id&tipo=eq.mensagem&or=(status.in.(aberta,respondida),status.like.etq:*)"
             f"&seller_id=eq.{sid}&order=atualizado_em.asc&limit={MAX_REFRESH}")
         packs |= {str(x["pack_id"]) for x in abertas_banco if x.get("pack_id")}
         prioridade = set(packs)
@@ -652,13 +686,16 @@ def main():
                      "status_ml": (conv.get("status") or "") + (f":{conv.get('substatus')}" if conv.get("substatus") else "")}
             # a resposta automatica nao conta como resposta
             ja_c = ja_msgs.get(cid, [])
-            auto_ids = {x["id"] for x in ja_c if x.get("enviada_por") == AUTO_POR}
-            msgs_st = [m for m in msgs if not e_auto(m, auto_ids, FORA["texto"])]
+            msgs_st = [m for m in msgs if not e_auto(m, ja_c, FORA["texto"])]
             est = calcular_status(msgs_st, ant, bloqueada=bloq)
             prim = est.pop("_primeira_sem_resposta")
+            manual = manter_manual(ant, msgs_st, linha, est)
             linha.update(est)
-            linha["prazo_em"] = (prim + PRAZO_MSG).isoformat() if est["status"] == "aberta" and prim else None
-            linha["prazo_tipo"] = "referencia" if linha["prazo_em"] else None
+            if manual:   # trocado a mao: prazo como ficou
+                linha["prazo_em"], linha["prazo_tipo"] = ant.get("prazo_em"), ant.get("prazo_tipo")
+            else:
+                linha["prazo_em"] = (prim + PRAZO_MSG).isoformat() if est["status"] == "aberta" and prim else None
+                linha["prazo_tipo"] = "referencia" if linha["prazo_em"] else None
             # alguem respondeu de verdade (aqui, no ML ou no Responso): sai de "Fora do horário"
             if ant and ant.get("fora_horario_pendente"):
                 desde = iso(ant.get("fora_horario_em"))
@@ -724,6 +761,7 @@ def main():
                      "prazo_tipo": "ml" if obrig and not encerrada else None}
             est = calcular_status(msgs, ant, encerrada=encerrada, acao_mensagem=responder)
             est.pop("_primeira_sem_resposta")
+            manter_manual(ant, msgs, linha, est)    # o prazo da reclamacao continua o do ML
             linha.update(est)
             if not ant or not ant.get("motivo_nome"):
                 linha["motivo_nome"] = nome_motivo(token, cl.get("reason_id"))
