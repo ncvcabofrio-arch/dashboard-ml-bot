@@ -50,8 +50,8 @@ jobs:
           ML_CLIENT_SECRET: ${{ secrets.ML_CLIENT_SECRET }}
           SUPABASE_URL:     ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY:     ${{ secrets.SUPABASE_KEY }}
-          # opcional: so' e' usado se a chave acima nao for aceita pela perguntas_push
-          APP_CHAT_SECRET:  ${{ secrets.APP_CHAT_SECRET }}
+          # segredo proprio da perguntas_push (o mesmo valor cadastrado no Supabase)
+          PERGUNTAS_PUSH_SECRET: ${{ secrets.PERGUNTAS_PUSH_SECRET }}
           ML_SELLERS:       '177795203,471489691,3244206480'
           BL_DIAS:          ${{ inputs.dias || '30' }}
           # no agendamento (sem inputs) grava de verdade; no botao, o padrao
