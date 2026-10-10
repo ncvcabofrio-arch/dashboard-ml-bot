@@ -17,6 +17,10 @@ REGRAS QUE ELE NAO QUEBRA
      nao refletiu, mantem respondida.
   3. Pergunta antiga encontrada pela primeira vez entra como ja notificada
      — a primeira varredura nao dispara duzentos avisos no celular.
+  5. Anuncio pausado (sem estoque, inativo): o ML NAO deixa responder.
+     A pergunta sai de "Abertas" e vai para "pausada" — nao apita e nao fica
+     cobrando resposta. Quando o anuncio volta a ficar ativo, ela volta
+     sozinha para "Abertas" na proxima varredura.
   4. Renova token pelo ml_auth.obter_access, o mesmo dos outros robos, e
      roda no grupo de concorrencia 'ml-puxador': refresh token do ML e' de
      uso unico, e dois robos renovando juntos derrubam a conta.
@@ -227,6 +231,27 @@ def dados_dos_itens(token, item_ids):
     return out
 
 
+def status_dos_itens(token, item_ids):
+    """{item_id: 'active' | 'paused' | 'closed' | ...}, de 20 em 20.
+    Leitura leve (so' id e status) e feita a CADA varredura, porque um
+    anuncio pausa e volta varias vezes por semana conforme o estoque."""
+    out = {}
+    ids = list(item_ids)
+    for i in range(0, len(ids), 20):
+        bloco = ids[i:i + 20]
+        try:
+            resp = ml_get("/items", token, {"ids": ",".join(bloco), "attributes": "id,status"})
+        except Exception as e:
+            print(f"   aviso: nao li o status de {len(bloco)} anuncio(s) ({e})")
+            continue
+        for r in resp or []:
+            b = r.get("body") or {}
+            if b.get("id") and b.get("status"):
+                out[b["id"]] = str(b["status"])
+        time.sleep(0.2)
+    return out
+
+
 # -------------------------------------------------------------- traducao
 
 def status_local(q):
@@ -300,25 +325,39 @@ def main():
             itens.update(lidos)
             print(f"   {len(lidos)} anuncio(s) novo(s) lido(s) para titulo e foto")
 
+        # anuncios das perguntas em aberto: estao ativos?
+        situacao = status_dos_itens(token, {str(q.get("item_id")) for q in abertas})
+        pausados = {i for i, st in situacao.items() if st != "active"}
+        if pausados:
+            print(f"   {len(pausados)} anuncio(s) com pergunta aberta NAO estao ativos (pausados/inativos)")
+
         for q in perguntas:
-            todas.append((q, itens.get(str(q.get("item_id")))))
+            todas.append((q, itens.get(str(q.get("item_id"))), str(q.get("item_id")) in pausados))
 
     if not todas:
         print("\nNenhuma pergunta encontrada.")
         return
 
     # ---- separa o que e' novo do que ja existe
-    existente = estado_atual(int(q["id"]) for q, _ in todas)
-    novas, atualizar, protegidas = [], [], 0
+    existente = estado_atual(int(q["id"]) for q, _, _ in todas)
+    novas, atualizar, protegidas, pausadas = [], [], 0, 0
 
-    for q, item in todas:
+    for q, item, pausado in todas:
         l = linha(q, item)
         st_banco = existente.get(l["id"])
 
+        # regra 5: em aberto no ML, mas o anuncio esta' pausado -> 'pausada'.
+        # (Anuncio ativo de novo: fica 'pendente', que e' o que o ML diz.)
+        if l["status"] == "pendente" and pausado:
+            l["status"] = "pausada"
+
         # regra 2: o app ja respondeu ou ignorou, o ML ainda nao refletiu
-        if st_banco in ("respondida", "ignorada") and l["status"] == "pendente":
+        if st_banco in ("respondida", "ignorada") and l["status"] in ("pendente", "pausada"):
             l["status"] = st_banco
             protegidas += 1
+
+        if l["status"] == "pausada":
+            pausadas += 1
 
         # sem dado do anuncio (leitura falhou): nao manda vazio por cima do bom
         if item is None:
@@ -353,6 +392,8 @@ def main():
     print(f"  vao gerar aviso ............ {len(vao_apitar)}")
     if protegidas:
         print(f"  protegidas (app ja tinha respondido) .. {protegidas}")
+    if pausadas:
+        print(f"  em anuncio pausado (nao da' para responder) .. {pausadas}")
     for l in vao_apitar[:10]:
         print(f"     • {l['seller_id']} | {l['pergunta'][:70]}")
 
