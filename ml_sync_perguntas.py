@@ -161,16 +161,30 @@ def ml_get(caminho, token, params=None, tentativas=4):
     raise RuntimeError(f"ML nao respondeu em {caminho}")
 
 
-def buscar_perguntas(token, seller_id, status, ate=None):
+# O ML nao deixa o offset passar de 1000 em /questions/search: da' para ler
+# no maximo ~1050 perguntas por consulta. Por isso, alem da busca por conta,
+# buscamos as respondidas de cada ANUNCIO que tem pergunta aberta (cada
+# anuncio tem o seu proprio limite) — e' o historico que mais importa.
+MAX_OFFSET = 1000
+
+
+def buscar_perguntas(token, seller_id, status, ate=None, item=None):
     """Pagina /questions/search. 'ate' corta por data (para as respondidas,
-    que sao muitas e so' interessam as recentes)."""
+    que sao muitas e so' interessam as recentes). 'item' busca so' de um
+    anuncio. Se o ML falhar no meio, devolve o que ja' leu em vez de parar
+    o robo inteiro."""
     achadas, offset, passo = [], 0, 50
     while True:
-        d = ml_get("/questions/search", token, {
-            "seller_id": seller_id, "status": status, "api_version": 4,
-            "sort_fields": "date_created", "sort_types": "DESC",
-            "limit": passo, "offset": offset,
-        })
+        filtro = {"item": item} if item else {"seller_id": seller_id}
+        try:
+            d = ml_get("/questions/search", token, {
+                **filtro, "status": status, "api_version": 4,
+                "sort_fields": "date_created", "sort_types": "DESC",
+                "limit": passo, "offset": offset,
+            })
+        except Exception as e:
+            print(f"   aviso: parei de ler {status}{' de ' + item if item else ''} em {len(achadas)} ({e})")
+            break
         lote = d.get("questions") or []
         if not lote:
             break
@@ -182,7 +196,11 @@ def buscar_perguntas(token, seller_id, status, ate=None):
             achadas.append(q)
         total = int(d.get("total") or 0)
         offset += passo
-        if parar or offset >= total or offset >= 2000:
+        if parar or offset >= total:
+            break
+        if offset > MAX_OFFSET:
+            if not item:
+                print(f"   (o ML so' entrega as {len(achadas)} mais recentes de {total} — limite da API)")
             break
         time.sleep(0.25)
     return achadas
@@ -314,6 +332,19 @@ def main():
         respondidas = buscar_perguntas(token, sid, "ANSWERED", ate=corte_respondidas)
         print(f"\n{apelido} ({sid}): {len(abertas)} em aberto, "
               f"{len(respondidas)} respondidas nos ultimos {DIAS} dias")
+
+        # historico completo dos anuncios com pergunta aberta (contexto da IA)
+        ja = {int(q["id"]) for q in respondidas}
+        extra = 0
+        for item_id in sorted({str(q.get("item_id")) for q in abertas}):
+            for q in buscar_perguntas(token, sid, "ANSWERED", item=item_id):
+                if int(q["id"]) not in ja:
+                    ja.add(int(q["id"]))
+                    respondidas.append(q)
+                    extra += 1
+            time.sleep(0.2)
+        if extra:
+            print(f"   +{extra} respondida(s) antigas dos anuncios com pergunta aberta")
 
         perguntas = abertas + respondidas
         todos_itens = {str(q.get("item_id")) for q in perguntas}
