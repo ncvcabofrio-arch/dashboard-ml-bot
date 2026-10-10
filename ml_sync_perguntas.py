@@ -437,11 +437,43 @@ def main():
     for g in por_formato(atualizar):
         upsert(g, "atualizadas")
 
+    # Das 19h as 8h (configuravel no app): a IA responde sozinha o que tiver
+    # certeza. Quem decide horario e se esta' ligado e' a funcao.
+    responder_automatico()
+
     # Chama SEMPRE, nao so' quando achou pergunta nova: se o push do webhook
     # falhou e devolveu alguma pergunta para a fila, e' aqui que ela apita.
     # A funcao marca e avisa numa operacao so', entao chamar a mais nao duplica.
     avisar()
     print(f"\n✅ concluido em {datetime.now(timezone.utc):%H:%M:%S} UTC")
+
+
+def responder_automatico():
+    seg = (os.environ.get("PERGUNTAS_PUSH_SECRET") or "").strip()
+    if not seg:
+        print("   automatico: sem PERGUNTAS_PUSH_SECRET, pulei")
+        return
+    try:
+        r = requests.post(f"{SUPABASE_URL}/functions/v1/ml_perguntas",
+                          headers={"Authorization": f"Bearer {SUPABASE_KEY}", "x-app-secret": seg,
+                                   "Content-Type": "application/json"},
+                          data=json.dumps({"op": "auto"}), timeout=170)
+        try:
+            d = r.json()
+        except Exception:
+            d = {"erro": r.text[:200]}
+        if r.status_code != 200:
+            print(f"   automatico: HTTP {r.status_code} {d}")
+        elif not d.get("ativo"):
+            print("   automatico: desligado no app")
+        elif not d.get("dentro"):
+            print("   automatico: fora do horario")
+        else:
+            print(f"   automatico: IA publicou {d.get('publicadas', 0)}; deixou para voce {len(d.get('deixadas') or [])}")
+            for x in (d.get("deixadas") or [])[:10]:
+                print(f"      • {x.get('id')}: {x.get('motivo')}")
+    except Exception as e:
+        print(f"   automatico: nao consegui chamar ml_perguntas ({e})")
 
 
 def avisar():
