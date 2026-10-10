@@ -374,9 +374,9 @@ def main():
 
 def avisar():
     cab = {"Authorization": f"Bearer {SUPABASE_KEY}", "Content-Type": "application/json"}
-    # se a chave do GitHub for diferente da que a funcao conhece, este segundo
-    # caminho resolve — o mesmo guard que o push_check ja usa
-    seg = (os.environ.get("APP_CHAT_SECRET") or "").strip()
+    # a chave de servico do GitHub (JWT antigo) nunca bate com a das funcoes
+    # (formato novo), entao o caminho que vale e' este segredo proprio
+    seg = (os.environ.get("PERGUNTAS_PUSH_SECRET") or "").strip()
     if seg:
         cab["x-app-secret"] = seg
     try:
@@ -393,7 +393,7 @@ def avisar():
             if r.status_code == 401:
                 print("      -> 401 vem do Supabase, nao da funcao: desligue o 'Verify JWT' dela")
             elif not seg:
-                print("      -> cadastre o secret APP_CHAT_SECRET no GitHub (o mesmo do Supabase)")
+                print("      -> cadastre o secret PERGUNTAS_PUSH_SECRET no GitHub (o mesmo do Supabase)")
         else:
             print(f"   aviso: {r.text[:160]}")
     except Exception as e:
