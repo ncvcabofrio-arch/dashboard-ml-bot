@@ -155,6 +155,119 @@ def ml_get(caminho, token, params=None, headers=None, tentativas=4):
     raise MLErro(0, f"sem resposta em {caminho}")
 
 
+def ml_post(caminho, token, corpo, params=None):
+    r = requests.post(f"{API}{caminho}", params=params, json=corpo, timeout=40,
+                      headers={"Authorization": f"Bearer {token}"})
+    if r.status_code >= 400:
+        raise MLErro(r.status_code, r.text)
+    try:
+        return r.json()
+    except ValueError:
+        return {}
+
+
+# ------------------------------------------------- resposta fora do horario
+# Fora do expediente o robo responde UMA vez por periodo (noite, domingo...)
+# cada conversa em que o cliente escreveu. A conversa continua ABERTA: a
+# resposta automatica nao conta como resposta, e fica marcada em
+# "Fora do horário" ate' alguem responder de verdade.
+AUTO_POR = "Resposta automática"
+FUSO = timezone(timedelta(hours=-3))      # Brasilia, sem horario de verao
+
+
+def _min(s, padrao):
+    try:
+        h, m = str(s or padrao).split(":")[:2]
+        return int(h) * 60 + int(m)
+    except ValueError:
+        return _min(padrao, padrao)
+
+
+def ler_config_fora():
+    try:
+        d = sb_get("perguntas_config?id=eq.1&select=atend_auto_ativo,atend_auto_inicio,atend_auto_fim,"
+                   "atend_auto_dias,atend_auto_texto,atend_auto_contas")
+    except Exception as e:  # coluna ainda nao criada etc.: segue sem resposta automatica
+        print(f"aviso: nao li a config de fora do horario ({e})")
+        return {"ativo": False, "texto": ""}
+    c = d[0] if d else {}
+    return {
+        "ativo": c.get("atend_auto_ativo") is True and bool((c.get("atend_auto_texto") or "").strip()),
+        "inicio": _min(c.get("atend_auto_inicio"), "19:00"),
+        "fim": _min(c.get("atend_auto_fim"), "08:00"),
+        "dias": {int(x) for x in (c.get("atend_auto_dias") or [])},
+        "texto": (c.get("atend_auto_texto") or "").strip()[:350],
+        "contas": {str(x) for x in (c.get("atend_auto_contas") or SELLERS)},
+    }
+
+
+def fora_do_horario(cfg, quando):
+    l = quando.astimezone(FUSO)
+    if (l.weekday() + 1) % 7 in cfg["dias"]:      # 0 = domingo
+        return True
+    t, i, f = l.hour * 60 + l.minute, cfg["inicio"], cfg["fim"]
+    if i == f:
+        return False
+    return (t >= i or t < f) if i > f else (i <= t < f)
+
+
+def inicio_do_periodo(cfg, agora):
+    """Quando comecou o 'fora do horario' atual (de minuto em minuto, ate' 5 dias)."""
+    t = agora.replace(second=0, microsecond=0)
+    for _ in range(5 * 24 * 60):
+        antes = t - timedelta(minutes=1)
+        if not fora_do_horario(cfg, antes):
+            return t
+        t = antes
+    return t
+
+
+FORA = {"ativo": False, "texto": ""}
+PERIODO = None
+APP_ID = (os.environ.get("ML_CLIENT_ID") or "").strip()
+
+
+def responder_fora(token, sid, pack, msgs_st, est, ant, linha):
+    """Manda a resposta automatica se for a hora. Devolve a mensagem para gravar."""
+    if not FORA["ativo"] or PERIODO is None or sid not in FORA["contas"] or est["status"] != "aberta":
+        return None
+    ult = msgs_st[-1] if msgs_st else None
+    if not ult or ult["de"] != "cliente" or not ult["criada_em"]:
+        return None
+    # so' mensagem que chegou NESTE periodo fora do horario (e recente)
+    if ult["criada_em"] < PERIODO or ult["criada_em"] < AGORA - AVISO_JANELA:
+        return None
+    ja = iso((ant or {}).get("fora_horario_em"))
+    if ja and ja >= PERIODO:
+        return None                        # ja' respondeu nesta noite
+    comprador = ult.get("uid") or linha.get("comprador_id") or (ant or {}).get("comprador_id")
+    if not comprador:
+        return None
+    if DRY_RUN:
+        print(f"   [DRY RUN] mandaria a resposta automatica no pack {pack}")
+        return None
+    params = {"tag": "post_sale"}
+    if APP_ID:
+        params["application_id"] = APP_ID
+    try:
+        r = ml_post(f"/messages/packs/{pack}/sellers/{sid}", token,
+                    {"from": {"user_id": str(sid)}, "to": {"user_id": str(comprador)}, "text": FORA["texto"]}, params)
+    except MLErro as e:
+        print(f"   aviso: resposta automatica no pack {pack} falhou ({e})")
+        return None
+    agora = datetime.now(timezone.utc)
+    linha["fora_horario_em"] = agora.isoformat()
+    linha["fora_horario_pendente"] = True
+    mid = str(r.get("id") or r.get("message_id") or f"auto:{pack}:{int(agora.timestamp())}")
+    print(f"   🌙 resposta automatica enviada no pack {pack}")
+    return {"id": mid, "conversa_id": f"msg:{pack}", "de": "loja", "texto": FORA["texto"], "anexos": [],
+            "criada_em": agora.isoformat(), "enviada_por": AUTO_POR, "moderacao": None}
+
+
+def e_auto(m, auto_ids, texto_auto):
+    return m["de"] == "loja" and (m["id"] in auto_ids or (texto_auto and normal(m.get("texto")) == normal(texto_auto)))
+
+
 def iso(s):
     if not s:
         return None
@@ -272,7 +385,8 @@ def msgs_do_pack(token, sid, pack):
         anexos = [{"nome": a.get("original_filename") or a.get("filename"), "arquivo": a.get("filename"),
                    "tipo": a.get("type"), "tamanho": a.get("size")} for a in (m.get("message_attachments") or [])]
         mod = (m.get("message_moderation") or {}).get("status")
-        out.append({"id": str(m.get("id")), "de": de, "texto": m.get("text") if isinstance(m.get("text"), str)
+        out.append({"id": str(m.get("id")), "de": de, "uid": str((m.get("from") or {}).get("user_id") or ""),
+                    "texto": m.get("text") if isinstance(m.get("text"), str)
                     else (m.get("text") or {}).get("plain"), "anexos": anexos, "criada_em": data,
                     "moderacao": None if mod in (None, "clean", "non_moderated") else mod})
     out.sort(key=lambda x: x["criada_em"] or datetime(1970, 1, 1, tzinfo=timezone.utc))
@@ -401,9 +515,14 @@ def existentes(conv_ids):
     ids = list(conv_ids)
     for i in range(0, len(ids), 80):
         bloco = ",".join(f'"{x}"' for x in ids[i:i + 80])
-        for l in sb_get(f"atend_conversas?select=id,status,fechada_em,item_titulo,motivo_nome&id=in.({bloco})"):
+        for l in sb_get(f"atend_conversas?select=id,status,fechada_em,item_titulo,motivo_nome,comprador_id,fora_horario_em,fora_horario_pendente&id=in.({bloco})"):
             out[l["id"]] = l
     return out
+
+
+def anexo_salvo(ja, mid):
+    """Se o ML devolver a mensagem sem a lista de anexos, fica a que ja' temos."""
+    return next((x.get("anexos") for x in ja if x["id"] == mid and x.get("anexos")), [])
 
 
 def msgs_existentes(conv_ids):
@@ -411,7 +530,7 @@ def msgs_existentes(conv_ids):
     ids = list(conv_ids)
     for i in range(0, len(ids), 40):
         bloco = ",".join(f'"{x}"' for x in ids[i:i + 40])
-        for l in sb_get(f"atend_mensagens?select=id,conversa_id,de,texto&conversa_id=in.({bloco})"):
+        for l in sb_get(f"atend_mensagens?select=id,conversa_id,de,texto,anexos,enviada_por&conversa_id=in.({bloco})"):
             out.setdefault(l["conversa_id"], []).append(l)
     return out
 
@@ -425,13 +544,18 @@ def main():
     print(f"Contas: {', '.join(SELLERS)} | pedidos dos ultimos {DIAS_PEDIDOS} dia(s)"
           + ("  [DRY RUN]" if DRY_RUN else ""))
 
+    global FORA, PERIODO
+    FORA = ler_config_fora()
+    if FORA["ativo"] and fora_do_horario(FORA, AGORA):
+        PERIODO = inicio_do_periodo(FORA, AGORA)
+        print(f"Fora do horario desde {PERIODO.astimezone(FUSO):%d/%m %H:%M}: resposta automatica LIGADA")
     contas = sb.table("contas").select("seller_id,refresh_token,apelido").in_("seller_id", SELLERS).execute().data or []
     fila = sb_get("atend_fila?select=id,topic,resource,seller_id&processado=eq.false&order=recebido_em&limit=500")
     print(f"Fila do webhook: {len(fila)} aviso(s)")
 
-    conversas, mensagens, avisar = [], [], []
+    conversas, mensagens, avisar, auto_msgs = [], [], [], []
     fila_ok = []
-    tot = {"conversas": 0, "abertas": 0, "mensagens": 0}
+    tot = {"conversas": 0, "abertas": 0, "mensagens": 0, "auto": 0}
 
     for c in contas:
         sid, apelido = str(c["seller_id"]), c.get("apelido") or c["seller_id"]
@@ -491,11 +615,24 @@ def main():
             bloq = str(conv.get("status") or "") == "blocked"
             linha = {"id": cid, "tipo": "mensagem", "seller_id": sid, "pack_id": p,
                      "status_ml": (conv.get("status") or "") + (f":{conv.get('substatus')}" if conv.get("substatus") else "")}
-            est = calcular_status(msgs, ant, bloqueada=bloq)
+            # a resposta automatica nao conta como resposta
+            ja_c = ja_msgs.get(cid, [])
+            auto_ids = {x["id"] for x in ja_c if x.get("enviada_por") == AUTO_POR}
+            msgs_st = [m for m in msgs if not e_auto(m, auto_ids, FORA["texto"])]
+            est = calcular_status(msgs_st, ant, bloqueada=bloq)
             prim = est.pop("_primeira_sem_resposta")
             linha.update(est)
             linha["prazo_em"] = (prim + PRAZO_MSG).isoformat() if est["status"] == "aberta" and prim else None
             linha["prazo_tipo"] = "referencia" if linha["prazo_em"] else None
+            # alguem respondeu de verdade (aqui, no ML ou no Responso): sai de "Fora do horário"
+            if ant and ant.get("fora_horario_pendente"):
+                desde = iso(ant.get("fora_horario_em"))
+                if est["status"] in ("respondida", "fechada", "bloqueada") or any(
+                        m["de"] == "loja" and m["criada_em"] and desde and m["criada_em"] > desde for m in msgs_st):
+                    linha["fora_horario_pendente"] = False
+            auto = responder_fora(token, sid, p, msgs_st, est, ant, linha)
+            if auto:
+                auto_msgs.append(auto)
             if not ant or not ant.get("item_titulo"):
                 linha.update(dados_do_pedido(token, p))
                 linha["pack_id"] = p
@@ -507,7 +644,7 @@ def main():
                 if m["de"] == "loja" and m["id"] not in ids_ja and normal(m["texto"]) in existentes_txt:
                     continue  # ja' esta' gravada (enviada pelo app)
                 mensagens.append({"id": m["id"], "conversa_id": cid, "de": m["de"], "texto": m["texto"],
-                                  "anexos": m["anexos"], "criada_em": m["criada_em"].isoformat() if m["criada_em"] else None,
+                                  "anexos": m["anexos"] or anexo_salvo(ja_msgs.get(cid, []), m["id"]), "criada_em": m["criada_em"].isoformat() if m["criada_em"] else None,
                                   "moderacao": m["moderacao"]})
                 if (m["id"] not in ids_ja and m["de"] == "cliente" and m["criada_em"]
                         and m["criada_em"] > AGORA - AVISO_JANELA):
@@ -565,7 +702,7 @@ def main():
                 if m["de"] == "loja" and m["id"] not in ids_ja and normal(m["texto"]) in txt_loja:
                     continue
                 mensagens.append({"id": m["id"], "conversa_id": cid, "de": m["de"], "texto": m["texto"],
-                                  "anexos": m["anexos"], "criada_em": m["criada_em"].isoformat() if m["criada_em"] else None,
+                                  "anexos": m["anexos"] or anexo_salvo(ja_r.get(cid, []), m["id"]), "criada_em": m["criada_em"].isoformat() if m["criada_em"] else None,
                                   "moderacao": m["moderacao"]})
                 if (m["id"] not in ids_ja and m["de"] in ("cliente", "mediador") and m["criada_em"]
                         and m["criada_em"] > AGORA - AVISO_JANELA):
@@ -585,10 +722,11 @@ def main():
         tot["conversas"] += len(conversas)
         tot["abertas"] += sum(1 for x in conversas if x["status"] == "aberta")
         tot["mensagens"] += len(mensagens)
+        tot["auto"] += len(auto_msgs)
         if not DRY_RUN:
-            gravar(conversas, mensagens)
+            gravar(conversas, mensagens + auto_msgs)
             print(f"   gravado: {len(conversas)} conversa(s), {len(mensagens)} mensagem(ns)")
-        conversas, mensagens = [], []
+        conversas, mensagens, auto_msgs = [], [], []
 
     # avisos de fila sem conta conhecida tambem saem da fila
     fila_ok += [f["id"] for f in fila if str(f.get("seller_id") or "") not in SELLERS]
@@ -597,6 +735,7 @@ def main():
     print(f"  conversas lidas ....... {tot['conversas']}")
     print(f"     abertas ............ {tot['abertas']}")
     print(f"  mensagens ............. {tot['mensagens']}")
+    print(f"  respostas automaticas . {tot['auto']}")
     print(f"  tempo ................. {(time.time() - INICIO) / 60:.1f} min")
     print(f"  vao gerar aviso ....... {len(avisar)}")
     if DRY_RUN:
