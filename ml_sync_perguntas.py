@@ -373,16 +373,27 @@ def main():
 
 
 def avisar():
+    cab = {"Authorization": f"Bearer {SUPABASE_KEY}", "Content-Type": "application/json"}
+    # se a chave do GitHub for diferente da que a funcao conhece, este segundo
+    # caminho resolve — o mesmo guard que o push_check ja usa
+    seg = (os.environ.get("APP_CHAT_SECRET") or "").strip()
+    if seg:
+        cab["x-app-secret"] = seg
     try:
         r = requests.post(f"{SUPABASE_URL}/functions/v1/perguntas_push",
-                          headers={"Authorization": f"Bearer {SUPABASE_KEY}",
-                                   "Content-Type": "application/json"},
-                          data="{}", timeout=30)
+                          headers=cab, data="{}", timeout=30)
         if r.status_code == 404:
             print("   aviso: a funcao perguntas_push ainda nao foi publicada")
         elif r.status_code in (401, 403):
-            print(f"   aviso: perguntas_push recusou a chave (HTTP {r.status_code}) — "
-                  f"o SUPABASE_KEY do GitHub precisa ser a service_role")
+            try:
+                motivo = r.json().get("motivo") or r.text[:160]
+            except Exception:
+                motivo = r.text[:160]
+            print(f"   aviso: perguntas_push recusou (HTTP {r.status_code}) — {motivo}")
+            if r.status_code == 401:
+                print("      -> 401 vem do Supabase, nao da funcao: desligue o 'Verify JWT' dela")
+            elif not seg:
+                print("      -> cadastre o secret APP_CHAT_SECRET no GitHub (o mesmo do Supabase)")
         else:
             print(f"   aviso: {r.text[:160]}")
     except Exception as e:
