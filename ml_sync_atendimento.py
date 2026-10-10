@@ -183,10 +183,41 @@ def _min(s, padrao):
         return _min(padrao, padrao)
 
 
+def pascoa(ano):
+    """Domingo de Pascoa (algoritmo de Meeus/Jones/Butcher, calendario gregoriano)."""
+    a, b, c = ano % 19, ano // 100, ano % 100
+    d, e = b // 4, b % 4
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i, k = c // 4, c % 4
+    l = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * l) // 451
+    mes = (h + l - 7 * m + 114) // 31
+    dia = (h + l - 7 * m + 114) % 31 + 1
+    return datetime(ano, mes, dia).date()
+
+
+def feriados(ano, facultativos=False):
+    """Feriados nacionais (Lei 662/49, 6.802/80, 14.759/23) + Paixao de Cristo.
+    facultativos: Carnaval (2a e 3a) e Corpus Christi."""
+    p = pascoa(ano)
+    dias = {datetime(ano, m, d).date(): nome for (m, d, nome) in [
+        (1, 1, "Confraternização Universal"), (4, 21, "Tiradentes"), (5, 1, "Dia do Trabalho"),
+        (9, 7, "Independência"), (10, 12, "Nossa Senhora Aparecida"), (11, 2, "Finados"),
+        (11, 15, "Proclamação da República"), (11, 20, "Consciência Negra"), (12, 25, "Natal")]}
+    dias[p - timedelta(days=2)] = "Paixão de Cristo"
+    if facultativos:
+        dias[p - timedelta(days=48)] = "Carnaval"
+        dias[p - timedelta(days=47)] = "Carnaval"
+        dias[p + timedelta(days=60)] = "Corpus Christi"
+    return dias
+
+
 def ler_config_fora():
     try:
         d = sb_get("perguntas_config?id=eq.1&select=atend_auto_ativo,atend_auto_inicio,atend_auto_fim,"
-                   "atend_auto_dias,atend_auto_texto,atend_auto_contas")
+                   "atend_auto_dias,atend_auto_texto,atend_auto_contas,atend_auto_feriados,atend_auto_facultativos")
     except Exception as e:  # coluna ainda nao criada etc.: segue sem resposta automatica
         print(f"aviso: nao li a config de fora do horario ({e})")
         return {"ativo": False, "texto": ""}
@@ -198,12 +229,16 @@ def ler_config_fora():
         "dias": {int(x) for x in (c.get("atend_auto_dias") or [])},
         "texto": (c.get("atend_auto_texto") or "").strip()[:350],
         "contas": {str(x) for x in (c.get("atend_auto_contas") or SELLERS)},
+        "feriados": c.get("atend_auto_feriados") is not False,
+        "facultativos": c.get("atend_auto_facultativos") is True,
     }
 
 
 def fora_do_horario(cfg, quando):
     l = quando.astimezone(FUSO)
     if (l.weekday() + 1) % 7 in cfg["dias"]:      # 0 = domingo
+        return True
+    if cfg.get("feriados") and l.date() in feriados(l.year, cfg.get("facultativos")):
         return True
     t, i, f = l.hour * 60 + l.minute, cfg["inicio"], cfg["fim"]
     if i == f:
