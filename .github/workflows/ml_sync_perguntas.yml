@@ -1,0 +1,53 @@
+# Perguntas do Mercado Livre -> tabela 'perguntas' no Supabase.
+# Rede de seguranca do webhook: pega o que ele perder, e faz a carga inicial.
+# Nao responde nada no ML, so' le.
+name: ML — perguntas (sync)
+
+on:
+  schedule:
+    - cron: '7,22,37,52 * * * *'    # de 15 em 15 min, fora dos minutos cheios
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Simulacao? 1 = le tudo e NAO grava'
+        required: false
+        default: '1'
+        type: choice
+        options: ['1', '0']
+      dias:
+        description: 'Respondidas de quantos dias para tras'
+        required: false
+        default: '30'
+
+# MESMA trava dos outros robos do ML. O refresh token do Mercado Livre e'
+# de uso unico: dois robos renovando ao mesmo tempo, um invalida o do outro
+# e a conta perde o acesso. Aqui ninguem cancela ninguem — espera a vez.
+concurrency:
+  group: ml-puxador
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Instalar dependencias
+        run: pip install requests supabase
+
+      - name: Varrer perguntas das 3 contas
+        env:
+          ML_CLIENT_ID:     ${{ secrets.ML_CLIENT_ID }}
+          ML_CLIENT_SECRET: ${{ secrets.ML_CLIENT_SECRET }}
+          SUPABASE_URL:     ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY:     ${{ secrets.SUPABASE_KEY }}
+          ML_SELLERS:       '177795203,471489691,3244206480'
+          BL_DIAS:          ${{ inputs.dias || '30' }}
+          # no agendamento (sem inputs) grava de verdade; no botao, o padrao
+          # e' simulacao — a primeira vez que voce rodar na mao nao escreve nada
+          BL_DRY_RUN:       ${{ inputs.dry_run || '0' }}
+        run: python -u ml_sync_perguntas.py
