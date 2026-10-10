@@ -364,7 +364,29 @@ def main():
         upsert(g, "novas")
     for g in por_formato(atualizar):
         upsert(g, "atualizadas")
+
+    # Chama SEMPRE, nao so' quando achou pergunta nova: se o push do webhook
+    # falhou e devolveu alguma pergunta para a fila, e' aqui que ela apita.
+    # A funcao marca e avisa numa operacao so', entao chamar a mais nao duplica.
+    avisar()
     print(f"\n✅ concluido em {datetime.now(timezone.utc):%H:%M:%S} UTC")
+
+
+def avisar():
+    try:
+        r = requests.post(f"{SUPABASE_URL}/functions/v1/perguntas_push",
+                          headers={"Authorization": f"Bearer {SUPABASE_KEY}",
+                                   "Content-Type": "application/json"},
+                          data="{}", timeout=30)
+        if r.status_code == 404:
+            print("   aviso: a funcao perguntas_push ainda nao foi publicada")
+        elif r.status_code in (401, 403):
+            print(f"   aviso: perguntas_push recusou a chave (HTTP {r.status_code}) — "
+                  f"o SUPABASE_KEY do GitHub precisa ser a service_role")
+        else:
+            print(f"   aviso: {r.text[:160]}")
+    except Exception as e:
+        print(f"   aviso: nao consegui chamar perguntas_push ({e})")
 
 
 if __name__ == "__main__":
