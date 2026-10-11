@@ -299,7 +299,7 @@ def responder_fora(token, sid, pack, msgs_st, est, ant, linha):
             "criada_em": agora.isoformat(), "enviada_por": AUTO_POR, "moderacao": None}
 
 
-def manter_manual(ant, msgs_st, linha, est):
+def manter_manual(ant, msgs_st, linha, est, ja_c=()):
     """Status trocado a mao no app FICA ate' chegar mensagem nova (de qualquer lado).
     Devolve True se manteve (e ja' ajusta est)."""
     if not ant or not ant.get("status_manual") or est["status"] in ("fechada", "bloqueada"):
@@ -307,11 +307,243 @@ def manter_manual(ant, msgs_st, linha, est):
             linha["status_manual"] = False
         return False
     desde = iso(ant.get("status_manual_em"))
-    if desde and any(m["criada_em"] and m["criada_em"] > desde for m in msgs_st):
+    if desde and any(m["criada_em"] and m["criada_em"] > desde and not e_do_robo(m, ja_c) for m in msgs_st):
         linha["status_manual"] = False          # chegou coisa nova: volta ao automatico
         return False
     est["status"] = ant["status"]
     return True
+
+
+# ------------------------------------------- automacao: NOTA FISCAL e RASTREIO
+# Mensagem do cliente que e' CLARAMENTE pedido de nota ou de rastreio: o robo
+# responde sozinho e poe a conversa na pasta "Nota fiscal" / "Rastreamento".
+# Na duvida (defeito, troca, mensagem longa, sem nota no ML...) nao responde.
+ROBO_POR = "Automação"                      # enviada_por = "Automação (nota fiscal)" etc.
+AUTOMACAO = {"nf": False, "rastreio": False, "pastas": {}}
+FECHO = "Atenciosamente, Equipe Ponto Musical."
+TEXTO_NF = "Olá! Segue em anexo a nota fiscal da sua compra. Qualquer dúvida, estamos à disposição. " + FECHO
+
+_PEDE_NF = re.compile(r"\b(nota fiscal|notas? fisca(l|is)|nf ?-?e?|danfe|cupom fiscal|a nota|da nota|minha nota|manda(r)? a nota|envia(r)? a nota|nota do (pedido|produto)|xml da nota)\b")
+_PEDE_RASTREIO = re.compile(
+    r"(rastrei\w*|rastreamento|codigo (de|do) (rastreio|envio|rastreamento|objeto)|cod\.? (de )?rastreio"
+    r"|cade (o |meu |a minha |minha )?(pedido|produto|encomenda|compra)|onde (esta|ta|anda) (o |meu |a minha |minha )?(pedido|produto|encomenda|compra)"
+    r"|(ja )?(foi|foram) (enviad|despachad|postad)\w*|ja (enviaram|despacharam|postaram|saiu)|quando (chega|vai chegar|sera entregue|vai ser entregue)"
+    r"|previsao de (entrega|chegada)|status do (pedido|envio)|nao (chegou|recebi) ainda|ainda nao (chegou|recebi))")
+_PRECISA_GENTE = re.compile(
+    r"(defeit|quebrad|danific|amassad|arranhad|riscad|errad|troca|trocar|devol|cancel|reembols|estorn|nao funciona|parou|nao liga"
+    r"|faltando|falta |faltou|incomplet|veio sem|outro produto|diferente|reclama|procon|problema|garantia|insatisf|absurdo|golpe|fraude"
+    r"|desconto|frete|endereco|mudar|alterar|nota (de )?devolucao"
+    r"|cnpj|cpf|razao social|inscricao|emitir|emite|emitem|reemitir|corrigir|correcao|no (meu )?nome|outro nome|empresa)")
+
+
+def _sem_acento(s):
+    import unicodedata
+    return "".join(c for c in unicodedata.normalize("NFD", s or "") if unicodedata.category(c) != "Mn").lower()
+
+
+def intencao(texto):
+    """'nf', 'rastreio', 'nf+rastreio' ou None (na duvida, None)."""
+    s = _sem_acento(texto)
+    s = re.sub(r"\s+", " ", s).strip()
+    if not s or len(s) > 280 or _PRECISA_GENTE.search(s):
+        return None
+    nf = bool(_PEDE_NF.search(s))
+    ra = bool(_PEDE_RASTREIO.search(s))
+    return "nf+rastreio" if nf and ra else "nf" if nf else "rastreio" if ra else None
+
+
+def _rastreavel(cod, transp):
+    if re.search(r"\b(mel|mercado ?(envios|livre))\b", transp or "", re.I):
+        return False
+    return bool(re.match(r"^[A-Z]{2}\d{9}[A-Z]{2}$", cod) or re.match(r"^\d{8,20}$", cod) or re.match(r"^[A-Z]{2,4}\d{6,16}$", cod, re.I))
+
+
+def frase_envio(envio):
+    """Mesma regra do botao Rastreio do app. None = nao sei o que dizer (deixa para gente)."""
+    if not envio:
+        return None
+    st, cod = envio.get("status") or "", (envio.get("rastreio") or "").strip()
+    transp = envio.get("transportadora") or ""
+    if st == "delivered":
+        q = iso(envio.get("entregue_em"))
+        quando = f" em {q.astimezone(FUSO):%d/%m}" if q else ""
+        return (f"Seu pedido consta como entregue{quando}. Se não recebeu ou tiver qualquer problema, "
+                "é só nos avisar por aqui que verificamos para você.")
+    if st == "shipped" and cod and _rastreavel(cod, transp):
+        nome = "Correios" if re.match(r"^[A-Z]{2}\d{9}[A-Z]{2}$", cod) else ("" if re.search(r"\bmel\b", transp, re.I) else transp)
+        return (f"Seu pedido já foi enviado e está a caminho. O código de rastreio é {cod}{f' ({nome})' if nome else ''}. "
+                "Você também acompanha a entrega em Minhas compras, aqui no Mercado Livre.")
+    if st == "shipped":
+        return ("Seu pedido já foi enviado e está a caminho. A entrega é feita pelo Mercado Livre, e você acompanha "
+                "cada etapa em tempo real em Minhas compras, aqui no Mercado Livre.")
+    if st in ("ready_to_ship", "handling", "pending"):
+        return ("Seu pedido está sendo preparado para envio. Assim que for despachado, o rastreio aparece em "
+                "Minhas compras, aqui no Mercado Livre.")
+    return None
+
+
+def envio_do_pedido(token, order_id):
+    try:
+        o = ml_get(f"/orders/{order_id}", token)
+        sid = (o.get("shipping") or {}).get("id")
+        if not sid:
+            return None
+        s = ml_get(f"/shipments/{sid}", token, headers={"x-format-new": "true"})
+        return {"status": s.get("status"), "rastreio": s.get("tracking_number"), "transportadora": s.get("tracking_method"),
+                "entregue_em": (s.get("status_history") or {}).get("date_delivered")}
+    except MLErro:
+        return None
+
+
+def ml_arquivo(caminho, token):
+    r = requests.get(f"{API}{caminho}", headers={"Authorization": f"Bearer {token}"}, timeout=40)
+    if r.status_code >= 400 or not r.content:
+        return None
+    return r.content
+
+
+def nota_pdf(token, sid, pack, order_id):
+    """(nome, bytes) do PDF da nota da venda: anexada pelo seu sistema ou do faturador do ML."""
+    try:
+        d = ml_get(f"/packs/{pack}/fiscal_documents", token)
+        for doc in d.get("fiscal_documents") or []:
+            nome = str(doc.get("filename") or f"nota-{doc.get('id')}")
+            if "xml" in str(doc.get("file_type") or nome).lower():
+                continue
+            b = ml_arquivo(f"/packs/{pack}/fiscal_documents/{doc.get('id')}", token)
+            if b:
+                return (nome if nome.lower().endswith(".pdf") else nome + ".pdf"), b
+    except MLErro:
+        pass
+    for oid in dict.fromkeys([order_id, pack]):
+        if not oid:
+            continue
+        try:
+            inv = ml_get(f"/users/{sid}/invoices/orders/{oid}", token)
+        except MLErro:
+            continue
+        if inv.get("id") and str(inv.get("status") or "").lower() == "authorized":
+            b = ml_arquivo(f"/users/{sid}/invoices/sites/MLB/documents/danfe/{inv['id']}", token)
+            if b:
+                return f"Nota fiscal {inv.get('invoice_number') or inv['id']}.pdf", b
+    return None
+
+
+def subir_anexo(token, nome, conteudo, tipo="application/pdf"):
+    r = requests.post(f"{API}/messages/attachments", params={"tag": "post_sale", "site_id": "MLB"},
+                      headers={"Authorization": f"Bearer {token}"}, files={"file": (nome, conteudo, tipo)}, timeout=60)
+    if r.status_code >= 400:
+        raise MLErro(r.status_code, r.text)
+    j = r.json() if r.content else {}
+    return str(j.get("id") or j.get("filename") or "")
+
+
+def pasta_automacao(nome):
+    """id da pasta (status proprio) 'Nota fiscal' / 'Rastreamento'; cria se nao existir."""
+    if nome in AUTOMACAO["pastas"]:
+        return AUTOMACAO["pastas"][nome]
+    pid = None
+    try:
+        d = sb_get(f"atend_status_extra?select=id,nome&ativo=eq.true")
+        pid = next((x["id"] for x in d if (x.get("nome") or "").strip().lower() == nome.lower()), None)
+        if pid is None and not DRY_RUN:
+            r = sb_req("POST", "atend_status_extra", headers={"Prefer": "return=representation"},
+                       data=json.dumps({"nome": nome, "cor": "#059669" if nome == "Nota fiscal" else "#0891B2", "ordem": 0}))
+            pid = (r.json() or [{}])[0].get("id")
+    except Exception as e:
+        print(f"   aviso: pasta {nome}: {e}")
+    AUTOMACAO["pastas"][nome] = pid
+    return pid
+
+
+def automatizar(token, sid, pack, msgs_st, est, ant, linha):
+    """Responde sozinho pedido de nota/rastreio. Devolve a mensagem para gravar (ou None)."""
+    if not (AUTOMACAO["nf"] or AUTOMACAO["rastreio"]) or est["status"] != "aberta":
+        return None
+    ult = msgs_st[-1] if msgs_st else None
+    if not ult or ult["de"] != "cliente" or not ult["criada_em"] or ult["criada_em"] < AGORA - AVISO_JANELA:
+        return None
+    # junta o que o cliente escreveu desde a nossa ultima resposta
+    pedido_txt = []
+    for m in reversed(msgs_st):
+        if m["de"] == "loja":
+            break
+        if m["de"] == "cliente" and m.get("texto"):
+            pedido_txt.insert(0, m["texto"])
+    tipo = intencao(" ".join(pedido_txt))
+    if not tipo:
+        return None
+    quer_nf = "nf" in tipo and AUTOMACAO["nf"]
+    quer_ra = "rastreio" in tipo and AUTOMACAO["rastreio"]
+    if not quer_nf and not quer_ra:
+        return None
+    # nao repete o mesmo assunto na mesma conversa em 7 dias: ai' e' com voces
+    ja = iso((ant or {}).get("automacao_em"))
+    if ja and ja > AGORA - timedelta(days=7) and any(x in str((ant or {}).get("automacao_tipo") or "") for x in (["nf"] if quer_nf else []) + (["rastreio"] if quer_ra else [])):
+        return None
+    order_id = linha.get("order_id") or (ant or {}).get("order_id") or pack
+    comprador = ult.get("uid") or linha.get("comprador_id") or (ant or {}).get("comprador_id")
+    if not comprador:
+        return None
+    partes, anexo = [], None
+    if quer_nf:
+        nota = nota_pdf(token, sid, pack, order_id)
+        if not nota:
+            print(f"   automacao: pack {pack} pediu nota, mas nao ha' nota no ML -> fica para voces")
+            return None
+        anexo = nota
+        partes.append("Segue em anexo a nota fiscal da sua compra.")
+    if quer_ra:
+        fr = frase_envio(envio_do_pedido(token, order_id))
+        if not fr:
+            if not quer_nf:
+                return None
+        else:
+            partes.append(fr)
+    texto = "Olá! " + " ".join(partes) + " " + FECHO
+    if quer_nf and not quer_ra:
+        texto = TEXTO_NF
+    if DRY_RUN:
+        print(f"   [DRY RUN] automacao {tipo} no pack {pack}: {texto[:80]}...")
+        return None
+    corpo = {"from": {"user_id": str(sid)}, "to": {"user_id": str(comprador)}, "text": texto}
+    anexos_gravar = []
+    try:
+        if anexo:
+            aid = subir_anexo(token, anexo[0], anexo[1])
+            if not aid:
+                return None
+            corpo["attachments"] = [aid]
+            anexos_gravar = [{"nome": anexo[0], "arquivo": aid, "tipo": "application/pdf", "tamanho": len(anexo[1])}]
+        params = {"tag": "post_sale"}
+        if APP_ID:
+            params["application_id"] = APP_ID
+        r = ml_post(f"/messages/packs/{pack}/sellers/{sid}", token, corpo, params)
+    except MLErro as e:
+        print(f"   aviso: automacao no pack {pack} falhou ({e})")
+        return None
+    agora = datetime.now(timezone.utc)
+    rotulo = "nota fiscal" if quer_nf and not quer_ra else "rastreio" if quer_ra and not quer_nf else "nota fiscal e rastreio"
+    pasta = pasta_automacao("Nota fiscal" if quer_nf else "Rastreamento")
+    linha.update({"automacao_em": agora.isoformat(), "automacao_tipo": "+".join(x for x, q in (("nf", quer_nf), ("rastreio", quer_ra)) if q),
+                  "status": f"etq:{pasta}" if pasta else "respondida", "status_manual": bool(pasta),
+                  "status_manual_em": agora.isoformat() if pasta else None, "status_manual_por": f"{ROBO_POR} ({rotulo})" if pasta else None,
+                  "prazo_em": None, "prazo_tipo": None, "fora_horario_pendente": False,
+                  "ultima_msg_em": agora.isoformat(), "ultima_msg_de": "loja", "ultima_msg_texto": texto[:300], "sem_resposta": 0})
+    mid = str(r.get("id") or r.get("message_id") or f"robo:{pack}:{int(agora.timestamp())}")
+    print(f"   🤖 automacao ({rotulo}) respondida no pack {pack}")
+    return {"id": mid, "conversa_id": f"msg:{pack}", "de": "loja", "texto": texto, "anexos": anexos_gravar,
+            "criada_em": agora.isoformat(), "enviada_por": f"{ROBO_POR} ({rotulo})", "moderacao": None}
+
+
+def e_do_robo(m, ja_c):
+    """Mensagem enviada pela automacao (nao conta como 'mensagem nova' para tirar da pasta)."""
+    if m["de"] != "loja":
+        return False
+    g = next((x for x in ja_c if x["id"] == m["id"]), None)
+    if g is not None:
+        return str(g.get("enviada_por") or "").startswith(ROBO_POR)
+    return any(str(x.get("enviada_por") or "").startswith(ROBO_POR) and normal(x.get("texto")) == normal(m.get("texto")) for x in ja_c)
 
 
 def e_auto(m, ja_c, texto_auto):
@@ -584,7 +816,7 @@ def existentes(conv_ids):
     ids = list(conv_ids)
     for i in range(0, len(ids), 80):
         bloco = ",".join(f'"{x}"' for x in ids[i:i + 80])
-        for l in sb_get(f"atend_conversas?select=id,status,fechada_em,item_titulo,motivo_nome,comprador_id,fora_horario_em,fora_horario_pendente,status_manual,status_manual_em,prazo_em,prazo_tipo&id=in.({bloco})"):
+        for l in sb_get(f"atend_conversas?select=id,status,fechada_em,item_titulo,motivo_nome,comprador_id,fora_horario_em,fora_horario_pendente,status_manual,status_manual_em,prazo_em,prazo_tipo,automacao_em,automacao_tipo,order_id&id=in.({bloco})"):
             out[l["id"]] = l
     return out
 
@@ -615,6 +847,13 @@ def main():
 
     global FORA, PERIODO
     FORA = ler_config_fora()
+    try:
+        cfa = (sb_get("perguntas_config?id=eq.1&select=atend_automacao_nf,atend_automacao_rastreio") or [{}])[0]
+        AUTOMACAO.update(nf=cfa.get("atend_automacao_nf") is True, rastreio=cfa.get("atend_automacao_rastreio") is True)
+    except Exception as e:
+        print(f"aviso: automacao de nota/rastreio desligada ({e})")
+    if AUTOMACAO["nf"] or AUTOMACAO["rastreio"]:
+        print(f"Automacao: nota fiscal {'LIGADA' if AUTOMACAO['nf'] else 'desligada'}, rastreio {'LIGADO' if AUTOMACAO['rastreio'] else 'desligado'}")
     if FORA["ativo"] and fora_do_horario(FORA, AGORA):
         PERIODO = inicio_do_periodo(FORA, AGORA)
         print(f"Fora do horario desde {PERIODO.astimezone(FUSO):%d/%m %H:%M}: resposta automatica LIGADA")
@@ -689,7 +928,7 @@ def main():
             msgs_st = [m for m in msgs if not e_auto(m, ja_c, FORA["texto"])]
             est = calcular_status(msgs_st, ant, bloqueada=bloq)
             prim = est.pop("_primeira_sem_resposta")
-            manual = manter_manual(ant, msgs_st, linha, est)
+            manual = manter_manual(ant, msgs_st, linha, est, ja_c)
             linha.update(est)
             if manual:   # trocado a mao: prazo como ficou
                 linha["prazo_em"], linha["prazo_tipo"] = ant.get("prazo_em"), ant.get("prazo_tipo")
@@ -702,9 +941,13 @@ def main():
                 if est["status"] in ("respondida", "fechada", "bloqueada") or any(
                         m["de"] == "loja" and m["criada_em"] and desde and m["criada_em"] > desde for m in msgs_st):
                     linha["fora_horario_pendente"] = False
-            auto = responder_fora(token, sid, p, msgs_st, est, ant, linha)
-            if auto:
-                auto_msgs.append(auto)
+            robo = automatizar(token, sid, p, msgs_st, est, ant, linha) if not manual else None
+            if robo:
+                auto_msgs.append(robo)          # respondeu nota/rastreio: nao precisa da "fora do horario"
+            else:
+                auto = responder_fora(token, sid, p, msgs_st, est, ant, linha)
+                if auto:
+                    auto_msgs.append(auto)
             if not ant or not ant.get("item_titulo"):
                 linha.update(dados_do_pedido(token, p))
                 linha["pack_id"] = p
