@@ -1,0 +1,49 @@
+# Monta o app Android (Atendimento ML) e entrega o arquivo .apk para baixar.
+# O app abre o painel https://perguntas-ml.pages.dev, entao as novidades
+# chegam sozinhas: so' precisa rodar de novo se mudar icone/nome do app.
+name: Android — gerar APK
+
+on:
+  workflow_dispatch:
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: android-app
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Instalar Android 36
+        run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Montar o app
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon --stacktrace
+
+      - name: Assinar o app
+        env:
+          SENHA: ${{ secrets.APK_KEY_PASSWORD }}
+        run: |
+          if [ -z "$SENHA" ]; then echo "Falta o secret APK_KEY_PASSWORD"; exit 1; fi
+          BT="$ANDROID_HOME/build-tools/36.0.0"
+          "$BT/zipalign" -p -f 4 app/build/outputs/apk/release/app-release-unsigned.apk alinhado.apk
+          "$BT/apksigner" sign --ks android.keystore --ks-key-alias atendimento \
+            --ks-pass env:SENHA --key-pass env:SENHA --out Atendimento-ML.apk alinhado.apk
+          "$BT/apksigner" verify --print-certs Atendimento-ML.apk | grep -i sha-256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Atendimento-ML-apk
+          path: android-app/Atendimento-ML.apk
+          retention-days: 90
