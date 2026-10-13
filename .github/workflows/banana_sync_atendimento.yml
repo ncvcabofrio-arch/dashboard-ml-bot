@@ -1,0 +1,57 @@
+# PAINEL DA BANANA MUSIC / IRMAOS BROTHERS (Gaby). Mesmo robo da Ponto Musical,
+# com outro env: grava nas tabelas do schema banana_irmaos e assina com o nome
+# de cada loja. Mesma trava 'ml-puxador' (o refresh token do ML e' de uso unico).
+# Mensagens pos-venda e reclamacoes do Mercado Livre -> Supabase (atend_*).
+# So' LE no ML (e nunca marca como lido). Quem responde e' o app.
+name: Banana/Irmãos — atendimento (mensagens e reclamações)
+
+on:
+  # o ml_webhook acorda este robo quando chega mensagem ou reclamacao
+  repository_dispatch:
+    types: [banana_atendimento]
+  schedule:
+    - cron: '9,24,39,54 * * * *'    # de 15 em 15 min, fora dos minutos cheios
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Simulacao? 1 = le tudo e NAO grava'
+        required: false
+        default: '1'
+        type: choice
+        options: ['1', '0']
+      dias:
+        description: 'Varrer pedidos de quantos dias (carga inicial: 30)'
+        required: false
+        default: '1'
+
+# Mesma trava dos outros robos do ML: o refresh token e' de uso unico.
+concurrency:
+  group: ml-puxador
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Instalar dependencias
+        run: pip install requests supabase
+      - name: Ler mensagens e reclamacoes da Banana Music e Irmãos Brothers
+        env:
+          ML_CLIENT_ID:     ${{ secrets.ML_CLIENT_ID }}
+          ML_CLIENT_SECRET: ${{ secrets.ML_CLIENT_SECRET }}
+          SUPABASE_URL:     ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY:     ${{ secrets.SUPABASE_KEY }}
+          PERGUNTAS_PUSH_SECRET: ${{ secrets.PERGUNTAS_PUSH_SECRET }}
+          SB_SCHEMA:        'banana_irmaos'
+          FN_PERGUNTAS:     'banana_perguntas'
+          FN_PUSH:          'banana_push'
+          LOJA_MARCAS:      '1814100=Banana Music;1104686442=Irmãos Brothers'
+          ML_SELLERS:       '1814100,1104686442'
+          BL_DIAS:          ${{ inputs.dias }}
+          BL_DRY_RUN:       ${{ inputs.dry_run || '0' }}
+        run: python -u ml_sync_atendimento.py

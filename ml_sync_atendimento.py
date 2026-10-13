@@ -81,6 +81,24 @@ def _limpar_url(bruto):
     return u
 
 
+# ---- LOJA (o painel deste robo) ----------------------------------------
+# O mesmo robo serve a Ponto Musical e o painel da Banana/Irmaos Brothers:
+# muda so' o env do workflow. SB_SCHEMA = tabelas do painel; as contas e os
+# tokens continuam na tabela 'contas' (comum).
+SB_SCHEMA = (os.environ.get("SB_SCHEMA") or "public").strip()
+FN_PERGUNTAS = (os.environ.get("FN_PERGUNTAS") or "ml_perguntas").strip()
+FN_PUSH = (os.environ.get("FN_PUSH") or "perguntas_push").strip()
+# "seller=Nome;seller=Nome" — o nome da loja na assinatura de cada conta
+MARCAS = {}
+for _par in (os.environ.get("LOJA_MARCAS") or "").split(";"):
+    if "=" in _par:
+        _k, _v = _par.split("=", 1)
+        MARCAS[_k.strip()] = _v.strip()
+
+
+def marca(sid):
+    return MARCAS.get(str(sid)) or "Ponto Musical"
+
 SUPABASE_URL = _limpar_url(os.environ.get("SUPABASE_URL", ""))
 SUPABASE_KEY = (os.environ.get("SUPABASE_KEY", "") or "").strip()
 if not SUPABASE_URL or not SUPABASE_KEY:
@@ -88,6 +106,9 @@ if not SUPABASE_URL or not SUPABASE_KEY:
     sys.exit(1)
 H = {"apikey": SUPABASE_KEY, "Authorization": "Bearer " + SUPABASE_KEY,
      "Content-Type": "application/json"}
+if SB_SCHEMA != "public":
+    # PostgREST: le (Accept) e grava (Content) nas tabelas do schema do painel
+    H.update({"Accept-Profile": SB_SCHEMA, "Content-Profile": SB_SCHEMA})
 
 
 # ---------------------------------------------------------------- Supabase
@@ -286,7 +307,7 @@ def responder_fora(token, sid, pack, msgs_st, est, ant, linha):
         params["application_id"] = APP_ID
     try:
         r = ml_post(f"/messages/packs/{pack}/sellers/{sid}", token,
-                    {"from": {"user_id": str(sid)}, "to": {"user_id": str(comprador)}, "text": FORA["texto"]}, params)
+                    {"from": {"user_id": str(sid)}, "to": {"user_id": str(comprador)}, "text": texto_fora(sid)}, params)
     except MLErro as e:
         print(f"   aviso: resposta automatica no pack {pack} falhou ({e})")
         return None
@@ -295,7 +316,7 @@ def responder_fora(token, sid, pack, msgs_st, est, ant, linha):
     linha["fora_horario_pendente"] = True
     mid = str(r.get("id") or r.get("message_id") or f"auto:{pack}:{int(agora.timestamp())}")
     print(f"   🌙 resposta automatica enviada no pack {pack}")
-    return {"id": mid, "conversa_id": f"msg:{pack}", "de": "loja", "texto": FORA["texto"], "anexos": [],
+    return {"id": mid, "conversa_id": f"msg:{pack}", "de": "loja", "texto": texto_fora(sid), "anexos": [],
             "criada_em": agora.isoformat(), "enviada_por": AUTO_POR, "moderacao": None}
 
 
@@ -320,8 +341,17 @@ def manter_manual(ant, msgs_st, linha, est, ja_c=()):
 # Na duvida (defeito, troca, mensagem longa, sem nota no ML...) nao responde.
 ROBO_POR = "Automação"                      # enviada_por = "Automação (nota fiscal)" etc.
 AUTOMACAO = {"nf": False, "rastreio": False, "pastas": {}}
-FECHO = "Atenciosamente, Equipe Ponto Musical."
-TEXTO_NF = "Olá! Segue em anexo a nota fiscal da sua compra. Qualquer dúvida, estamos à disposição. " + FECHO
+def fecho(sid):
+    return f"Atenciosamente, Equipe {marca(sid)}."
+
+
+def texto_nf(sid):
+    return "Olá! Segue em anexo a nota fiscal da sua compra. Qualquer dúvida, estamos à disposição. " + fecho(sid)
+
+
+def texto_fora(sid):
+    """O texto fora do horario com o nome da loja da conta no lugar de {loja}."""
+    return (FORA.get("texto") or "").replace("{loja}", marca(sid))
 
 _PEDE_NF = re.compile(r"\b(nota fiscal|notas? fisca(l|is)|nf ?-?e?|danfe|cupom fiscal|a nota|da nota|minha nota|manda(r)? a nota|envia(r)? a nota|nota do (pedido|produto)|xml da nota)\b")
 _PEDE_RASTREIO = re.compile(
@@ -500,9 +530,9 @@ def automatizar(token, sid, pack, msgs_st, est, ant, linha):
                 return None
         else:
             partes.append(fr)
-    texto = "Olá! " + " ".join(partes) + " " + FECHO
+    texto = "Olá! " + " ".join(partes) + " " + fecho(sid)
     if quer_nf and not quer_ra:
-        texto = TEXTO_NF
+        texto = texto_nf(sid)
     if DRY_RUN:
         print(f"   [DRY RUN] automacao {tipo} no pack {pack}: {texto[:80]}...")
         return None
@@ -925,7 +955,7 @@ def main():
                      "status_ml": (conv.get("status") or "") + (f":{conv.get('substatus')}" if conv.get("substatus") else "")}
             # a resposta automatica nao conta como resposta
             ja_c = ja_msgs.get(cid, [])
-            msgs_st = [m for m in msgs if not e_auto(m, ja_c, FORA["texto"])]
+            msgs_st = [m for m in msgs if not e_auto(m, ja_c, texto_fora(sid))]
             est = calcular_status(msgs_st, ant, bloqueada=bloq)
             prim = est.pop("_primeira_sem_resposta")
             manual = manter_manual(ant, msgs_st, linha, est, ja_c)
@@ -1075,7 +1105,7 @@ def avisar_celular(itens):
         return
     seg = (os.environ.get("PERGUNTAS_PUSH_SECRET") or "").strip()
     try:
-        r = requests.post(f"{SUPABASE_URL}/functions/v1/perguntas_push",
+        r = requests.post(f"{SUPABASE_URL}/functions/v1/{FN_PUSH}",
                           headers={"Authorization": f"Bearer {SUPABASE_KEY}", "x-app-secret": seg,
                                    "Content-Type": "application/json"},
                           data=json.dumps({"tipo": "atend", "itens": itens[:20]}), timeout=30)

@@ -64,6 +64,24 @@ def _limpar_url(bruto):
     return u
 
 
+# ---- LOJA (o painel deste robo) ----------------------------------------
+# O mesmo robo serve a Ponto Musical e o painel da Banana/Irmaos Brothers:
+# muda so' o env do workflow. SB_SCHEMA = tabelas do painel; as contas e os
+# tokens continuam na tabela 'contas' (comum).
+SB_SCHEMA = (os.environ.get("SB_SCHEMA") or "public").strip()
+FN_PERGUNTAS = (os.environ.get("FN_PERGUNTAS") or "ml_perguntas").strip()
+FN_PUSH = (os.environ.get("FN_PUSH") or "perguntas_push").strip()
+# "seller=Nome;seller=Nome" — o nome da loja na assinatura de cada conta
+MARCAS = {}
+for _par in (os.environ.get("LOJA_MARCAS") or "").split(";"):
+    if "=" in _par:
+        _k, _v = _par.split("=", 1)
+        MARCAS[_k.strip()] = _v.strip()
+
+
+def marca(sid):
+    return MARCAS.get(str(sid)) or "Ponto Musical"
+
 SUPABASE_URL = _limpar_url(os.environ.get("SUPABASE_URL", ""))
 SUPABASE_KEY = (os.environ.get("SUPABASE_KEY", "") or "").strip()
 if not SUPABASE_URL or not SUPABASE_KEY:
@@ -72,6 +90,9 @@ if not SUPABASE_URL or not SUPABASE_KEY:
 
 H = {"apikey": SUPABASE_KEY, "Authorization": "Bearer " + SUPABASE_KEY,
      "Content-Type": "application/json"}
+if SB_SCHEMA != "public":
+    # PostgREST: le (Accept) e grava (Content) nas tabelas do schema do painel
+    H.update({"Accept-Profile": SB_SCHEMA, "Content-Profile": SB_SCHEMA})
 
 
 # ---------------------------------------------------------------- Supabase
@@ -454,7 +475,7 @@ def responder_automatico():
         print("   automatico: sem PERGUNTAS_PUSH_SECRET, pulei")
         return
     try:
-        r = requests.post(f"{SUPABASE_URL}/functions/v1/ml_perguntas",
+        r = requests.post(f"{SUPABASE_URL}/functions/v1/{FN_PERGUNTAS}",
                           headers={"Authorization": f"Bearer {SUPABASE_KEY}", "x-app-secret": seg,
                                    "Content-Type": "application/json"},
                           data=json.dumps({"op": "auto"}), timeout=170)
@@ -484,7 +505,7 @@ def avisar():
     if seg:
         cab["x-app-secret"] = seg
     try:
-        r = requests.post(f"{SUPABASE_URL}/functions/v1/perguntas_push",
+        r = requests.post(f"{SUPABASE_URL}/functions/v1/{FN_PUSH}",
                           headers=cab, data="{}", timeout=30)
         if r.status_code == 404:
             print("   aviso: a funcao perguntas_push ainda nao foi publicada")
