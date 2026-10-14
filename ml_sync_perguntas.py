@@ -39,6 +39,8 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 
+import unicodedata
+
 import requests
 from supabase import create_client
 
@@ -325,6 +327,83 @@ def linha(q, item):
 
 # ------------------------------------------------------------------- main
 
+# ------------------------------------------------- catalogo de ANUNCIOS
+# A busca de anuncios do painel (tecla # na resposta) procura na tabela
+# perguntas_anuncios. Aqui ela e' renovada: todos os anuncios ATIVOS da
+# conta, a cada RENOVAR_ANUNCIOS. Preco e estoque o painel confere ao vivo.
+RENOVAR_ANUNCIOS = timedelta(hours=3)
+MAX_ANUNCIOS = 20000
+TIPOS_ANUNCIO = {"gold_pro": "Premium", "gold_special": "Clássico", "gold_premium": "Diamante",
+                 "gold": "Ouro", "silver": "Prata", "bronze": "Bronze", "free": "Grátis"}
+
+
+def sem_acento(s):
+    return "".join(c for c in unicodedata.normalize("NFD", (s or "").lower()) if unicodedata.category(c) != "Mn")
+
+
+def anuncios_em_dia(sid, agora):
+    """True se o catalogo desta conta foi renovado ha' menos de RENOVAR_ANUNCIOS."""
+    try:
+        r = sb_req("GET", f"perguntas_anuncios?seller_id=eq.{sid}&select=atualizado_em&order=atualizado_em.desc&limit=1").json()
+    except SystemExit:
+        return True          # tabela ainda nao existe (rode o sql v9): nao insiste
+    if not r:
+        return False
+    try:
+        return agora - datetime.fromisoformat(r[0]["atualizado_em"].replace("Z", "+00:00")) < RENOVAR_ANUNCIOS
+    except Exception:
+        return False
+
+
+def catalogo_de_anuncios(token, sid, apelido, agora):
+    if DRY_RUN or anuncios_em_dia(sid, agora):
+        return
+    ids, scroll = [], None
+    while len(ids) < MAX_ANUNCIOS:
+        params = {"status": "active", "search_type": "scan", "limit": 100}
+        if scroll:
+            params["scroll_id"] = scroll
+        r = ml_get(f"/users/{sid}/items/search", token, params)
+        lote = r.get("results") or []
+        if not lote:
+            break
+        ids.extend(str(x) for x in lote)
+        scroll = r.get("scroll_id")
+        if not scroll:
+            break
+    linhas, quando = [], agora.isoformat()
+    for i in range(0, len(ids), 20):
+        grupo = ids[i:i + 20]
+        try:
+            res = ml_get("/items", token, {"ids": ",".join(grupo), "attributes":
+                         "id,title,price,listing_type_id,permalink,thumbnail,available_quantity,status,seller_custom_field,catalog_listing"})
+        except Exception as e:
+            print(f"   aviso: anuncios {grupo[0]}...: {e}")
+            continue
+        for x in res or []:
+            b = (x or {}).get("body") or {}
+            if (x or {}).get("code") != 200 or not b.get("id"):
+                continue
+            sku = b.get("seller_custom_field") or None
+            linhas.append({
+                "item_id": str(b["id"]), "seller_id": str(sid), "titulo": b.get("title") or "",
+                "preco": b.get("price"), "tipo": b.get("listing_type_id"), "permalink": b.get("permalink"),
+                "thumb": str(b.get("thumbnail") or "").replace("http://", "https://") or None,
+                "estoque": b.get("available_quantity"), "sku": sku, "status": b.get("status") or "active",
+                "catalogo": bool(b.get("catalog_listing")),
+                "busca": sem_acento(" ".join(filter(None, [b.get("title"), sku, str(b["id"])]))),
+                "atualizado_em": quando,
+            })
+        time.sleep(0.1)
+    for i in range(0, len(linhas), 300):
+        sb_req("POST", "perguntas_anuncios", headers={"Prefer": "resolution=merge-duplicates,return=minimal"},
+               data=json.dumps(linhas[i:i + 300], ensure_ascii=False).encode("utf-8"))
+    # o que nao veio nesta varredura saiu do ar (pausado, finalizado)
+    if linhas:
+        sb_req("DELETE", f"perguntas_anuncios?seller_id=eq.{sid}&atualizado_em=lt.{requests.utils.quote(quando)}")
+    print(f"   catalogo: {len(linhas)} anuncio(s) ativo(s) guardados para a busca do painel")
+
+
 def main():
     sb = create_client(SUPABASE_URL, SUPABASE_KEY)
     agora = datetime.now(timezone.utc)
@@ -385,6 +464,11 @@ def main():
 
         for q in perguntas:
             todas.append((q, itens.get(str(q.get("item_id"))), str(q.get("item_id")) in pausados))
+
+        try:
+            catalogo_de_anuncios(token, sid, apelido, agora)
+        except (Exception, SystemExit) as e:   # sb_req sai com SystemExit: aqui nao derruba o robo
+            print(f"   aviso: nao renovei o catalogo de anuncios ({e})")
 
     if not todas:
         print("\nNenhuma pergunta encontrada.")
