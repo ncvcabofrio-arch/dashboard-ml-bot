@@ -61,7 +61,16 @@ WORKERS = int(os.environ.get("WORKERS", "1"))                  # >1 = processa i
 PROPAG_SLEEP = float(os.environ.get("PROPAG_SLEEP", "4"))      # respiro entre 1ª e 2ª passada (era 8s fixo)
 TIPOS_OK = {"SMART", "PRICE_MATCHING", "PRICE_MATCHING_MELI_ALL", "LIGHTNING", "DEAL",
             "DOD", "MARKETPLACE_CAMPAIGN", "VOLUME", "SELLER_CAMPAIGN",
-            "PRE_NEGOTIATED", "UNHEALTHY_STOCK", "BANK", "PRICE_DISCOUNT"}
+            "PRE_NEGOTIATED", "UNHEALTHY_STOCK", "BANK", "PRICE_DISCOUNT",
+            "SMART_LIGHTNING"}
+# ---- SMART_LIGHTNING: ENTRA ANTES, SAI DEPOIS (decisão do dono em 15/10/2026) ----
+# Relâmpago cofinanciada ("OFERTAS RELÂMPAGOS IMPERDÍVEIS"). NÃO está na doc pública
+# (a tabela de tipos lista só LIGHTNING). Nestes tipos a ESCOLHA SUA não sai de nada
+# antes: tenta entrar com as campanhas atuais de pé. Se o ML recusar, nada foi tocado.
+# Se aceitar, segue o processo normal: só sai das antigas quando a 2ª passada provar
+# que a relâmpago está 'started' — e para eles SÓ o 'started' prova (o preço não serve:
+# a SMART que já está ativa cabe na folga de 3% e daria confirmação falsa).
+TIPOS_ENTRA_ANTES = {"SMART_LIGHTNING"}
 # ===================== FILA DE REPROCESSAMENTO (tabela separada) =====================
 # Só entram aqui itens que ERRARAM ou DIVERGIRAM na entrada. Fica numa tabela PRÓPRIA
 # (repricer_promo_retry), separada da fila de aprovação, pra o painel mostrar num bloco
@@ -370,6 +379,20 @@ def corpo_post(tipo, cand, preco_alvo):
             return None
     # =========================================================================================
     oid = cand.get("ref_id") or cand.get("offer_id") or cand.get("candidate_id") or cand.get("id")
+    # (0) RELÂMPAGO COFINANCIADA (SMART_LIGHTNING) — corpo DEDUZIDO, não documentado.
+    #     O candidato (diag MLB4086772067, 15/10/2026) vem igual a uma SMART — id,
+    #     ref_id CANDIDATE-..., price fixo do ML, meli/seller_percentage — e com o
+    #     stock {min, max} da relâmpago. Então: forma da SMART + o estoque MÍNIMO.
+    #     As datas vêm do detalhe da promoção (bloco das cofinanciadas no processar).
+    if tipo == "SMART_LIGHTNING":
+        corpo = {"promotion_id": cand.get("id"), "promotion_type": tipo, "offer_id": oid}
+        st = cand.get("stock") or {}
+        try:
+            if st.get("min") is not None:
+                corpo["stock"] = int(st.get("min"))
+        except (TypeError, ValueError):
+            pass
+        return _com_datas(corpo, cand)
     # (1) cofinanciadas automatizadas / preços competitivos: id+type+offer_id
     #     (mantém as datas p/ SMART/PM como já vinha funcionando)
     if tipo in ("SMART", "PRICE_MATCHING", "PRICE_MATCHING_MELI_ALL"):
@@ -1153,6 +1176,23 @@ def confirmar_pos_entrada(fila, access):
     tipo_confirma = (ptipo is not None and str(ptipo).upper() in _tipos_ok)
     # 2) FALLBACK: status 'started' na promoção alvo
     conf_started = confirmar_entrada(iid, pid, tipo, access)
+    if tipo in TIPOS_ENTRA_ANTES:
+        # Só o 'started' prova. A SMART que já estava ativa (R$1.318 contra R$1.304,82
+        # da relâmpago no MLB4086772067) cabe na folga de 3% do preço — confirmar por
+        # preço tiraria o anúncio da SMART sem a relâmpago estar valendo.
+        preco_confirma = False
+        tipo_confirma = False
+        # 'started' com o cliente pagando MAIS que o preço dela = oferta DORMENTE (já
+        # visto: SMART aceita a R$1.400 e cliente pagando R$1.617,08 no MLB2977506201).
+        # Nesse caso não conta como confirmada: as antigas ficam de pé.
+        if conf_started is True:
+            _ref_sl = fila.get("preco_aplicado") or alvo
+            try:
+                if (pv is not None and _ref_sl not in (None, "")
+                        and float(pv) > float(_ref_sl) + 0.05):
+                    conf_started = False
+            except (TypeError, ValueError):
+                pass
     if preco_confirma or tipo_confirma or conf_started is True:
         confirmado, ret = True, "confirmado"
         prova = (f"cliente paga R${pv:.2f} agora" + (f" via {ptipo}" if ptipo else "")
@@ -1194,7 +1234,7 @@ def confirmar_pos_entrada(fila, access):
                          f"NÃO MEDI A CAUSA.")
         except (TypeError, ValueError):
             pass
-    elif (pv is not None) or (conf_started is False):
+    elif (pv is not None) or (conf_started is False) or tipo in TIPOS_ENTRA_ANTES:
         # sinal NEGATIVO real: preço ainda cheio / promo não 'started' -> volta pra fila
         confirmado, ret = False, "ativando"
         cliente = (f"cliente ainda paga R${pv:.2f}" + (f" ({ptipo})" if ptipo else " sem desconto")) if pv is not None \
@@ -1709,7 +1749,8 @@ def processar(fila, access):
     # cofinanciadas que exigem data no POST (ex.: "OFERTAS RELÂMPAGOS IMPERDÍVEIS" -> erro START_DATE):
     # o candidato não traz as datas; pega do DETALHE da promoção. As datas têm que ir em formato
     # LOCAL (sem 'Z') e o start NÃO pode ser no passado (regras da doc).
-    if tipo in ("SMART", "PRICE_MATCHING", "PRICE_MATCHING_MELI_ALL", "DEAL") and not cand.get("start_date"):
+    if tipo in ("SMART", "PRICE_MATCHING", "PRICE_MATCHING_MELI_ALL", "DEAL",
+                "SMART_LIGHTNING") and not cand.get("start_date"):
         pd = _promo_detalhe_cached(cand.get("id"), tipo, access)
         if isinstance(pd, dict):
             hoje = (datetime.now(timezone.utc) - timedelta(hours=3)).strftime("%Y-%m-%d")   # hoje em BRT
@@ -1837,7 +1878,11 @@ def processar(fila, access):
     # (201) e sem efeito no preco (MLB2977506201, SMART a R$1.400 aceita e cliente
     # pagando R$1.617,08). Vale para QUALQUER alvo, inclusive um novo individual.
     # So quando a escolha e sua: piloto e reator seguem a ordem antiga (entra, depois sai).
-    _sai_de_todas = (acao == "trocar" and bool(fila.get("escolha_manual")))
+    _sai_de_todas = (acao == "trocar" and bool(fila.get("escolha_manual"))
+                     and tipo not in TIPOS_ENTRA_ANTES)
+    if acao == "trocar" and tipo in TIPOS_ENTRA_ANTES:
+        print(f"  ~ {iid}: {tipo} — entro SEM sair de nada; só saio das atuais depois que "
+              f"a 2ª passada provar que ela está ativa (started)", flush=True)
     if _sai_de_todas:
         # PRE-VOO DA FAIXA — so quando o alvo e o desconto individual.
         # A doc do ML exige desconto entre 5% e 80%. Se o preco escolhido nao
