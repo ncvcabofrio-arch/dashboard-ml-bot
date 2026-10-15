@@ -538,7 +538,10 @@ def req_delete(path, access, tent=3):
 #  (C) promotion_type + promotion_id (SEM offer_id): DEAL, SELLER_CAMPAIGN, SELLER_COUPON_CAMPAIGN.
 TIPOS_SO_TIPO = {"PRICE_DISCOUNT", "LIGHTNING", "DOD"}
 TIPOS_COM_OFFER = {"SMART", "PRICE_MATCHING", "PRICE_MATCHING_MELI_ALL", "MARKETPLACE_CAMPAIGN",
-                   "PRE_NEGOTIATED", "UNHEALTHY_STOCK", "VOLUME", "BANK"}
+                   "PRE_NEGOTIATED", "UNHEALTHY_STOCK", "VOLUME", "BANK",
+                   # SMART_LIGHTNING: sem doc. Sem offer_id o ML devolveu 400 na saída
+                   # (MLB4086772067, 15/10/2026). O POST devolve o offer_id OFFER-...
+                   "SMART_LIGHTNING"}
 # Relâmpago e Oferta do dia, uma vez ATIVAS (started), a doc oficial diz que NÃO saem por API
 # ("Uma vez ativadas, as ofertas não podem ser removidas... pode pausar o item"). Estado terminal:
 # só pausando o anúncio ou esperando acabar estoque/horário. Não adianta reconferir/re-tentar.
@@ -2313,11 +2316,13 @@ def processar(fila, access):
                           f"{float(_mg_ped):.2f}% — saí na hora", flush=True)
                 else:
                     _ml_preso = _base_txt + (f"🚨 TENTEI SAIR E O ML RECUSOU (HTTP {_scx}) — o anúncio "
-                                             f"ESTÁ na campanha a R${_ml_preco:.2f}. Tire na mão. ")
+                                             f"ESTÁ na campanha a R${_ml_preco:.2f}. Tire na mão. "
+                                             f"[saída enviada com offer_id={_oid_ml}] "
+                                             f"resposta do ML na saída: {str(_bx)[:300]} ")
                     ML_MUDOU_PRECO.append((iid, float(ev["pb"]), _ml_preco, float(_mg_ped), _mg_ml,
                                            f"PRESO (DELETE {_scx})"))
                     print(f"  🚨 ml_mudou_preco {iid}: ML deu R${_ml_preco:.2f} ({_txt_mg}) e o DELETE "
-                          f"voltou {_scx} — FICOU na campanha", flush=True)
+                          f"voltou {_scx} — FICOU na campanha | ML disse: {str(_bx)[:200]}", flush=True)
                 # daqui pra baixo é tratado como entrada NÃO feita: numa troca as antigas
                 # ficam intactas; no "sai de todas" o robô devolve o que tirou.
                 ok = False
