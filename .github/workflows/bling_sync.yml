@@ -4,6 +4,7 @@ on:
   workflow_dispatch:       # botão manual
   schedule:
     - cron: "0 9 * * *"    # todo dia ~06h de Brasília (09h UTC)
+    - cron: "0 21 * * *"    # ~18h de Brasília
 jobs:
   sync:
     runs-on: ubuntu-latest
