@@ -1,0 +1,22 @@
+name: Bling - avisar notas novas
+# Roda sozinho logo depois do "Bling - contas a pagar" e avisa no Telegram as notas novas.
+on:
+  workflow_run:
+    workflows: ["Bling - contas a pagar"]
+    types: [completed]
+  workflow_dispatch:       # botão manual
+jobs:
+  avisar:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python notas_avisos.py
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
